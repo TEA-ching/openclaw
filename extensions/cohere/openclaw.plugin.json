@@ -165,7 +165,7 @@
     "providers": [
       {
         "id": "cohere",
-        "envVars": ["COHERE_API_KEY"]
+        "envVars": ["COHERE_API_KEY", "COHERE_API_KEYS"]
       }
     ]
   },

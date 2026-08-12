@@ -7,7 +7,7 @@
     "providers": [
       {
         "id": "firecrawl",
-        "envVars": ["FIRECRAWL_API_KEY"]
+        "envVars": ["FIRECRAWL_API_KEY", "FIRECRAWL_API_KEYS"]
       }
     ]
   },

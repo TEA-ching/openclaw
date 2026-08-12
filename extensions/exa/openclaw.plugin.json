@@ -7,7 +7,7 @@
     "providers": [
       {
         "id": "exa",
-        "envVars": ["EXA_API_KEY"]
+        "envVars": ["EXA_API_KEY", "EXA_API_KEYS"]
       }
     ]
   },

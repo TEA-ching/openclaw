@@ -135,7 +135,7 @@
     "providers": [
       {
         "id": "mistral",
-        "envVars": ["MISTRAL_API_KEY"]
+        "envVars": ["MISTRAL_API_KEY", "MISTRAL_API_KEYS"]
       }
     ]
   },

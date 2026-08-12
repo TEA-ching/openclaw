@@ -2,6 +2,10 @@
 import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
 import { readResponseTextLimited } from "openclaw/plugin-sdk/provider-http";
 import {
+  collectProviderApiKeysForExecution,
+  executeWithApiKeyRotation,
+} from "openclaw/plugin-sdk/provider-auth-runtime";
+import {
   buildSearchCacheKey,
   DEFAULT_SEARCH_COUNT,
   mergeScopedSearchConfig,
@@ -562,19 +566,29 @@ export async function executeExaWebSearchProviderTool(
   }
 
   const start = Date.now();
-  const results = await runExaSearch({
-    apiKey,
-    endpoint,
-    query,
-    count: resolvedCount,
-    freshness,
-    dateAfter,
-    dateBefore,
-    type,
-    contents,
-    timeoutSeconds: resolveSearchTimeoutSeconds(searchConfig),
-    signal,
-  });
+  const apiKeys = collectProviderApiKeysForExecution({ provider: "exa", primaryApiKey: apiKey });
+  const runSearchWithKey = (searchApiKey: string) =>
+    runExaSearch({
+      apiKey: searchApiKey,
+      endpoint,
+      query,
+      count: resolvedCount,
+      freshness,
+      dateAfter,
+      dateBefore,
+      type,
+      contents,
+      timeoutSeconds: resolveSearchTimeoutSeconds(searchConfig),
+      signal,
+    });
+  const results =
+    apiKeys.length > 1
+      ? await executeWithApiKeyRotation({
+          provider: "exa",
+          apiKeys,
+          execute: runSearchWithKey,
+        })
+      : await runSearchWithKey(apiKey);
 
   signal?.throwIfAborted();
   const payload = {

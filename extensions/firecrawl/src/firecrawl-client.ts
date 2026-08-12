@@ -2,6 +2,10 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { readProviderJsonObjectResponse } from "openclaw/plugin-sdk/provider-http";
 import {
+  collectProviderApiKeysForExecution,
+  executeWithApiKeyRotation,
+} from "openclaw/plugin-sdk/provider-auth-runtime";
+import {
   DEFAULT_CACHE_TTL_MINUTES,
   markdownToText,
   normalizeCacheKey,
@@ -274,6 +278,29 @@ async function postFirecrawlJson<T>(
   );
 }
 
+/** Runs a Firecrawl POST across configured key pools, rotating past rate limits. */
+async function postFirecrawlJsonWithRotation<T>(
+  params: Parameters<typeof postFirecrawlJson>[0],
+  parse: (response: Response) => Promise<T>,
+): Promise<T> {
+  const { apiKey, ...rest } = params;
+  if (!apiKey) {
+    return postFirecrawlJson({ ...rest, apiKey }, parse);
+  }
+  const apiKeys = collectProviderApiKeysForExecution({
+    provider: "firecrawl",
+    primaryApiKey: apiKey,
+  });
+  if (apiKeys.length <= 1) {
+    return postFirecrawlJson({ ...rest, apiKey }, parse);
+  }
+  return executeWithApiKeyRotation({
+    provider: "firecrawl",
+    apiKeys,
+    execute: (rotatedApiKey) => postFirecrawlJson({ ...rest, apiKey: rotatedApiKey }, parse),
+  });
+}
+
 function resolveSiteName(urlRaw: string): string | undefined {
   try {
     const host = new URL(urlRaw).hostname.replace(/^www\./, "");
@@ -498,7 +525,7 @@ export async function runFirecrawlSearch(
 
   const start = Date.now();
   const endpoint = await resolveEndpoint(baseUrl, "/v2/search");
-  const payload = await postFirecrawlJson(
+  const payload = await postFirecrawlJsonWithRotation(
     {
       url: endpoint.url,
       mode: endpoint.mode,
@@ -668,7 +695,7 @@ export async function runFirecrawlScrape(
   }
 
   const endpoint = await resolveEndpoint(baseUrl, "/v2/scrape");
-  const payload = await postFirecrawlJson(
+  const payload = await postFirecrawlJsonWithRotation(
     {
       url: endpoint.url,
       mode: endpoint.mode,

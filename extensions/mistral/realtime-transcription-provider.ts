@@ -7,6 +7,7 @@ import {
   type RealtimeTranscriptionSessionCreateRequest,
   type RealtimeTranscriptionWebSocketTransport,
 } from "openclaw/plugin-sdk/realtime-transcription";
+import { collectProviderApiKeysForExecution } from "openclaw/plugin-sdk/provider-auth-runtime";
 import {
   normalizeResolvedSecretInputString,
   normalizeSecretInput,
@@ -149,6 +150,15 @@ function normalizeMistralApiKey(value: unknown): string | undefined {
     path: "plugins.entries.voice-call.config.streaming.providers.mistral.apiKey",
   });
   return normalizeSecretInput(resolved) || undefined;
+}
+
+// A realtime session pins one API key for its lifetime (the WS auth header is
+// fixed at connect time), so key rotation across a key pool does not apply
+// here the way it does for retryable HTTP requests. Still resolve from the
+// full MISTRAL_API_KEY/MISTRAL_API_KEYS pool so activation and env fallback
+// stay consistent with the other Mistral capabilities.
+function resolveMistralEnvApiKey(): string | undefined {
+  return collectProviderApiKeysForExecution({ provider: "mistral" })[0];
 }
 
 function readErrorDetail(event: MistralRealtimeTranscriptionEvent): string {
@@ -318,13 +328,10 @@ export function buildMistralRealtimeTranscriptionProvider(): RealtimeTranscripti
     autoSelectOrder: 45,
     resolveConfig: ({ rawConfig }) => normalizeProviderConfig(rawConfig),
     isConfigured: ({ providerConfig }) =>
-      Boolean(
-        normalizeProviderConfig(providerConfig).apiKey ||
-        normalizeMistralApiKey(process.env.MISTRAL_API_KEY),
-      ),
+      Boolean(normalizeProviderConfig(providerConfig).apiKey || resolveMistralEnvApiKey()),
     createSession: (req) => {
       const config = normalizeProviderConfig(req.providerConfig);
-      const apiKey = config.apiKey || normalizeMistralApiKey(process.env.MISTRAL_API_KEY);
+      const apiKey = config.apiKey || resolveMistralEnvApiKey();
       if (!apiKey) {
         throw new Error("Mistral API key missing");
       }
