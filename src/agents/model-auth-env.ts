@@ -164,8 +164,13 @@ export function resolveEnvApiKey(
     if (!value) {
       return null;
     }
+    // Candidate lists mix single-value vars (PROVIDER_API_KEY) with pool vars
+    // (PROVIDER_API_KEYS, comma/semicolon/whitespace-separated). This resolver
+    // returns exactly one credential, so take the pool's first entry rather
+    // than handing the whole raw list to a caller expecting a single key.
+    const firstEntry = value.split(/[\s,;]+/u).find((entry) => entry.length > 0) ?? value;
     const source = applied.has(envVar) ? `shell env: ${envVar}` : `env: ${envVar}`;
-    return { apiKey: value, source };
+    return { apiKey: firstEntry, source };
   };
 
   const candidates = Object.hasOwn(candidateMap, normalized) ? candidateMap[normalized] : undefined;
