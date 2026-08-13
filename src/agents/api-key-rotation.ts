@@ -7,6 +7,8 @@ import { toErrorObject as toLintErrorObject } from "@openclaw/normalization-core
 import { normalizeUniqueStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { sleepWithAbort } from "../infra/backoff.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import type { AssistantMessageEventStreamLike, Context, Model, StreamFn } from "../llm/types.js";
+import { createAssistantMessageEventStream } from "../llm/utils/event-stream.js";
 import {
   resolveTransientProviderAttempts,
   resolveTransientProviderDelayMs,
@@ -107,4 +109,73 @@ export async function executeWithApiKeyRotation<T>(
     throw new Error(`Failed to run API request for ${params.provider}.`);
   }
   throw toLintErrorObject(lastError, "Non-Error thrown");
+}
+
+/**
+ * Wraps a streaming provider's `StreamFn` so it rotates through a configured
+ * API-key pool when the very first stream event is a rate-limit error, i.e.
+ * the request never opened. Once any other event has been observed the
+ * stream is committed to its current key; rotation never discards or repeats
+ * in-flight output. Providers whose transport already resolves apiKey pools
+ * itself (rather than accepting `options.apiKey`) are not covered by this
+ * wrapper.
+ */
+export function createStreamApiKeyRotationWrapper(
+  provider: string,
+): (streamFn: StreamFn | undefined) => StreamFn | undefined {
+  return (streamFn) => {
+    if (!streamFn) {
+      return undefined;
+    }
+    return (model, context, options) =>
+      runStreamWithApiKeyRotation({ provider, streamFn, model, context, options });
+  };
+}
+
+async function runStreamWithApiKeyRotation(params: {
+  provider: string;
+  streamFn: StreamFn;
+  model: Model;
+  context: Context;
+  options?: Parameters<StreamFn>[2];
+}): Promise<AssistantMessageEventStreamLike> {
+  const primaryApiKey = params.options?.apiKey;
+  const apiKeys = collectProviderApiKeysForExecution({
+    provider: params.provider,
+    primaryApiKey,
+  });
+  if (apiKeys.length <= 1) {
+    return params.streamFn(params.model, params.context, params.options);
+  }
+
+  const output = createAssistantMessageEventStream();
+  for (const [index, apiKey] of apiKeys.entries()) {
+    const attemptStream = await params.streamFn(params.model, params.context, {
+      ...params.options,
+      apiKey,
+    });
+    const iterator = attemptStream[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    if (first.done) {
+      // No events at all; nothing to rotate on. Commit this (empty) attempt.
+      output.end(await attemptStream.result());
+      return output;
+    }
+    const firstEvent = first.value;
+    const isRotatableFailure =
+      firstEvent.type === "error" &&
+      firstEvent.reason === "error" &&
+      isApiKeyRateLimitError(firstEvent.error.errorMessage ?? "");
+    const hasRemainingKeys = index + 1 < apiKeys.length;
+    if (isRotatableFailure && hasRemainingKeys) {
+      continue;
+    }
+    output.push(firstEvent);
+    for (let next = await iterator.next(); !next.done; next = await iterator.next()) {
+      output.push(next.value);
+    }
+    return output;
+  }
+  // Unreachable: the loop above always returns on its last iteration.
+  throw new Error(`Exhausted API-key rotation for provider "${params.provider}" without a result.`);
 }

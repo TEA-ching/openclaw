@@ -15,6 +15,7 @@ import { resolveTimerTimeoutMs } from "../shared/number-coercion.js";
 export { resolveEnvApiKey } from "../agents/model-auth-env.js";
 export {
   collectProviderApiKeysForExecution,
+  createStreamApiKeyRotationWrapper,
   executeWithApiKeyRotation,
 } from "../agents/api-key-rotation.js";
 export { NON_ENV_SECRETREF_MARKER } from "../agents/model-auth-markers.js";

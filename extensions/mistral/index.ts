@@ -1,3 +1,4 @@
+import { createStreamApiKeyRotationWrapper } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { defineSingleProviderPluginEntry } from "openclaw/plugin-sdk/provider-entry";
 import {
   applyMistralModelCompat,
@@ -42,6 +43,9 @@ export default defineSingleProviderPluginEntry({
         ? { levels: [{ id: "off" }, { id: "high" }], defaultLevel: "off" }
         : undefined,
     buildReplayPolicy: () => buildMistralReplayPolicy(),
+    wrapStreamFn: (ctx) => createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn),
+    wrapSimpleCompletionStreamFn: (ctx) =>
+      createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn),
   },
   register(api) {
     api.registerMemoryEmbeddingProvider(mistralMemoryEmbeddingProviderAdapter);
