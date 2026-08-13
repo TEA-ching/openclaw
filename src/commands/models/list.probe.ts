@@ -839,6 +839,12 @@ async function probeTarget(params: {
       model: target.model.model,
       authProfileId: isolatedProfileId ?? target.profileId,
       authProfileIdSource: isolatedProfileId || target.profileId ? "user" : undefined,
+      // A live Gateway rebinds "run"-provenance prepared model runtimes to its
+      // already-committed agent owner, discarding a one-off agentDir override
+      // (see rebindInputToCommittedConfiguredOwner). The isolated probe profile
+      // dir would silently resolve back to the real agent dir and read as
+      // missing. "isolated-read-only" provenance is exempt from that rebind.
+      ...(isolatedAgentDir ? { preparedModelRuntimeMode: "isolated-read-only" as const } : {}),
       timeoutMs,
       runId,
       lane: `auth-probe:${target.provider}:${target.profileId ?? target.source}`,
