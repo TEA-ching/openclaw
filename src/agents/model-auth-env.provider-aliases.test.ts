@@ -152,3 +152,37 @@ describe("resolveEnvApiKey provider auth aliases", () => {
     expect(setupRegistryMocks.resolvePluginSetupProviderCore).not.toHaveBeenCalled();
   });
 });
+
+describe("resolveEnvApiKey pool var single-key extraction", () => {
+  const candidateMap = { cohere: ["COHERE_API_KEY", "COHERE_API_KEYS"] };
+
+  it("returns only the first entry when the singular var is unset and the pool var is comma-separated", () => {
+    expect(
+      resolveEnvApiKey("cohere", { COHERE_API_KEYS: "key-1,key-2,key-3" } as NodeJS.ProcessEnv, {
+        candidateMap,
+        aliasMap: {},
+        authEvidenceMap: {},
+      }),
+    ).toEqual({ apiKey: "key-1", source: "env: COHERE_API_KEYS" });
+  });
+
+  it("trims semicolon- and whitespace-separated pool entries the same way", () => {
+    expect(
+      resolveEnvApiKey("cohere", { COHERE_API_KEYS: "  key-1 ; key-2" } as NodeJS.ProcessEnv, {
+        candidateMap,
+        aliasMap: {},
+        authEvidenceMap: {},
+      }),
+    ).toEqual({ apiKey: "key-1", source: "env: COHERE_API_KEYS" });
+  });
+
+  it("still prefers the singular var untouched when only one key is configured there", () => {
+    expect(
+      resolveEnvApiKey("cohere", { COHERE_API_KEY: "solo-key" } as NodeJS.ProcessEnv, {
+        candidateMap,
+        aliasMap: {},
+        authEvidenceMap: {},
+      }),
+    ).toEqual({ apiKey: "solo-key", source: "env: COHERE_API_KEY" });
+  });
+});
