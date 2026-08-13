@@ -86,7 +86,9 @@ describe("Cohere provider plugin", () => {
         cliFlag: "--cohere-api-key",
       }),
     ]);
-    expect(manifest.setup.providers).toEqual([{ id: "cohere", envVars: ["COHERE_API_KEY"] }]);
+    expect(manifest.setup.providers).toEqual([
+      { id: "cohere", envVars: ["COHERE_API_KEY", "COHERE_API_KEYS"] },
+    ]);
   });
 
   it("exposes the static Cohere catalog", () => {

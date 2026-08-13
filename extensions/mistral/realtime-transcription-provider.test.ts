@@ -122,6 +122,15 @@ describe("buildMistralRealtimeTranscriptionProvider", () => {
     expect(() => provider.createSession({ providerConfig: {} })).toThrow("Mistral API key missing");
   });
 
+  it("falls back to a MISTRAL_API_KEYS pool when the singular env var is unset", () => {
+    vi.stubEnv("MISTRAL_API_KEY", "");
+    vi.stubEnv("MISTRAL_API_KEYS", "sk-pool-1,sk-pool-2");
+    const provider = buildMistralRealtimeTranscriptionProvider();
+
+    expect(provider.isConfigured?.({ providerConfig: {} })).toBe(true);
+    expect(() => provider.createSession({ providerConfig: {} })).not.toThrow();
+  });
+
   it("connects through the public session boundary with the configured URL params", async () => {
     const requests: URL[] = [];
     const baseUrl = await createRealtimeServer((url) => requests.push(url));

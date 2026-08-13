@@ -330,6 +330,65 @@ describe("firecrawl tools", () => {
     expect(JSON.stringify(result)).not.toContain("<s>");
   });
 
+  it("rotates to the next pooled key after a Firecrawl search rate-limit response", async () => {
+    vi.stubEnv("FIRECRAWL_API_KEYS", "firecrawl-secret,firecrawl-secret-2");
+    global.fetch = vi.fn(async (_url, init) => {
+      const usedKey = (init as RequestInit | undefined)?.headers as
+        | Record<string, string>
+        | undefined;
+      if (usedKey?.Authorization === "Bearer firecrawl-secret") {
+        return new Response("rate limited", { status: 429 });
+      }
+      return Response.json({ success: true, data: [] });
+    }) as typeof fetch;
+
+    const result = await runActualFirecrawlSearch({
+      cfg: {
+        plugins: {
+          entries: { firecrawl: { config: { webSearch: { apiKey: "firecrawl-secret" } } } },
+        },
+      } as OpenClawConfig,
+      query: "firecrawl key rotation",
+    });
+
+    expect(result.results).toEqual([]);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const calls = (global.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect((calls[0]?.[1]?.headers as Record<string, string>).Authorization).toBe(
+      "Bearer firecrawl-secret",
+    );
+    expect((calls[1]?.[1]?.headers as Record<string, string>).Authorization).toBe(
+      "Bearer firecrawl-secret-2",
+    );
+  });
+
+  it("rotates to the next pooled key after a Firecrawl scrape rate-limit response", async () => {
+    vi.stubEnv("FIRECRAWL_API_KEYS", "firecrawl-secret,firecrawl-secret-2");
+    global.fetch = vi.fn(async (_url, init) => {
+      const usedKey = (init as RequestInit | undefined)?.headers as
+        | Record<string, string>
+        | undefined;
+      if (usedKey?.Authorization === "Bearer firecrawl-secret") {
+        return new Response("rate limited", { status: 429 });
+      }
+      return Response.json({ success: true, data: { markdown: "hello" } });
+    }) as typeof fetch;
+
+    const result = await runActualFirecrawlScrape({
+      cfg: {
+        plugins: {
+          entries: { firecrawl: { config: { webFetch: { apiKey: "firecrawl-secret" } } } },
+        },
+      } as OpenClawConfig,
+      url: "https://example.com/firecrawl-rotation",
+      extractMode: "markdown",
+      maxChars: 1_000,
+    });
+
+    expect(result.text).toContain("hello");
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("bounds final Firecrawl scrape bodies and metadata after special-token expansion", () => {
     const result = firecrawlClientTesting.parseFirecrawlScrapePayload({
       payload: {

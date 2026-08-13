@@ -3,9 +3,57 @@
  * Covers rate-limit key rotation, same-key transient retries, aborts, and
  * thrown-object preservation.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AssistantMessage, AssistantMessageEvent, StreamFn } from "../llm/types.js";
 import type { TransientProviderRetryParams } from "../provider-runtime/operation-retry.js";
-import { executeWithApiKeyRotation } from "./api-key-rotation.js";
+import {
+  createStreamApiKeyRotationWrapper,
+  executeWithApiKeyRotation,
+} from "./api-key-rotation.js";
+
+function fakeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [],
+    api: "openai-completions" as never,
+    provider: "acme" as never,
+    model: "acme-model",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+    stopReason: "stop",
+    timestamp: 0,
+    ...overrides,
+  };
+}
+
+function fakeEventStream(events: AssistantMessageEvent[]) {
+  const terminal = events.find(
+    (event): event is Extract<AssistantMessageEvent, { type: "done" | "error" }> =>
+      event.type === "done" || event.type === "error",
+  );
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const event of events) {
+        yield event;
+      }
+    },
+    async result(): Promise<AssistantMessage> {
+      if (!terminal) {
+        throw new Error("fake stream has no terminal event");
+      }
+      return terminal.type === "done" ? terminal.message : terminal.error;
+    },
+  };
+}
+
+async function collectEventTypes(stream: {
+  [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent>;
+}) {
+  const types: AssistantMessageEvent["type"][] = [];
+  for await (const event of stream) {
+    types.push(event.type);
+  }
+  return types;
+}
 
 function abortError(message: string): Error {
   return Object.assign(new Error(message), { name: "AbortError" });
@@ -331,5 +379,139 @@ describe("executeWithApiKeyRotation", () => {
         attemptNumber: 1,
       }),
     );
+  });
+});
+
+describe("createStreamApiKeyRotationWrapper", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns the input unchanged when no streamFn is given", () => {
+    expect(createStreamApiKeyRotationWrapper("acme")(undefined)).toBeUndefined();
+  });
+
+  it("calls straight through with a single configured key", async () => {
+    const streamFn = vi.fn<StreamFn>(async () =>
+      fakeEventStream([
+        { type: "start", partial: fakeAssistantMessage() },
+        { type: "done", reason: "stop", message: fakeAssistantMessage() },
+      ]),
+    );
+
+    const wrapped = createStreamApiKeyRotationWrapper("acme-solo")(streamFn);
+    const stream = await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" });
+
+    await expect(collectEventTypes(stream!)).resolves.toEqual(["start", "done"]);
+    expect(streamFn).toHaveBeenCalledTimes(1);
+    expect(streamFn).toHaveBeenCalledWith({}, { messages: [] }, { apiKey: "key-1" });
+  });
+
+  it("rotates to the next key when the first event is a rate-limit error", async () => {
+    vi.stubEnv("ACME_ROTATE_API_KEYS", "key-1,key-2");
+    const streamFn = vi.fn<StreamFn>(async (_model, _context, options) => {
+      if (options?.apiKey === "key-1") {
+        return fakeEventStream([
+          {
+            type: "error",
+            reason: "error",
+            error: fakeAssistantMessage({ errorMessage: "HTTP 429 too many requests" }),
+          },
+        ]);
+      }
+      return fakeEventStream([
+        { type: "start", partial: fakeAssistantMessage() },
+        { type: "done", reason: "stop", message: fakeAssistantMessage() },
+      ]);
+    });
+
+    const wrapped = createStreamApiKeyRotationWrapper("acme-rotate")(streamFn);
+    const stream = await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" });
+
+    await expect(collectEventTypes(stream!)).resolves.toEqual(["start", "done"]);
+    expect(streamFn).toHaveBeenCalledTimes(2);
+    expect(streamFn).toHaveBeenNthCalledWith(1, {}, { messages: [] }, { apiKey: "key-1" });
+    expect(streamFn).toHaveBeenNthCalledWith(2, {}, { messages: [] }, { apiKey: "key-2" });
+  });
+
+  it("never rotates once a non-error first event has started the stream", async () => {
+    vi.stubEnv("ACME_COMMIT_API_KEYS", "key-1,key-2");
+    const streamFn = vi.fn<StreamFn>(async () =>
+      fakeEventStream([
+        { type: "start", partial: fakeAssistantMessage() },
+        {
+          type: "error",
+          reason: "error",
+          error: fakeAssistantMessage({ errorMessage: "HTTP 429 too many requests" }),
+        },
+      ]),
+    );
+
+    const wrapped = createStreamApiKeyRotationWrapper("acme-commit")(streamFn);
+    const stream = await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" });
+
+    await expect(collectEventTypes(stream!)).resolves.toEqual(["start", "error"]);
+    expect(streamFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rotate a non-rate-limit error", async () => {
+    vi.stubEnv("ACME_BADREQ_API_KEYS", "key-1,key-2");
+    const streamFn = vi.fn<StreamFn>(async () =>
+      fakeEventStream([
+        {
+          type: "error",
+          reason: "error",
+          error: fakeAssistantMessage({ errorMessage: "invalid request: bad model id" }),
+        },
+      ]),
+    );
+
+    const wrapped = createStreamApiKeyRotationWrapper("acme-badreq")(streamFn);
+    const stream = await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" });
+
+    await expect(collectEventTypes(stream!)).resolves.toEqual(["error"]);
+    expect(streamFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rotate an aborted stream even with rate-limit wording", async () => {
+    vi.stubEnv("ACME_ABORT_API_KEYS", "key-1,key-2");
+    const streamFn = vi.fn<StreamFn>(async () =>
+      fakeEventStream([
+        {
+          type: "error",
+          reason: "aborted",
+          error: fakeAssistantMessage({ errorMessage: "HTTP 429 too many requests" }),
+        },
+      ]),
+    );
+
+    const wrapped = createStreamApiKeyRotationWrapper("acme-abort")(streamFn);
+    const stream = await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" });
+
+    await expect(collectEventTypes(stream!)).resolves.toEqual(["error"]);
+    expect(streamFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the last error once every key in the pool is exhausted", async () => {
+    vi.stubEnv("ACME_EXHAUST_API_KEYS", "key-1,key-2");
+    const streamFn = vi.fn<StreamFn>(async (_model, _context, options) =>
+      fakeEventStream([
+        {
+          type: "error",
+          reason: "error",
+          error: fakeAssistantMessage({
+            errorMessage: `HTTP 429 too many requests (${options?.apiKey})`,
+          }),
+        },
+      ]),
+    );
+
+    const wrapped = createStreamApiKeyRotationWrapper("acme-exhaust")(streamFn);
+    const stream = await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" });
+
+    await expect(collectEventTypes(stream!)).resolves.toEqual(["error"]);
+    expect(streamFn).toHaveBeenCalledTimes(2);
+    const finalMessage = await stream!.result();
+    expect(finalMessage.errorMessage).toBe("HTTP 429 too many requests (key-2)");
   });
 });

@@ -1,5 +1,5 @@
 // Exa tests cover exa web search provider plugin behavior.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { testing } from "../test-api.js";
 import { createExaWebSearchProvider as createContractExaWebSearchProvider } from "../web-search-contract-api.js";
 import { createExaWebSearchProvider } from "./exa-web-search-provider.js";
@@ -54,6 +54,47 @@ function streamingJsonResponse(params: { chunkCount: number; chunkSize: number }
 }
 
 describe("exa web search provider", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("rotates to the next pooled key after a rate-limit response", async () => {
+    vi.stubEnv("EXA_API_KEYS", "exa-secret,exa-secret-2");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const usedKey = (init?.headers as Record<string, string> | undefined)?.["x-api-key"];
+      if (usedKey === "exa-secret") {
+        return new Response("rate limited", { status: 429 });
+      }
+      return new Response(JSON.stringify({ results: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const tool = createExaWebSearchProvider().createTool({
+      config: {
+        plugins: { entries: { exa: { config: { webSearch: { apiKey: "exa-secret" } } } } },
+      },
+      searchConfig: {},
+    });
+    if (!tool) {
+      throw new Error("Expected tool definition");
+    }
+
+    try {
+      const result = await tool.execute({ query: "exa key rotation" });
+      expect(result).not.toHaveProperty("error");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect((fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>)["x-api-key"]).toBe(
+        "exa-secret",
+      );
+      expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>)["x-api-key"]).toBe(
+        "exa-secret-2",
+      );
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("does not send or cache an already canceled search", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ results: [] }), {
