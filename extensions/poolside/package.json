@@ -1,0 +1,22 @@
+{
+  "name": "@poolside/openclaw-provider",
+  "version": "1.0.2",
+  "description": "Poolside Laguna model provider plugin for OpenClaw (vendored, patched for API-key pool rotation).",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/poolsideai/openclaw-provider"
+  },
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    }
+  }
+}
