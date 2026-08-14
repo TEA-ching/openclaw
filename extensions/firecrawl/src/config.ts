@@ -1,6 +1,7 @@
 // Firecrawl helper module supports config behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { canResolveEnvSecretRefInReadOnlyPath } from "openclaw/plugin-sdk/extension-shared";
+import { collectProviderApiKeysForExecution } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { resolvePositiveTimeoutSeconds } from "openclaw/plugin-sdk/provider-web-fetch";
 import { resolveSecretInputString, normalizeSecretInput } from "openclaw/plugin-sdk/secret-input";
 
@@ -130,7 +131,15 @@ export function resolveFirecrawlApiKey(cfg?: OpenClawConfig): string | undefined
   if (blockedConfiguredSecret) {
     return undefined;
   }
-  return normalizeSecretInput(process.env[FIRECRAWL_API_KEY_ENV_VAR]) || undefined;
+  // Pool-only deployments (FIRECRAWL_API_KEYS, no singular FIRECRAWL_API_KEY)
+  // still need one key here: callers that gate on "!apiKey" before ever
+  // reaching collectProviderApiKeysForExecution's rotation would otherwise
+  // dispatch with no key at all.
+  return (
+    normalizeSecretInput(process.env[FIRECRAWL_API_KEY_ENV_VAR]) ||
+    collectProviderApiKeysForExecution({ provider: "firecrawl" })[0] ||
+    undefined
+  );
 }
 
 export function resolveFirecrawlBaseUrl(cfg?: OpenClawConfig): string {

@@ -11,7 +11,11 @@ export function createExaWebSearchProviderBase() {
     hint: "Neural + keyword search with date filters and content extraction",
     onboardingScopes: [...EXA_ONBOARDING_SCOPES],
     credentialLabel: "Exa API key",
-    envVars: ["EXA_API_KEY"],
+    // Detection also accepts the EXA_API_KEYS pool var (comma/semicolon/
+    // whitespace-separated). collectProviderApiKeys() already rotates through
+    // that pool at request time regardless of this list; without it here,
+    // a pool-only deployment never registers Exa as a candidate provider.
+    envVars: ["EXA_API_KEY", "EXA_API_KEYS"],
     placeholder: "exa-...",
     signupUrl: "https://exa.ai/",
     docsUrl: "https://docs.openclaw.ai/tools/web",

@@ -1,10 +1,10 @@
 // Exa provider module implements model/runtime integration.
 import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
-import { readResponseTextLimited } from "openclaw/plugin-sdk/provider-http";
 import {
   collectProviderApiKeysForExecution,
   executeWithApiKeyRotation,
 } from "openclaw/plugin-sdk/provider-auth-runtime";
+import { readResponseTextLimited } from "openclaw/plugin-sdk/provider-http";
 import {
   buildSearchCacheKey,
   DEFAULT_SEARCH_COUNT,
@@ -117,7 +117,12 @@ function resolveExaConfig(searchConfig?: SearchConfigRecord): ExaConfig {
 function resolveExaApiKey(exa?: ExaConfig): string | undefined {
   return (
     readConfiguredSecretString(exa?.apiKey, "plugins.entries.exa.config.webSearch.apiKey") ??
-    readProviderEnvValue(["EXA_API_KEY"])
+    readProviderEnvValue(["EXA_API_KEY"]) ??
+    // Pool-only deployments (EXA_API_KEYS, no singular EXA_API_KEY) still need
+    // one key here: this guard runs before collectProviderApiKeysForExecution
+    // ever sees the pool below, so without this fallback dispatch never
+    // starts. That call already parses/rotates the same pool afterward.
+    collectProviderApiKeysForExecution({ provider: "exa" })[0]
   );
 }
 

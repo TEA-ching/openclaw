@@ -35,7 +35,11 @@ export function buildFirecrawlWebSearchProviderBase(): Omit<WebSearchProviderPlu
     hint: "Structured results with optional result scraping",
     onboardingScopes: ["text-inference"],
     credentialLabel: "Firecrawl API key",
-    envVars: ["FIRECRAWL_API_KEY"],
+    // Detection also accepts the FIRECRAWL_API_KEYS pool var (comma/semicolon/
+    // whitespace-separated). collectProviderApiKeys() already rotates through
+    // that pool at request time regardless of this list; without it here,
+    // a pool-only deployment never registers Firecrawl as a candidate provider.
+    envVars: ["FIRECRAWL_API_KEY", "FIRECRAWL_API_KEYS"],
     placeholder: "fc-...",
     signupUrl: "https://www.firecrawl.dev/",
     docsUrl: "https://docs.openclaw.ai/tools/firecrawl",

@@ -17,7 +17,9 @@ export const FIRECRAWL_WEB_FETCH_PROVIDER_SHARED = {
   hint: "Fetch pages with keyless starter access; add a key for higher limits.",
   requiresCredential: false,
   credentialLabel: "Firecrawl API key (optional)",
-  envVars: ["FIRECRAWL_API_KEY"],
+  // Detection also accepts the FIRECRAWL_API_KEYS pool var (comma/semicolon/
+  // whitespace-separated), matching the web-search provider above.
+  envVars: ["FIRECRAWL_API_KEY", "FIRECRAWL_API_KEYS"],
   placeholder: "fc-...",
   signupUrl: "https://www.firecrawl.dev/",
   docsUrl: "https://docs.firecrawl.dev",
