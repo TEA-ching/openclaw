@@ -249,7 +249,13 @@ export function collectBundledPluginBuildEntries(params = {}) {
     if (!shouldBuildBundledDistEntry(packageJson) && !dockerSelectedBuildIds?.has(dirName)) {
       continue;
     }
-    if (EXCLUDED_CORE_BUNDLED_PLUGIN_DIRS.has(dirName)) {
+    // A Docker build that explicitly selects an excluded-by-default external
+    // plugin (e.g. whatsapp, qqbot) opts into bundling it, mirroring the
+    // shouldBuildBundledDistEntry bypass above. Without this, #103629's
+    // Docker-selection override silently never reaches these plugins: their
+    // dist entry is skipped with no error, so the image ships their source
+    // but never compiles it.
+    if (EXCLUDED_CORE_BUNDLED_PLUGIN_DIRS.has(dirName) && !dockerSelectedBuildIds?.has(dirName)) {
       continue;
     }
 
