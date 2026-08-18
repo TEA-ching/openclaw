@@ -1,0 +1,215 @@
+//
+//  MobileBrokerSessionStore.swift
+//
+//  Created for OpenClaw mobile authentication
+//
+
+import Foundation
+import Security
+
+/// Stores mobile broker session credentials in the Keychain
+public final class MobileBrokerSessionStore: Sendable {
+    
+    // MARK: - Types
+    
+    /// Represents a stored mobile broker session
+    public struct Session: Codable, Sendable {
+        public let accessToken: String
+        public let refreshToken: String
+        public let accessExpiresAt: Date
+        public let refreshExpiresAt: Date
+        public let brokerDeviceID: String
+        public let brokerHostname: String
+        
+        public init(
+            accessToken: String,
+            refreshToken: String,
+            accessExpiresAt: Date,
+            refreshExpiresAt: Date,
+            brokerDeviceID: String,
+            brokerHostname: String
+        ) {
+            self.accessToken = accessToken
+            self.refreshToken = refreshToken
+            self.accessExpiresAt = accessExpiresAt
+            self.refreshExpiresAt = refreshExpiresAt
+            self.brokerDeviceID = brokerDeviceID
+            self.brokerHostname = brokerHostname
+        }
+    }
+    
+    // MARK: - Properties
+    
+    private let accessGroup: String?
+    
+    // MARK: - Initialization
+    
+    /// Initialize with an optional access group for sharing between app and extension
+    /// - Parameter accessGroup: The Keychain access group (e.g., "TEAMID.com.your.app")
+    public init(accessGroup: String? = nil) {
+        self.accessGroup = accessGroup
+    }
+    
+    // MARK: - Keychain Keys
+    
+    private func keychainKey(for gatewayStableID: String) -> String {
+        return "com.openclaw.mobileBrokerSession.\{gatewayStableID}"
+    }
+    
+    // MARK: - Store Session
+    
+    /// Stores a mobile broker session for a gateway
+    /// - Parameters:
+    ///   - session: The session to store
+    ///   - gatewayStableID: The stable identifier of the gateway
+    /// - Throws: Keychain error
+    public func storeSession(_ session: Session, forGatewayStableID gatewayStableID: String) throws {
+        let data = try JSONEncoder().encode(session)
+        
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: keychainKey(for: gatewayStableID),
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecUseDataProtectionKeychain as String: true
+        ]
+        
+        // Add access group if configured
+        var finalQuery = query
+        if let accessGroup = accessGroup {
+            finalQuery[kSecAttrAccessGroup as String] = accessGroup
+        }
+        
+        // Delete existing item first
+        SecItemDelete(finalQuery as CFDictionary)
+        
+        // Add new item
+        let status = SecItemAdd(finalQuery as CFDictionary, nil)
+        
+        guard status == errSecSuccess else {
+            throw KeychainError.unhandledError(status: status)
+        }
+    }
+    
+    // MARK: - Retrieve Session
+    
+    /// Retrieves a mobile broker session for a gateway
+    /// - Parameter gatewayStableID: The stable identifier of the gateway
+    /// - Returns: The stored session, or nil if not found
+    /// - Throws: Keychain error
+    public func retrieveSession(forGatewayStableID gatewayStableID: String) throws -> Session? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: keychainKey(for: gatewayStableID),
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        
+        // Add access group if configured
+        var finalQuery = query
+        if let accessGroup = accessGroup {
+            finalQuery[kSecAttrAccessGroup as String] = accessGroup
+        }
+        
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(finalQuery as CFDictionary, &item)
+        
+        guard status != errSecItemNotFound else {
+            return nil
+        }
+        
+        guard status == errSecSuccess else {
+            throw KeychainError.unhandledError(status: status)
+        }
+        
+        guard let data = item as? Data else {
+            return nil
+        }
+        
+        return try JSONDecoder().decode(Session.self, from: data)
+    }
+    
+    // MARK: - Delete Session
+    
+    /// Deletes a mobile broker session for a gateway
+    /// - Parameter gatewayStableID: The stable identifier of the gateway
+    /// - Throws: Keychain error
+    public func deleteSession(forGatewayStableID gatewayStableID: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: keychainKey(for: gatewayStableID)
+        ]
+        
+        // Add access group if configured
+        var finalQuery = query
+        if let accessGroup = accessGroup {
+            finalQuery[kSecAttrAccessGroup as String] = accessGroup
+        }
+        
+        let status = SecItemDelete(finalQuery as CFDictionary)
+        
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError.unhandledError(status: status)
+        }
+    }
+    
+    // MARK: - Clear All Sessions
+    
+    /// Clears all mobile broker sessions
+    /// - Throws: Keychain error
+    public func clearAllSessions() throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "com.openclaw.mobileBrokerSession."
+        ]
+        
+        // Add access group if configured
+        var finalQuery = query
+        if let accessGroup = accessGroup {
+            finalQuery[kSecAttrAccessGroup as String] = accessGroup
+        }
+        
+        SecItemDelete(finalQuery as CFDictionary)
+    }
+    
+    // MARK: - Check Expiration
+    
+    /// Checks if the access token for a gateway is expired or about to expire
+    /// - Parameters:
+    ///   - gatewayStableID: The stable identifier of the gateway
+    ///   - skewWindow: Time interval to consider as "about to expire"
+    /// - Returns: true if expired or about to expire
+    public func isAccessTokenExpired(forGatewayStableID gatewayStableID: String, skewWindow: TimeInterval = 30) -> Bool {
+        guard let session = try? retrieveSession(forGatewayStableID: gatewayStableID) else {
+            return true
+        }
+        
+        let now = Date()
+        let expiresSoon = session.accessExpiresAt.addingTimeInterval(-skewWindow)
+        return now >= expiresSoon
+    }
+    
+    // MARK: - Refresh Session
+    
+    /// Refreshes the session by storing new tokens
+    /// - Parameters:
+    ///   - newSession: The new session with updated tokens
+    ///   - gatewayStableID: The stable identifier of the gateway
+    /// - Throws: Keychain error
+    public func refreshSession(_ newSession: Session, forGatewayStableID gatewayStableID: String) throws {
+        try storeSession(newSession, forGatewayStableID: gatewayStableID)
+    }
+}
+
+// MARK: - KeychainError
+
+public enum KeychainError: Error, LocalizedError {
+    case unhandledError(status: OSStatus)
+    
+    public var errorDescription: String? {
+        switch self {
+        case .unhandledError(let status):
+            return String(format: "Keychain error: %d", status)
+        }
+    }
+}
