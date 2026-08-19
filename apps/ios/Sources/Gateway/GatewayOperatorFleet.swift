@@ -156,7 +156,8 @@ final class GatewayOperatorFleet {
                     connectOptions: options,
                     sessionBox: sessionBox,
                     extraHeadersProvider: {
-                        GatewaySettingsStore.loadGatewayCustomHeaders(
+                        GatewaySettingsStore.loadConnectionHeaders(
+                            url: config.url,
                             gatewayStableID: config.effectiveStableID)
                     },
                     onConnected: { [weak self] in

@@ -4693,7 +4693,7 @@ extension NodeAppModel {
                         connectOptions: operatorOptions,
                         sessionBox: sessionBox,
                         extraHeadersProvider: {
-                            GatewaySettingsStore.loadGatewayCustomHeaders(gatewayStableID: stableID)
+                            GatewaySettingsStore.loadConnectionHeaders(url: url, gatewayStableID: stableID)
                         },
                         onConnected: { [weak self] in
                             await self?.handleOperatorGatewayConnected(
@@ -4917,7 +4917,7 @@ extension NodeAppModel {
                 connectOptions: connectedOptions,
                 sessionBox: context.sessionBox,
                 extraHeadersProvider: {
-                    GatewaySettingsStore.loadGatewayCustomHeaders(gatewayStableID: context.stableID)
+                    GatewaySettingsStore.loadConnectionHeaders(url: context.url, gatewayStableID: context.stableID)
                 },
                 onConnected: { [weak self] in
                     await self?.handleNodeGatewayConnected(

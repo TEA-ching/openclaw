@@ -5,68 +5,68 @@
 //
 
 import SwiftUI
-import OpenClawType
 
 /// SwiftUI view for mobile broker sign-in using GitHub Device Flow
 public struct MobileBrokerSignInSheet: View {
-    
     // MARK: - State
-    
+
     @StateObject private var viewModel: ViewModel
-    
+
     // MARK: - Initialization
-    
+
     /// Initialize with a view model
     /// - Parameter viewModel: The view model for this sheet
     public init(viewModel: ViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
     }
-    
+
     // MARK: - View
-    
+
     public var body: some View {
         VStack(spacing: 0) {
             // Header with branded typography
             VStack(spacing: 8) {
                 Image(systemName: "lock.shield")
                     .font(.system(size: 48))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(OpenClawBrand.accent)
                     .accessibilityLabel("Security")
-                
-                OpenClawType.title2("Sign In with GitHub")
+
+                Text("Sign In with GitHub")
+                    .font(OpenClawType.title2)
                     .fontWeight(.semibold)
-                
-                OpenClawType.subheadline("Complete the sign-in on your device")
+
+                Text("Complete the sign-in on your device")
+                    .font(OpenClawType.subhead)
                     .foregroundColor(.secondary)
             }
             .padding(.top, 24)
             .padding(.bottom, 16)
-            
+
             ScrollView {
                 VStack(spacing: 24) {
                     // User Code Display
-                    userCodeSection
-                    
+                    self.userCodeSection
+
                     // Expiration countdown
-                    expirationSection
-                    
+                    self.expirationSection
+
                     // Verification URI
-                    verificationURISection
-                    
+                    self.verificationURISection
+
                     // Status
-                    statusSection
-                    
+                    self.statusSection
+
                     // Progress indicator
-                    if viewModel.isPolling {
-                        progressIndicator
+                    if self.viewModel.isPolling {
+                        self.progressIndicator
                     }
-                    
+
                     // Error state
-                    errorSection
-                    
+                    self.errorSection
+
                     // Success state
-                    successSection
-                    
+                    self.successSection
+
                     Spacer()
                         .frame(height: 24)
                 }
@@ -74,104 +74,107 @@ public struct MobileBrokerSignInSheet: View {
             }
         }
         .onAppear {
-            viewModel.startDeviceFlow()
+            self.viewModel.startDeviceFlow()
         }
         .onDisappear {
-            viewModel.stopPolling()
+            self.viewModel.stopPolling()
         }
     }
-    
+
     // MARK: - Subviews
-    
-    @ViewBuilder
+
     private var userCodeSection: some View {
         VStack(spacing: 12) {
-            OpenClawType.headline("Enter this code on GitHub:")
-            
+            Text("Enter this code on GitHub:")
+                .font(OpenClawType.headline)
+
             // User code in a styled box with branded typography
-            OpenClawType.title1(viewModel.userCode ?? "...")
+            Text(self.viewModel.userCode ?? "...")
+                .font(OpenClawType.title1)
                 .fontWeight(.bold)
                 .monospacedDigit()
                 .frame(maxWidth: .infinity)
                 .padding()
                 .background(
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(.systemGray5))
-                )
+                        .fill(Color(.systemGray5)))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color(.systemGray3), lineWidth: 1)
-                )
-            
+                        .stroke(Color(.systemGray3), lineWidth: 1))
+
             // Copy button with branded typography
-            Button(action: viewModel.copyUserCode) {
+            Button(action: self.viewModel.copyUserCode) {
                 HStack(spacing: 8) {
                     Image(systemName: "doc.on.doc")
-                    OpenClawType.callout("Copy Code")
+                    Text("Copy Code")
+                        .font(OpenClawType.callout)
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(Color.accentColor)
+                .background(OpenClawBrand.accent)
                 .cornerRadius(8)
             }
             .buttonStyle(PlainButtonStyle())
-            .disabled(viewModel.userCode == nil)
+            .disabled(self.viewModel.userCode == nil)
         }
     }
-    
+
     @ViewBuilder
     private var expirationSection: some View {
         if let expiresAt = viewModel.expiresAt {
             VStack(spacing: 4) {
-                OpenClawType.footnote("Code expires in:")
+                Text("Code expires in:")
+                    .font(OpenClawType.footnote)
                     .foregroundColor(.secondary)
-                
-                OpenClawType.headline(viewModel.timeRemaining)
-                    .foregroundColor(viewModel.timeRemainingColor)
+
+                Text(self.viewModel.timeRemaining)
+                    .font(OpenClawType.headline)
+                    .foregroundColor(self.viewModel.timeRemainingColor)
             }
         }
     }
-    
-    @ViewBuilder
+
     private var verificationURISection: some View {
         VStack(spacing: 8) {
-            OpenClawType.footnote("Then visit:")
+            Text("Then visit:")
+                .font(OpenClawType.footnote)
                 .foregroundColor(.secondary)
-            
+
             if let uri = viewModel.verificationURI {
                 Link(
                     destination: uri,
                     label: {
-                        OpenClawType.headline(uri.absoluteString)
-                            .foregroundColor(.accentColor)
+                        Text(uri.absoluteString)
+                            .font(OpenClawType.headline)
+                            .foregroundColor(OpenClawBrand.accent)
                             .lineLimit(1)
-                    }
-                )
+                    })
             } else {
-                OpenClawType.headline("...")
+                Text("...")
+                    .font(OpenClawType.headline)
                     .foregroundColor(.secondary)
             }
         }
     }
-    
+
     @ViewBuilder
     private var statusSection: some View {
-        if !viewModel.statusMessage.isEmpty {
-            OpenClawType.body(viewModel.statusMessage)
-                .foregroundColor(viewModel.statusMessageColor)
+        if !self.viewModel.statusMessage.isEmpty {
+            Text(self.viewModel.statusMessage)
+                .font(OpenClawType.body)
+                .foregroundColor(self.viewModel.statusMessageColor)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
     }
-    
-    @ViewBuilder
+
     private var progressIndicator: some View {
         ProgressView()
-            .progressViewStyle(CircularProgressViewStyle(tint: .accentColor))
+            .progressViewStyle(CircularProgressViewStyle(tint: OpenClawBrand.accent))
             .padding(.vertical, 8)
     }
-    
+
     @ViewBuilder
     private var errorSection: some View {
         if let error = viewModel.error {
@@ -180,32 +183,35 @@ public struct MobileBrokerSignInSheet: View {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 24))
                         .foregroundColor(.red)
-                    
-                    OpenClawType.body(error)
+
+                    Text(error)
+                        .font(OpenClawType.body)
                         .foregroundColor(.red)
                         .multilineTextAlignment(.center)
                 }
-                
-                Button("Retry", action: viewModel.retry)
+
+                Button("Retry", action: self.viewModel.retry)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
             }
             .padding(.horizontal, 24)
         }
     }
-    
+
     @ViewBuilder
     private var successSection: some View {
-        if viewModel.didCompleteSuccessfully {
+        if self.viewModel.didCompleteSuccessfully {
             VStack(spacing: 8) {
                 Image(systemName: "checkmark.circle")
                     .font(.system(size: 48))
                     .foregroundColor(.green)
-                
-                OpenClawType.title2("Signed in successfully!")
+
+                Text("Signed in successfully!")
+                    .font(OpenClawType.title2)
                     .fontWeight(.semibold)
-                
-                OpenClawType.body("You can now use the gateway")
+
+                Text("You can now use the gateway")
+                    .font(OpenClawType.body)
                     .foregroundColor(.secondary)
             }
             .padding(.horizontal, 24)
@@ -215,12 +221,11 @@ public struct MobileBrokerSignInSheet: View {
 
 // MARK: - ViewModel
 
-public extension MobileBrokerSignInSheet {
+extension MobileBrokerSignInSheet {
     @MainActor
-    final class ViewModel: ObservableObject {
-        
+    public final class ViewModel: ObservableObject {
         // MARK: - Types
-        
+
         public enum State {
             case idle
             case initiating
@@ -228,9 +233,9 @@ public extension MobileBrokerSignInSheet {
             case completed(MobileBrokerSessionStore.Session)
             case error(Error)
         }
-        
+
         // MARK: - Published Properties
-        
+
         @Published public private(set) var userCode: String?
         @Published public private(set) var verificationURI: URL?
         @Published public private(set) var expiresAt: Date?
@@ -238,26 +243,26 @@ public extension MobileBrokerSignInSheet {
         @Published public private(set) var statusMessage: String = ""
         @Published public private(set) var error: String?
         @Published public private(set) var didCompleteSuccessfully: Bool = false
-        
+
         // MARK: - Computed Properties
-        
+
         public var timeRemaining: String {
-            guard let expiresAt = expiresAt else { return "--:--" }
-            
+            guard let expiresAt else { return "--:--" }
+
             let remaining = expiresAt.timeIntervalSinceNow
             if remaining <= 0 {
                 return "Expired"
             }
-            
+
             let minutes = Int(remaining / 60)
             let seconds = Int(remaining.truncatingRemainder(dividingBy: 60))
-            
+
             return String(format: "%02d:%02d", minutes, seconds)
         }
-        
+
         public var timeRemainingColor: Color {
-            guard let expiresAt = expiresAt else { return .secondary }
-            
+            guard let expiresAt else { return .secondary }
+
             let remaining = expiresAt.timeIntervalSinceNow
             if remaining <= 60 {
                 return .red
@@ -266,20 +271,20 @@ public extension MobileBrokerSignInSheet {
             }
             return .primary
         }
-        
+
         public var statusMessageColor: Color {
-            if statusMessage.contains("slow") || statusMessage.contains("wait") {
+            if self.statusMessage.contains("slow") || self.statusMessage.contains("wait") {
                 return .yellow
-            } else if statusMessage.contains("denied") || statusMessage.contains("error") {
+            } else if self.statusMessage.contains("denied") || self.statusMessage.contains("error") {
                 return .red
-            } else if statusMessage.contains("approved") || statusMessage.contains("success") {
+            } else if self.statusMessage.contains("approved") || self.statusMessage.contains("success") {
                 return .green
             }
             return .primary
         }
-        
+
         // MARK: - Private Properties
-        
+
         private let authClient: MobileBrokerAuthClient
         private let sessionStore: MobileBrokerSessionStore
         private let gatewayStableID: String
@@ -287,102 +292,101 @@ public extension MobileBrokerSignInSheet {
         private let onDismiss: () -> Void
         private var pollingTask: Task<Void, Never>?
         private var currentTransactionID: String?
-        
+
         // MARK: - Initialization
-        
+
         public init(
             authClient: MobileBrokerAuthClient,
             sessionStore: MobileBrokerSessionStore,
             gatewayStableID: String,
             onComplete: @escaping (MobileBrokerSessionStore.Session) -> Void,
-            onDismiss: @escaping () -> Void
-        ) {
+            onDismiss: @escaping () -> Void)
+        {
             self.authClient = authClient
             self.sessionStore = sessionStore
             self.gatewayStableID = gatewayStableID
             self.onComplete = onComplete
             self.onDismiss = onDismiss
         }
-        
+
         // MARK: - Public Methods
-        
+
         public func startDeviceFlow() {
             Task {
-                await initiateDeviceFlow()
+                await self.initiateDeviceFlow()
             }
         }
-        
+
         public func stopPolling() {
-            pollingTask?.cancel()
-            pollingTask = nil
+            self.pollingTask?.cancel()
+            self.pollingTask = nil
         }
-        
+
         public func copyUserCode() {
-            guard let userCode = userCode else { return }
-            
+            guard let userCode else { return }
+
             UIPasteboard.general.string = userCode
-            
+
             // Show feedback
-            statusMessage = "Code copied to clipboard"
-            
+            self.statusMessage = "Code copied to clipboard"
+
             // Clear after a delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.statusMessage = ""
             }
         }
-        
+
         public func retry() {
-            error = nil
-            didCompleteSuccessfully = false
-            startDeviceFlow()
+            self.error = nil
+            self.didCompleteSuccessfully = false
+            self.startDeviceFlow()
         }
-        
+
         // MARK: - Private Methods
-        
+
         private func initiateDeviceFlow() async {
-            isPolling = true
-            statusMessage = "Initiating sign-in..."
-            
+            self.isPolling = true
+            self.statusMessage = "Initiating sign-in..."
+
             do {
                 let response = try await authClient.initiateDeviceAuthorization()
-                
+
                 // Store transaction ID
-                currentTransactionID = response.transactionID
-                
+                self.currentTransactionID = response.transactionID
+
                 // Update UI
                 await MainActor.run {
-                    userCode = response.userCode
-                    verificationURI = response.verificationURI
-                    expiresAt = response.expiresAt
-                    isPolling = true
-                    statusMessage = "Waiting for authorization..."
+                    self.userCode = response.userCode
+                    self.verificationURI = URL(string: response.verificationURI)
+                    self.expiresAt = response.expiresAt
+                    self.isPolling = true
+                    self.statusMessage = "Waiting for authorization..."
                 }
-                
+
                 // Start polling
-                startPolling()
-                
+                self.startPolling()
+
             } catch {
                 await MainActor.run {
                     self.error = error.localizedDescription
-                    isPolling = false
+                    self.isPolling = false
                 }
             }
         }
-        
+
         private func startPolling() {
-            pollingTask?.cancel()
-            
-            pollingTask = Task { @MainActor in
+            self.pollingTask?.cancel()
+
+            self.pollingTask = Task { @MainActor in
                 while !Task.isCancelled {
                     do {
                         guard let transactionID = currentTransactionID else {
                             break
                         }
-                        
+
                         let response = try await authClient.pollDeviceAuthorization(
-                            transactionID: transactionID
-                        )
-                        
+                            transactionID: transactionID)
+
                         switch response.status {
                         case .approved:
                             // Success!
@@ -390,82 +394,82 @@ public extension MobileBrokerSignInSheet {
                                   let refreshToken = response.refreshToken,
                                   let accessExpiresAt = response.accessExpiresAt,
                                   let refreshExpiresAt = response.refreshExpiresAt,
-                                  let subjectEmail = response.subjectEmail else {
+                                  let subjectEmail = response.subjectEmail
+                            else {
                                 throw URLError(.cannotParseResponse)
                             }
-                            
+
                             let session = MobileBrokerSessionStore.Session(
                                 accessToken: accessToken,
                                 refreshToken: refreshToken,
                                 accessExpiresAt: accessExpiresAt,
                                 refreshExpiresAt: refreshExpiresAt,
                                 brokerDeviceID: subjectEmail,
-                                brokerHostname: authClient.config.hostname
-                            )
-                            
+                                brokerHostname: self.authClient.config.hostname)
+
                             // Store session
-                            try sessionStore.storeSession(session, forGatewayStableID: gatewayStableID)
-                            
+                            try self.sessionStore.storeSession(session, forGatewayStableID: self.gatewayStableID)
+
                             // Notify completion
-                            didCompleteSuccessfully = true
-                            isPolling = false
-                            statusMessage = "Signed in successfully!"
-                            
+                            self.didCompleteSuccessfully = true
+                            self.isPolling = false
+                            self.statusMessage = "Signed in successfully!"
+
                             // Call completion handler
-                            onComplete(session)
-                            
+                            self.onComplete(session)
+
                             // Dismiss after a delay
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                onDismiss()
+                                self.onDismiss()
                             }
-                            
+
                             return
-                            
+
                         case .slowDown:
-                            statusMessage = "Please wait..."
+                            self.statusMessage = "Please wait..."
                             try await Task.sleep(nanoseconds: UInt64(5 * 1_000_000_000))
-                            
+
                         case .denied:
-                            error = response.errorMessage ?? "Authorization was denied"
-                            isPolling = false
+                            self.error = response.errorMessage ?? "Authorization was denied"
+                            self.isPolling = false
                             return
-                            
+
                         case .forbidden:
-                            error = response.errorMessage ?? "Email not authorized for this Gateway"
-                            isPolling = false
+                            self.error = response.errorMessage ?? "Email not authorized for this Gateway"
+                            self.isPolling = false
                             return
-                            
+
                         case .expired:
-                            error = "Authorization code expired"
-                            isPolling = false
+                            self.error = "Authorization code expired"
+                            self.isPolling = false
                             return
-                            
+
                         case .pending:
                             // Continue polling
                             try await Task.sleep(nanoseconds: UInt64(5 * 1_000_000_000))
                         }
-                        
+
                     } catch {
                         // Check if task was cancelled
                         if Task.isCancelled {
                             return
                         }
-                        
+
                         // Check if it's a specific error
                         if let brokerError = error as? MobileBrokerAuthClient.BrokerErrorResponse {
-                            error = brokerError.errorMessage ?? brokerError.error
+                            self.error = brokerError.errorMessage ?? brokerError.error
                         } else {
-                            error = error.localizedDescription
+                            self.error = error.localizedDescription
                         }
-                        isPolling = false
+                        self.isPolling = false
                         return
                     }
                 }
             }
         }
-        
+
         // MARK: - Deinitialization
-        
+
         deinit {
             pollingTask?.cancel()
         }
@@ -480,16 +484,13 @@ struct MobileBrokerSignInSheet_Previews: PreviewProvider {
         MobileBrokerSignInSheet(
             viewModel: MobileBrokerSignInSheet.ViewModel(
                 authClient: MobileBrokerAuthClient(
-                    config: MobileBrokerConfig(hostname: "mobile.claw.example.org")
-                ),
+                    config: MobileBrokerConfig(hostname: "mobile.claw.example.org")),
                 sessionStore: MobileBrokerSessionStore(),
                 gatewayStableID: "test-gateway",
                 onComplete: { _ in },
-                onDismiss: {}
-            )
-        )
-        .padding()
-        .previewLayout(.sizeThatFits)
+                onDismiss: {}))
+            .padding()
+            .previewLayout(.sizeThatFits)
     }
 }
 #endif

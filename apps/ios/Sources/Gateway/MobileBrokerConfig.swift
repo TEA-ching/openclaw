@@ -10,35 +10,35 @@ import Foundation
 public struct MobileBrokerConfig: Codable, Equatable, Hashable, Sendable {
     /// The hostname of the mobile broker (e.g., "mobile.claw.example.org")
     public let hostname: String
-    
+
     /// The port of the mobile broker (default: 443 for HTTPS)
     public let port: Int
-    
+
     /// Whether to use TLS (default: true)
     public let useTLS: Bool
-    
+
     /// The base URL for the broker API
     public var baseURL: URL {
         var components = URLComponents()
-        components.scheme = useTLS ? "https" : "http"
-        components.host = hostname
-        if !useTLS && port != 80 {
-            components.port = port
+        components.scheme = self.useTLS ? "https" : "http"
+        components.host = self.hostname
+        if !self.useTLS, self.port != 80 {
+            components.port = self.port
         }
         return components.url!
     }
-    
+
     /// The WebSocket URL for the broker
     public var webSocketURL: URL {
         var components = URLComponents()
-        components.scheme = useTLS ? "wss" : "ws"
-        components.host = hostname
-        if !useTLS && port != 80 {
-            components.port = port
+        components.scheme = self.useTLS ? "wss" : "ws"
+        components.host = self.hostname
+        if !self.useTLS, self.port != 80 {
+            components.port = self.port
         }
         return components.url!
     }
-    
+
     public init(hostname: String, port: Int = 443, useTLS: Bool = true) {
         self.hostname = hostname
         self.port = port
@@ -46,22 +46,26 @@ public struct MobileBrokerConfig: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-// MARK: - Gateway Route Extension
+// MARK: - URL Mobile Broker Detection
 
-public extension GatewayRoute {
-    /// Whether this route uses mobile broker authentication
-    var isMobileBrokerRoute: Bool {
-        // Check if the host matches common mobile broker patterns
-        // This is a simple heuristic - actual implementation should check against configured mobile broker hostnames
+extension URL {
+    /// Whether this URL's host matches common mobile broker naming patterns
+    /// (e.g. "mobile.claw.example.org"). Heuristic only: there is no explicit
+    /// pairing-time signal yet for "this route uses the broker."
+    public var isMobileBrokerHost: Bool {
+        guard let host else { return false }
         let lowerHost = host.lowercased()
-        return lowerHost.hasPrefix("mobile.") || 
-               lowerHost.contains("-mobile") ||
-               lowerHost.contains(".mobile.")
+        return lowerHost.hasPrefix("mobile.") ||
+            lowerHost.contains("-mobile") ||
+            lowerHost.contains(".mobile.")
     }
-    
-    /// Mobile broker configuration for this route, if applicable
-    var mobileBrokerConfig: MobileBrokerConfig? {
-        guard isMobileBrokerRoute else { return nil }
-        return MobileBrokerConfig(hostname: host, port: port, useTLS: isTLS)
+
+    /// Mobile broker configuration derived from this URL, if the host matches
+    /// the mobile broker naming heuristic.
+    public var mobileBrokerConfigFromHost: MobileBrokerConfig? {
+        guard self.isMobileBrokerHost, let host else { return nil }
+        let useTLS = scheme == "https" || scheme == "wss"
+        let effectivePort = port ?? (useTLS ? 443 : 80)
+        return MobileBrokerConfig(hostname: host, port: effectivePort, useTLS: useTLS)
     }
 }
