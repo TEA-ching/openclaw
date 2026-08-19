@@ -56,8 +56,10 @@ extension URL {
         guard let host else { return false }
         let lowerHost = host.lowercased()
         return lowerHost.hasPrefix("mobile.") ||
+            lowerHost.hasPrefix("mobile-") ||
             lowerHost.contains("-mobile") ||
-            lowerHost.contains(".mobile.")
+            lowerHost.contains(".mobile.") ||
+            lowerHost.contains(".mobile-")
     }
 
     /// Mobile broker configuration derived from this URL, if the host matches

@@ -3787,7 +3787,8 @@ extension NodeAppModel {
             bootstrapToken: bootstrapToken,
             password: password,
             deviceAuthGatewayID: connectOptions.deviceAuthGatewayID ?? effectiveStableID,
-            allowStoredDeviceAuth: connectOptions.allowStoredDeviceAuth)
+            allowStoredDeviceAuth: connectOptions.allowStoredDeviceAuth,
+            isMobileBrokerRoute: url.isMobileBrokerHost)
         if let activeConfig = activeGatewayConnectConfig,
            activeConfig.hasSameConnectionInputs(as: nextConfig),
            nodeGatewayTask != nil,
@@ -4218,7 +4219,8 @@ extension NodeAppModel {
         bootstrapToken: String?,
         password: String?,
         deviceAuthGatewayID: String,
-        allowStoredDeviceAuth: Bool = true) -> Bool
+        allowStoredDeviceAuth: Bool = true,
+        isMobileBrokerRoute: Bool = false) -> Bool
     {
         Self.shouldStartOperatorGatewayLoop(
             token: token,
@@ -4226,7 +4228,8 @@ extension NodeAppModel {
             password: password,
             hasStoredOperatorToken: allowStoredDeviceAuth && self.hasStoredGatewayRoleToken(
                 "operator",
-                gatewayID: deviceAuthGatewayID))
+                gatewayID: deviceAuthGatewayID),
+            isMobileBrokerRoute: isMobileBrokerRoute)
     }
 
     private func hasStoredGatewayRoleToken(_ role: String, gatewayID: String) -> Bool {
@@ -4241,8 +4244,18 @@ extension NodeAppModel {
         token: String?,
         bootstrapToken: String?,
         password: String?,
-        hasStoredOperatorToken: Bool) -> Bool
+        hasStoredOperatorToken: Bool,
+        isMobileBrokerRoute: Bool = false) -> Bool
     {
+        // Mobile broker routes authenticate the operator connection out-of-band,
+        // via the trusted-proxy Authorization header on the WS upgrade request --
+        // invisible to the token/password/bootstrapToken fields checked below.
+        // Without this, a fresh mobile-broker pairing (no stored operator token
+        // yet, no token/password ever entered in the app) never starts the
+        // operator loop at all, so chat silently never connects.
+        if isMobileBrokerRoute {
+            return true
+        }
         let trimmedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmedToken.isEmpty {
             return true
@@ -4334,7 +4347,8 @@ extension NodeAppModel {
                bootstrapToken: nil,
                password: config.password,
                deviceAuthGatewayID: deviceAuthGatewayID,
-               allowStoredDeviceAuth: true)
+               allowStoredDeviceAuth: true,
+               isMobileBrokerRoute: config.url.isMobileBrokerHost)
         {
             let sessionBox = config.tls.map {
                 WebSocketSessionBox(session: GatewayTLSPinningSession(params: $0))
@@ -9889,7 +9903,8 @@ extension NodeAppModel {
             bootstrapToken: cfg.bootstrapToken,
             password: cfg.password,
             deviceAuthGatewayID: cfg.nodeOptions.deviceAuthGatewayID ?? cfg.effectiveStableID,
-            allowStoredDeviceAuth: cfg.nodeOptions.allowStoredDeviceAuth)
+            allowStoredDeviceAuth: cfg.nodeOptions.allowStoredDeviceAuth,
+            isMobileBrokerRoute: cfg.url.isMobileBrokerHost)
         guard canStartReconnectLoop else {
             GatewayDiagnostics.log(
                 "watch exec approval: watch_request_reconnect_timeout "

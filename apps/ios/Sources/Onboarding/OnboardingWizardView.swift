@@ -46,6 +46,8 @@ struct OnboardingWizardView: View {
     @State private var pendingTargetSuppression = GatewayPendingTargetSuppression()
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var showGatewayProblemDetails: Bool = false
+    @State var showMobileBrokerSignIn: Bool = false
+    @State var mobileBrokerSignInViewModel: MobileBrokerSignInSheet.ViewModel?
     @State private var lastPairingAutoResumeAttemptAt: Date?
     @State private var pendingManualAuthOverride: GatewayConnectionController.ManualAuthOverride?
     @State private var setupLinkStaging = GatewaySetupLinkStaging()
@@ -218,6 +220,11 @@ struct OnboardingWizardView: View {
                     onPrimaryAction: {
                         Task { await self.handleGatewayProblemPrimaryAction(currentProblem) }
                     })
+            }
+        }
+        .sheet(isPresented: self.$showMobileBrokerSignIn) {
+            if let viewModel = self.mobileBrokerSignInViewModel {
+                MobileBrokerSignInSheet(viewModel: viewModel)
             }
         }
         .onAppear {
@@ -1471,10 +1478,20 @@ extension OnboardingWizardView {
         await self.connectCurrentManualGateway(host: host, port: port, forceReconnect: false)
     }
 
-    private func connectCurrentManualGateway(host: String, port: Int, forceReconnect: Bool) async {
+    func connectCurrentManualGateway(host: String, port: Int, forceReconnect: Bool) async {
         let stableID = GatewayConnectionController.ManualAuthOverride.manualStableID(
             host: host,
             port: port)
+        if let signInViewModel = self.mobileBrokerSignInViewModelIfNeeded(
+            host: host,
+            port: port,
+            stableID: stableID,
+            forceReconnect: forceReconnect)
+        {
+            self.mobileBrokerSignInViewModel = signInViewModel
+            self.showMobileBrokerSignIn = true
+            return
+        }
         self.selectGatewayCredentialTarget(stableID, allowManualOverride: true)
         if GatewayStableIdentifier.matches(
             self.appModel.activeGatewayConnectConfig?.effectiveStableID,
