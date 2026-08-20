@@ -4697,6 +4697,11 @@ extension NodeAppModel {
                     forceExplicitScopes: talkPermissionUpgradeRequest,
                     allowStoredDeviceAuth: reconnectOptions.allowStoredDeviceAuth)
 
+                if url.isMobileBrokerHost {
+                    await KeychainAccessGroupConfig.createSessionStore()
+                        .refreshIfNeeded(forURL: url, gatewayStableID: stableID)
+                }
+
                 do {
                     try await self.operatorGateway.connect(
                         url: url,
@@ -4920,6 +4925,11 @@ extension NodeAppModel {
             fallbackPassword: context.fallbackPassword)
         let connectedOptions = state.options
         GatewayDiagnostics.log("connect attempt epochMs=\(epochMs) url=\(context.url.absoluteString)")
+
+        if context.url.isMobileBrokerHost {
+            await KeychainAccessGroupConfig.createSessionStore()
+                .refreshIfNeeded(forURL: context.url, gatewayStableID: context.stableID)
+        }
 
         do {
             try await self.nodeGateway.connect(

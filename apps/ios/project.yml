@@ -228,6 +228,7 @@ targets:
       - path: Sources/Gateway/MobileBrokerSessionStore.swift
       - path: Sources/Gateway/KeychainAccessGroupConfig.swift
       - path: Sources/Gateway/MobileBrokerConfig.swift
+      - path: Sources/Gateway/MobileBrokerAuthClient.swift
       - path: Resources/Localizable.xcstrings
         buildPhase: resources
     dependencies:

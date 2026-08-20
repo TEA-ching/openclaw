@@ -146,6 +146,10 @@ final class GatewayOperatorFleet {
                 WebSocketSessionBox(session: GatewayTLSPinningSession(params: $0))
             }
             let runtimeID = runtime.id
+            if config.url.isMobileBrokerHost {
+                await KeychainAccessGroupConfig.createSessionStore()
+                    .refreshIfNeeded(forURL: config.url, gatewayStableID: config.effectiveStableID)
+            }
             do {
                 try await runtime.session.connect(
                     url: config.url,

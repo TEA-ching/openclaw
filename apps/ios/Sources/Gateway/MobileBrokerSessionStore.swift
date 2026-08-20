@@ -214,6 +214,40 @@ public final class MobileBrokerSessionStore: Sendable {
         guard let session = try? retrieveSession(forGatewayStableID: gatewayStableID) else { return [:] }
         return ["Authorization": "Bearer \(session.accessToken)"]
     }
+
+    // MARK: - Proactive Refresh
+
+    /// Refreshes the stored mobile-broker session for this route if its access
+    /// token is expired or about to expire, using the persisted refresh token
+    /// (30-day TTL) -- so a reconnect after the 1-hour access token lapses (e.g.
+    /// the app was closed overnight) re-authenticates silently instead of
+    /// sending a stale token that the broker rejects with no user-visible
+    /// explanation. Call this before every mobile-broker connect attempt, not
+    /// just the manual sign-in flow. No-op, silently, when this isn't a mobile
+    /// broker route, no session is stored, the token isn't due for refresh, or
+    /// the refresh call itself fails (the subsequent connect attempt will then
+    /// fail with the stale token, surfacing the real problem instead of masking
+    /// a refresh error behind a swallowed success).
+    public func refreshIfNeeded(forURL url: URL, gatewayStableID: String) async {
+        guard url.isMobileBrokerHost else { return }
+        guard let session = try? retrieveSession(forGatewayStableID: gatewayStableID) else { return }
+        guard self.isAccessTokenExpired(forGatewayStableID: gatewayStableID) else { return }
+        guard let brokerConfig = url.mobileBrokerConfigFromHost else { return }
+
+        let authClient = MobileBrokerAuthClient(config: brokerConfig)
+        guard let refreshed = try? await authClient.refreshSession(refreshToken: session.refreshToken) else {
+            return
+        }
+
+        let newSession = Session(
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken,
+            accessExpiresAt: refreshed.accessExpiresAt,
+            refreshExpiresAt: refreshed.refreshExpiresAt,
+            brokerDeviceID: session.brokerDeviceID,
+            brokerHostname: session.brokerHostname)
+        try? self.refreshSession(newSession, forGatewayStableID: gatewayStableID)
+    }
 }
 
 // MARK: - KeychainError
