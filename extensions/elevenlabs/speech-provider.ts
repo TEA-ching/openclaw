@@ -35,7 +35,8 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveElevenLabsApiKeyWithProfileFallback } from "./config-api.js";
 import { isValidElevenLabsVoiceId, normalizeElevenLabsBaseUrl } from "./shared.js";
-import { elevenLabsTTS, elevenLabsTTSStream } from "./tts.js";
+import type { ElevenLabsTtsRequestParams } from "./tts.js";
+import { elevenLabsTTSStreamWithRotation, elevenLabsTTSWithRotation } from "./tts.js";
 const DEFAULT_ELEVENLABS_VOICE_ID = "pMsXgVXv3BLzUgSXRplE";
 const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2";
 const DEFAULT_ELEVENLABS_VOICE_SETTINGS = {
@@ -413,8 +414,8 @@ type ElevenLabsSynthesisRequest = Pick<
 
 function resolveElevenLabsTtsRequest(
   req: ElevenLabsSynthesisRequest,
-  options: Pick<Parameters<typeof elevenLabsTTS>[0], "outputFormat" | "latencyTier">,
-): Parameters<typeof elevenLabsTTS>[0] {
+  options: Pick<ElevenLabsTtsRequestParams, "outputFormat" | "latencyTier">,
+): ElevenLabsTtsRequestParams {
   const config = readElevenLabsProviderConfig(req.providerConfig);
   const overrides = req.providerOverrides ?? {};
   const apiKey = resolveElevenLabsApiKey(config.apiKey);
@@ -552,7 +553,7 @@ export function buildElevenLabsSpeechProvider(): SpeechProviderPlugin {
       const outputFormat =
         trimToUndefined(overrides.outputFormat) ??
         (req.target === "voice-note" ? "opus_48000_64" : "mp3_44100_128");
-      const audioBuffer = await elevenLabsTTS(
+      const audioBuffer = await elevenLabsTTSWithRotation(
         resolveElevenLabsTtsRequest(req, {
           outputFormat,
           latencyTier: normalizeElevenLabsLatencyTier(overrides.latencyTier),
@@ -570,7 +571,7 @@ export function buildElevenLabsSpeechProvider(): SpeechProviderPlugin {
       const outputFormat =
         trimToUndefined(overrides.outputFormat) ??
         (req.target === "voice-note" ? "opus_48000_64" : "mp3_44100_128");
-      const stream = await elevenLabsTTSStream(
+      const stream = await elevenLabsTTSStreamWithRotation(
         resolveElevenLabsTtsRequest(req, {
           outputFormat,
           latencyTier: normalizeElevenLabsLatencyTier(overrides.latencyTier),
@@ -587,7 +588,9 @@ export function buildElevenLabsSpeechProvider(): SpeechProviderPlugin {
     synthesizeTelephony: async (req) => {
       const outputFormat = "pcm_22050";
       const sampleRate = 22_050;
-      const audioBuffer = await elevenLabsTTS(resolveElevenLabsTtsRequest(req, { outputFormat }));
+      const audioBuffer = await elevenLabsTTSWithRotation(
+        resolveElevenLabsTtsRequest(req, { outputFormat }),
+      );
       return { audioBuffer, outputFormat, sampleRate };
     },
   };

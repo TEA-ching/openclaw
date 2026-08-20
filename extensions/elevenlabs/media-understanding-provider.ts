@@ -5,6 +5,10 @@ import type {
   MediaUnderstandingProvider,
 } from "openclaw/plugin-sdk/media-understanding";
 import {
+  collectProviderApiKeysForExecution,
+  executeWithApiKeyRotation,
+} from "openclaw/plugin-sdk/provider-auth-runtime";
+import {
   assertOkOrThrowHttpError,
   buildAudioTranscriptionFormData,
   postTranscriptionRequest,
@@ -12,19 +16,24 @@ import {
   resolveProviderHttpRequestConfig,
   requireTranscriptionText,
 } from "openclaw/plugin-sdk/provider-http";
+import { resolveElevenLabsApiKeyWithProfileFallback } from "./config-api.js";
 import { DEFAULT_ELEVENLABS_BASE_URL, normalizeElevenLabsBaseUrl } from "./shared.js";
 
 const DEFAULT_ELEVENLABS_STT_MODEL = "scribe_v2";
 
-async function transcribeElevenLabsAudio(
-  req: AudioTranscriptionRequest,
-): Promise<AudioTranscriptionResult> {
-  const fetchFn = req.fetchFn ?? fetch;
-  const apiKey = req.apiKey || process.env.ELEVENLABS_API_KEY || process.env.XI_API_KEY;
+function resolveElevenLabsSttApiKey(req: AudioTranscriptionRequest): string {
+  const apiKey = req.apiKey || resolveElevenLabsApiKeyWithProfileFallback();
   if (!apiKey) {
     throw new Error("ElevenLabs API key missing");
   }
+  return apiKey;
+}
 
+async function transcribeElevenLabsAudioWithKey(
+  apiKey: string,
+  req: AudioTranscriptionRequest,
+): Promise<AudioTranscriptionResult> {
+  const fetchFn = req.fetchFn ?? fetch;
   const model = req.model?.trim() || DEFAULT_ELEVENLABS_STT_MODEL;
   const { baseUrl, allowPrivateNetwork, headers, dispatcherPolicy } =
     resolveProviderHttpRequestConfig({
@@ -76,6 +85,24 @@ async function transcribeElevenLabsAudio(
   } finally {
     await release();
   }
+}
+
+async function transcribeElevenLabsAudio(
+  req: AudioTranscriptionRequest,
+): Promise<AudioTranscriptionResult> {
+  const apiKey = resolveElevenLabsSttApiKey(req);
+  const apiKeys = collectProviderApiKeysForExecution({
+    provider: "elevenlabs",
+    primaryApiKey: apiKey,
+  });
+  if (apiKeys.length <= 1) {
+    return transcribeElevenLabsAudioWithKey(apiKey, req);
+  }
+  return executeWithApiKeyRotation({
+    provider: "elevenlabs",
+    apiKeys,
+    execute: (rotatedApiKey) => transcribeElevenLabsAudioWithKey(rotatedApiKey, req),
+  });
 }
 
 export const elevenLabsMediaUnderstandingProvider: MediaUnderstandingProvider = {

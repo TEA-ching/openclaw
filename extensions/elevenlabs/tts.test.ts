@@ -3,7 +3,22 @@ import { MAX_AUDIO_BYTES } from "openclaw/plugin-sdk/media-runtime";
 import { synthesizeElevenLabsLiveSpeech } from "openclaw/plugin-sdk/provider-test-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStreamingErrorResponse } from "../test-support/streaming-error-response.js";
-import { elevenLabsTTS, elevenLabsTTSStream } from "./tts.js";
+import {
+  elevenLabsTTS,
+  elevenLabsTTSStream,
+  elevenLabsTTSStreamWithRotation,
+  elevenLabsTTSWithRotation,
+} from "./tts.js";
+
+const { collectProviderApiKeysForExecution, executeWithApiKeyRotation } = vi.hoisted(() => ({
+  collectProviderApiKeysForExecution: vi.fn(),
+  executeWithApiKeyRotation: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/provider-auth-runtime", () => ({
+  collectProviderApiKeysForExecution,
+  executeWithApiKeyRotation,
+}));
 
 describe("elevenlabs tts diagnostics", () => {
   const originalFetch = globalThis.fetch;
@@ -359,5 +374,91 @@ describe("elevenlabs live audio helper error-path body release", () => {
 
     expect(cancel).toHaveBeenCalledOnce();
     expect(response.bodyUsed).toBe(true);
+  });
+});
+
+describe("elevenlabs tts api-key rotation wrappers", () => {
+  const originalFetch = globalThis.fetch;
+
+  function createDefaultTtsRequest() {
+    return {
+      text: "hello",
+      apiKey: "test-key",
+      baseUrl: "https://api.elevenlabs.io",
+      voiceId: "pMsXgVXv3BLzUgSXRplE",
+      modelId: "eleven_multilingual_v2",
+      outputFormat: "mp3_44100_128",
+      voiceSettings: {
+        stability: 0.5,
+        similarityBoost: 0.75,
+        style: 0,
+        useSpeakerBoost: true,
+        speed: 1,
+      },
+      timeoutMs: 5_000,
+    };
+  }
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    collectProviderApiKeysForExecution.mockReset();
+    executeWithApiKeyRotation.mockReset();
+  });
+
+  it("delegates to elevenLabsTTS when the key pool has only one key", async () => {
+    collectProviderApiKeysForExecution.mockReturnValue(["test-key"]);
+    const fetchMock = vi.fn(async () => new Response(Buffer.from("mp3")));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await elevenLabsTTSWithRotation(createDefaultTtsRequest());
+
+    expect(result).toEqual(Buffer.from("mp3"));
+    expect(executeWithApiKeyRotation).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const init = call[1];
+    const headers = new Headers(init.headers as HeadersInit);
+    expect(headers.get("xi-api-key")).toBe("test-key");
+  });
+
+  it("delegates to elevenLabsTTSStream when the key pool has only one key", async () => {
+    collectProviderApiKeysForExecution.mockReturnValue(["test-key"]);
+    const audioStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn(async () => new Response(audioStream));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await elevenLabsTTSStreamWithRotation(createDefaultTtsRequest());
+
+    try {
+      expect(executeWithApiKeyRotation).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const reader = result.audioStream.getReader();
+      await expect(reader.read()).resolves.toEqual({
+        done: false,
+        value: new Uint8Array([1, 2, 3]),
+      });
+      await expect(reader.read()).resolves.toEqual({ done: true, value: undefined });
+    } finally {
+      await result.release();
+    }
+  });
+
+  it("invokes executeWithApiKeyRotation when the key pool has multiple keys", async () => {
+    collectProviderApiKeysForExecution.mockReturnValue(["key-1", "key-2"]);
+    const fetchMock = vi.fn(async () => new Response(Buffer.from("mp3")));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await elevenLabsTTSWithRotation(createDefaultTtsRequest());
+
+    expect(executeWithApiKeyRotation).toHaveBeenCalledWith({
+      provider: "elevenlabs",
+      apiKeys: ["key-1", "key-2"],
+      execute: expect.any(Function),
+    });
   });
 });

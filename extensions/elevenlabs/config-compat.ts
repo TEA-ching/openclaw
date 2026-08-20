@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { collectProviderApiKeysForExecution } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 const ELEVENLABS_API_KEY_ENV = "ELEVENLABS_API_KEY";
@@ -178,5 +179,13 @@ export function resolveElevenLabsApiKeyWithProfileFallback(
   if (envValue) {
     return envValue;
   }
-  return readApiKeyFromProfile(deps);
+  const profileValue = readApiKeyFromProfile(deps);
+  if (profileValue) {
+    return profileValue;
+  }
+  // Pool-only deployments (ELEVENLABS_API_KEYS, no singular ELEVENLABS_API_KEY)
+  // still need one key here: callers that gate on a missing key before reaching
+  // collectProviderApiKeysForExecution's rotation would otherwise dispatch with
+  // no key at all.
+  return collectProviderApiKeysForExecution({ provider: "elevenlabs" })[0] ?? null;
 }

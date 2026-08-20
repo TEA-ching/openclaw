@@ -2,11 +2,19 @@
 import type fs from "node:fs";
 import type os from "node:os";
 import type path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   migrateElevenLabsLegacyTalkConfig,
   resolveElevenLabsApiKeyWithProfileFallback,
 } from "./config-compat.js";
+
+const { collectProviderApiKeysForExecution } = vi.hoisted(() => ({
+  collectProviderApiKeysForExecution: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/provider-auth-runtime", () => ({
+  collectProviderApiKeysForExecution,
+}));
 
 describe("elevenlabs config compat", () => {
   it("moves legacy talk fields into talk.providers.elevenlabs", () => {
@@ -72,5 +80,39 @@ describe("elevenlabs config compat", () => {
     expect(value).toBe("env-key");
     expect(existsSync).not.toHaveBeenCalled();
     expect(readFileSync).not.toHaveBeenCalled();
+  });
+
+  afterEach(() => {
+    collectProviderApiKeysForExecution.mockReset();
+  });
+
+  it("falls back to ELEVENLABS_API_KEYS pool when env and profile are empty", () => {
+    collectProviderApiKeysForExecution.mockReturnValue(["pool-key-1", "pool-key-2"]);
+
+    const value = resolveElevenLabsApiKeyWithProfileFallback(
+      {},
+      {
+        fs: { existsSync: vi.fn(() => false) } as unknown as typeof fs,
+        os: { homedir: () => "/tmp/home" } as unknown as typeof os,
+        path: { join: (...parts: string[]) => parts.join("/") } as unknown as typeof path,
+      },
+    );
+
+    expect(value).toBe("pool-key-1");
+  });
+
+  it("returns null when no key is available in env, profile, or pool", () => {
+    collectProviderApiKeysForExecution.mockReturnValue([]);
+
+    const value = resolveElevenLabsApiKeyWithProfileFallback(
+      {},
+      {
+        fs: { existsSync: vi.fn(() => false) } as unknown as typeof fs,
+        os: { homedir: () => "/tmp/home" } as unknown as typeof os,
+        path: { join: (...parts: string[]) => parts.join("/") } as unknown as typeof path,
+      },
+    );
+
+    expect(value).toBeNull();
   });
 });

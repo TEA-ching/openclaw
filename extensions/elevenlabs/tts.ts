@@ -1,6 +1,10 @@
 // Elevenlabs plugin module implements tts behavior.
 import { MAX_AUDIO_BYTES } from "openclaw/plugin-sdk/media-runtime";
 import {
+  collectProviderApiKeysForExecution,
+  executeWithApiKeyRotation,
+} from "openclaw/plugin-sdk/provider-auth-runtime";
+import {
   assertOkOrThrowProviderError,
   assertProviderBinaryResponseContent,
   readProviderBinaryResponse,
@@ -126,7 +130,7 @@ function createBoundedElevenLabsAudioStream(stream: ReadableStream<Uint8Array>):
   };
 }
 
-type ElevenLabsTtsRequestParams = {
+export type ElevenLabsTtsRequestParams = {
   text: string;
   apiKey: string;
   baseUrl: string;
@@ -291,4 +295,42 @@ export async function elevenLabsTTSStream(params: ElevenLabsTtsRequestParams): P
       await release();
     }
   }
+}
+
+export function resolveElevenLabsApiKeyPool(params: { primaryApiKey: string }): string[] {
+  return collectProviderApiKeysForExecution({
+    provider: "elevenlabs",
+    primaryApiKey: params.primaryApiKey,
+  });
+}
+
+export async function elevenLabsTTSWithRotation(
+  params: ElevenLabsTtsRequestParams,
+): Promise<Buffer> {
+  const { apiKey, ...rest } = params;
+  const apiKeys = resolveElevenLabsApiKeyPool({ primaryApiKey: apiKey });
+  if (apiKeys.length <= 1) {
+    return elevenLabsTTS({ ...rest, apiKey });
+  }
+  return executeWithApiKeyRotation({
+    provider: "elevenlabs",
+    apiKeys,
+    execute: (rotatedApiKey) => elevenLabsTTS({ ...rest, apiKey: rotatedApiKey }),
+  });
+}
+
+export async function elevenLabsTTSStreamWithRotation(params: ElevenLabsTtsRequestParams): Promise<{
+  audioStream: ReadableStream<Uint8Array>;
+  release: () => Promise<void>;
+}> {
+  const { apiKey, ...rest } = params;
+  const apiKeys = resolveElevenLabsApiKeyPool({ primaryApiKey: apiKey });
+  if (apiKeys.length <= 1) {
+    return elevenLabsTTSStream({ ...rest, apiKey });
+  }
+  return executeWithApiKeyRotation({
+    provider: "elevenlabs",
+    apiKeys,
+    execute: (rotatedApiKey) => elevenLabsTTSStream({ ...rest, apiKey: rotatedApiKey }),
+  });
 }
