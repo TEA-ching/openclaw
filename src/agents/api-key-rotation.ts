@@ -1,7 +1,8 @@
 /**
  * Provider API-key rotation wrapper.
  * Runs provider calls across configured keys on rate-limit failures and keeps
- * same-key transient retries separate from key rotation.
+ * same-key transient retries separate from key rotation. When
+ * AGGRESSIVE_ROTATION=1, also advances the pool's starting key on every call.
  */
 import { toErrorObject as toLintErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { normalizeUniqueStringEntries } from "@openclaw/normalization-core/string-normalization";
@@ -23,6 +24,28 @@ type ApiKeyRetryParams = {
   error: unknown;
   attempt: number;
 };
+
+const AGGRESSIVE_ROTATION_ENV_VAR = "AGGRESSIVE_ROTATION";
+// Per-provider cursor so consecutive calls advance through the pool. Only
+// consulted when AGGRESSIVE_ROTATION_ENV_VAR is enabled; existing rate-limit
+// rotation below is untouched and still walks forward from whatever key this
+// picks as the start.
+const aggressiveRotationCursors = new Map<string, number>();
+
+/**
+ * Reorders a provider's key pool so each call starts at the next key,
+ * independent of the rate-limit-triggered rotation in the loops below. A
+ * no-op unless AGGRESSIVE_ROTATION=1 and the pool has more than one key.
+ */
+function rotateKeysForAggressiveMode(provider: string, keys: string[]): string[] {
+  if (keys.length <= 1 || process.env[AGGRESSIVE_ROTATION_ENV_VAR] !== "1") {
+    return keys;
+  }
+  const cursor = aggressiveRotationCursors.get(provider) ?? 0;
+  const offset = cursor % keys.length;
+  aggressiveRotationCursors.set(provider, cursor + 1);
+  return [...keys.slice(offset), ...keys.slice(0, offset)];
+}
 
 type ExecuteWithApiKeyRotationOptions<T> = {
   provider: string;
@@ -52,7 +75,10 @@ export function collectProviderApiKeysForExecution(params: {
 export async function executeWithApiKeyRotation<T>(
   params: ExecuteWithApiKeyRotationOptions<T>,
 ): Promise<T> {
-  const keys = normalizeUniqueStringEntries(params.apiKeys);
+  const keys = rotateKeysForAggressiveMode(
+    params.provider,
+    normalizeUniqueStringEntries(params.apiKeys),
+  );
   if (keys.length === 0) {
     throw new Error(`No API keys configured for provider "${params.provider}".`);
   }
@@ -140,10 +166,13 @@ async function runStreamWithApiKeyRotation(params: {
   options?: Parameters<StreamFn>[2];
 }): Promise<AssistantMessageEventStreamLike> {
   const primaryApiKey = params.options?.apiKey;
-  const apiKeys = collectProviderApiKeysForExecution({
-    provider: params.provider,
-    primaryApiKey,
-  });
+  const apiKeys = rotateKeysForAggressiveMode(
+    params.provider,
+    collectProviderApiKeysForExecution({
+      provider: params.provider,
+      primaryApiKey,
+    }),
+  );
   if (apiKeys.length <= 1) {
     return params.streamFn(params.model, params.context, params.options);
   }

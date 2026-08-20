@@ -352,6 +352,114 @@ describe("executeWithApiKeyRotation", () => {
     expect(execute).toHaveBeenNthCalledWith(2, "key-1");
   });
 
+  it("does not rotate per-call without AGGRESSIVE_ROTATION set", async () => {
+    const execute = vi.fn(async (apiKey: string) => apiKey);
+
+    await expect(
+      executeWithApiKeyRotation({
+        provider: "aggressive-off",
+        apiKeys: ["key-1", "key-2"],
+        execute,
+      }),
+    ).resolves.toBe("key-1");
+    await expect(
+      executeWithApiKeyRotation({
+        provider: "aggressive-off",
+        apiKeys: ["key-1", "key-2"],
+        execute,
+      }),
+    ).resolves.toBe("key-1");
+  });
+
+  describe("with AGGRESSIVE_ROTATION=1", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("advances the starting key on every call", async () => {
+      vi.stubEnv("AGGRESSIVE_ROTATION", "1");
+      const execute = vi.fn(async (apiKey: string) => apiKey);
+
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-on",
+          apiKeys: ["key-1", "key-2", "key-3"],
+          execute,
+        }),
+      ).resolves.toBe("key-1");
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-on",
+          apiKeys: ["key-1", "key-2", "key-3"],
+          execute,
+        }),
+      ).resolves.toBe("key-2");
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-on",
+          apiKeys: ["key-1", "key-2", "key-3"],
+          execute,
+        }),
+      ).resolves.toBe("key-3");
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-on",
+          apiKeys: ["key-1", "key-2", "key-3"],
+          execute,
+        }),
+      ).resolves.toBe("key-1");
+    });
+
+    it("still rotates forward on a 429 from the aggressively-chosen start", async () => {
+      vi.stubEnv("AGGRESSIVE_ROTATION", "1");
+      const execute = vi.fn(async (apiKey: string) => {
+        if (apiKey === "key-2") {
+          throw new Error("HTTP 429 too many requests");
+        }
+        return apiKey;
+      });
+
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-429",
+          apiKeys: ["key-1", "key-2"],
+          execute,
+        }),
+      ).resolves.toBe("key-1");
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-429",
+          apiKeys: ["key-1", "key-2"],
+          execute,
+        }),
+      ).resolves.toBe("key-1");
+
+      expect(execute).toHaveBeenNthCalledWith(1, "key-1");
+      expect(execute).toHaveBeenNthCalledWith(2, "key-2");
+      expect(execute).toHaveBeenNthCalledWith(3, "key-1");
+    });
+
+    it("leaves a single-key pool unrotated", async () => {
+      vi.stubEnv("AGGRESSIVE_ROTATION", "1");
+      const execute = vi.fn(async (apiKey: string) => apiKey);
+
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-single",
+          apiKeys: ["only-key"],
+          execute,
+        }),
+      ).resolves.toBe("only-key");
+      await expect(
+        executeWithApiKeyRotation({
+          provider: "aggressive-single",
+          apiKeys: ["only-key"],
+          execute,
+        }),
+      ).resolves.toBe("only-key");
+    });
+  });
+
   it("does not expose apiKey to the transient retry classifier", async () => {
     const sleep = vi.fn(async () => undefined);
     const shouldRetry = vi.fn((_params: TransientProviderRetryParams) => true);
