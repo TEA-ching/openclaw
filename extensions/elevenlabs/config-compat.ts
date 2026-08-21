@@ -1,12 +1,9 @@
 // Elevenlabs helper module supports config compat behavior.
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { collectProviderApiKeysForExecution } from "openclaw/plugin-sdk/provider-auth-runtime";
+// Keep this doctor-contract closure free of provider-auth-runtime: doctor
+// enumeration cold-loads this module, and provider-auth-runtime statically
+// reaches execa (see api-key-fallback.ts for ELEVENLABS_API_KEY(S) resolution).
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 
-const ELEVENLABS_API_KEY_ENV = "ELEVENLABS_API_KEY";
-const PROFILE_CANDIDATES = [".profile", ".zprofile", ".zshrc", ".bashrc"] as const;
 const LEGACY_TALK_FIELD_KEYS = [
   "voiceId",
   "voiceAliases",
@@ -16,12 +13,6 @@ const LEGACY_TALK_FIELD_KEYS = [
 ] as const;
 
 type JsonRecord = Record<string, unknown>;
-
-type ElevenLabsApiKeyDeps = {
-  fs?: typeof fs;
-  os?: typeof os;
-  path?: typeof path;
-};
 
 export const ELEVENLABS_TALK_PROVIDER_ID = "elevenlabs";
 
@@ -142,50 +133,4 @@ export function migrateElevenLabsLegacyTalkConfig<T>(raw: T): { config: T; chang
       `Moved talk legacy fields (${movedKeys.join(", ")}) → talk.providers.${providerId} (filled missing provider fields only).`,
     ],
   };
-}
-
-function readApiKeyFromProfile(deps: ElevenLabsApiKeyDeps = {}): string | null {
-  const fsImpl = deps.fs ?? fs;
-  const osImpl = deps.os ?? os;
-  const pathImpl = deps.path ?? path;
-
-  const home = osImpl.homedir();
-  for (const candidate of PROFILE_CANDIDATES) {
-    const fullPath = pathImpl.join(home, candidate);
-    if (!fsImpl.existsSync(fullPath)) {
-      continue;
-    }
-    try {
-      const text = fsImpl.readFileSync(fullPath, "utf-8");
-      const match = text.match(
-        /(?:^|\n)\s*(?:export\s+)?ELEVENLABS_API_KEY\s*=\s*["']?([^\n"']+)["']?/,
-      );
-      const value = match?.[1]?.trim();
-      if (value) {
-        return value;
-      }
-    } catch {
-      // Ignore profile read errors.
-    }
-  }
-  return null;
-}
-
-export function resolveElevenLabsApiKeyWithProfileFallback(
-  env: NodeJS.ProcessEnv = process.env,
-  deps: ElevenLabsApiKeyDeps = {},
-): string | null {
-  const envValue = (env[ELEVENLABS_API_KEY_ENV] ?? "").trim();
-  if (envValue) {
-    return envValue;
-  }
-  const profileValue = readApiKeyFromProfile(deps);
-  if (profileValue) {
-    return profileValue;
-  }
-  // Pool-only deployments (ELEVENLABS_API_KEYS, no singular ELEVENLABS_API_KEY)
-  // still need one key here: callers that gate on a missing key before reaching
-  // collectProviderApiKeysForExecution's rotation would otherwise dispatch with
-  // no key at all.
-  return collectProviderApiKeysForExecution({ provider: "elevenlabs" })[0] ?? null;
 }
