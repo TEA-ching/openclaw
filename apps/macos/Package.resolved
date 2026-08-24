@@ -20,6 +20,15 @@
       }
     },
     {
+      "identity" : "elevenlabskit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/steipete/ElevenLabsKit",
+      "state" : {
+        "revision" : "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
+        "version" : "0.1.1"
+      }
+    },
+    {
       "identity" : "grdb.swift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/groue/GRDB.swift.git",
