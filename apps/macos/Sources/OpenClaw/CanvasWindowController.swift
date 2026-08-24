@@ -227,7 +227,9 @@ final class CanvasWindowController: NSWindowController, WKNavigationDelegate, WK
                 }
                 canvasWindowLogger.debug(
                     "canvas load web scheme=\(scheme, privacy: .public) host=\(url.host ?? "-", privacy: .public)")
-                self.webView.load(URLRequest(url: url))
+                var request = URLRequest(url: url)
+                request.attachMobileBrokerAuthorizationIfNeeded()
+                self.webView.load(request)
                 return
             }
             if scheme == "file" {

@@ -278,7 +278,7 @@ private struct GatewayProfileEditor: View {
                 MobileBrokerSignInSheet(viewModel: MobileBrokerSignInSheet.ViewModel(
                     authClient: MobileBrokerAuthClient(config: brokerConfig),
                     sessionStore: MobileBrokerSessionStore.shared,
-                    gatewayStableID: MacGatewayProfileStore.profileID(url: brokerURL),
+                    gatewayStableID: brokerURL.mobileBrokerGatewayStableID ?? brokerConfig.hostname,
                     onComplete: { session in
                         self.mobileBrokerSession = session
                     },

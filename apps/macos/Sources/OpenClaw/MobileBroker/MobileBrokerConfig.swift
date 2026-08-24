@@ -70,4 +70,15 @@ extension URL {
         let effectivePort = port ?? (useTLS ? 443 : 80)
         return MobileBrokerConfig(hostname: host, port: effectivePort, useTLS: useTLS)
     }
+
+    /// The canonical MobileBrokerSessionStore key for this URL, if it's a
+    /// mobile-broker host: just the broker hostname. One broker hostname is
+    /// one pairing regardless of which UI surface (primary Connection tab,
+    /// secondary Gateways-tab profile, Dashboard/Canvas document load) is
+    /// asking, so every call site derives the same key from the URL alone --
+    /// no profile id or connection-endpoint context needs to be threaded
+    /// through to find a session stored elsewhere.
+    public var mobileBrokerGatewayStableID: String? {
+        self.mobileBrokerConfigFromHost?.hostname
+    }
 }

@@ -559,7 +559,7 @@ final class MacNodeModeCoordinator: NSObject {
 
     private func connect(_ attempt: ConnectionAttempt) async throws {
         let url = attempt.endpoint.config.url
-        let mobileBrokerStableID = attempt.endpoint.deviceAuthGatewayID ?? url.absoluteString
+        let mobileBrokerStableID = url.mobileBrokerGatewayStableID ?? url.absoluteString
         if url.isMobileBrokerHost {
             await MobileBrokerSessionStore.shared.refreshIfNeeded(
                 forURL: url,

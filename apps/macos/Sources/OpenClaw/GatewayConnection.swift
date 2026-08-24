@@ -867,7 +867,7 @@ extension GatewayConnection {
         }
         let activationBindingKey = self.activationBindingKeyProvider()
         let sessionBox = self.sessionProvider(endpoint.tls)
-        let mobileBrokerStableID = endpoint.deviceAuthGatewayID ?? config.url.absoluteString
+        let mobileBrokerStableID = config.url.mobileBrokerGatewayStableID ?? config.url.absoluteString
         if config.url.isMobileBrokerHost {
             await MobileBrokerSessionStore.shared.refreshIfNeeded(
                 forURL: config.url,

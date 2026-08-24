@@ -446,7 +446,9 @@ final class DashboardWindowController: NSWindowController, WKNavigationDelegate,
         self.hasLiveContent = false
         self.isShowingFailurePage = false
         dashboardWindowLogger.debug("dashboard load \(dashboardLogString(for: url), privacy: .public)")
-        self.webView.load(URLRequest(url: url))
+        var request = URLRequest(url: url)
+        request.attachMobileBrokerAuthorizationIfNeeded()
+        self.webView.load(request)
     }
 
     private func openLinkBrowser(_ url: URL, requestBrowserProfileImportOffer: Bool = true) {

@@ -541,7 +541,7 @@ struct GeneralSettings: View {
                 MobileBrokerSignInSheet(viewModel: MobileBrokerSignInSheet.ViewModel(
                     authClient: MobileBrokerAuthClient(config: brokerConfig),
                     sessionStore: MobileBrokerSessionStore.shared,
-                    gatewayStableID: self.mobileBrokerGatewayStableID(brokerURL: brokerURL),
+                    gatewayStableID: brokerURL.mobileBrokerGatewayStableID ?? brokerConfig.hostname,
                     onComplete: { session in
                         self.mobileBrokerSession = session
                     },
@@ -550,17 +550,6 @@ struct GeneralSettings: View {
                     }))
             }
         }
-    }
-
-    /// The same stable id `GatewayEndpointStore` will compute for this exact
-    /// URL/transport once connected (`GatewayDiscoveryPreferences.deviceAuthGatewayID`),
-    /// so the session stored here is the one the real connect path looks up.
-    private func mobileBrokerGatewayStableID(brokerURL: URL) -> String {
-        GatewayDiscoveryPreferences.deviceAuthGatewayID(
-            connectionMode: .remote,
-            remoteTransport: .direct,
-            remoteURL: brokerURL.absoluteString,
-            remoteTarget: self.state.remoteTarget) ?? brokerURL.absoluteString
     }
 
     private func remoteMobileBrokerRow(brokerURL: URL) -> some View {
