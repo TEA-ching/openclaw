@@ -85,14 +85,67 @@ helper_bin_for_arch() {
   echo "$(helper_build_path_for_arch "$1")/$BUILD_CONFIG/$MLX_TTS_HELPER_PRODUCT"
 }
 
+MLX_HELPER_REQUIRED_SWIFT_TOOLS_MAJOR=6
+MLX_HELPER_REQUIRED_SWIFT_TOOLS_MINOR=3
+
+swift_tools_major_minor() {
+  local swift_bin="$1"
+  local version_output
+  version_output="$("$swift_bin" --version 2>&1)" || return 1
+  printf '%s\n' "$version_output" | sed -nE 's/.*Apple Swift version ([0-9]+)\.([0-9]+).*/\1 \2/p' | head -n 1
+}
+
+swift_tools_version_at_least() {
+  local swift_bin="$1"
+  local major minor
+  read -r major minor <<< "$(swift_tools_major_minor "$swift_bin")" || return 1
+  [[ -n "$major" && -n "$minor" ]] || return 1
+  (( major > MLX_HELPER_REQUIRED_SWIFT_TOOLS_MAJOR )) ||
+    (( major == MLX_HELPER_REQUIRED_SWIFT_TOOLS_MAJOR && minor >= MLX_HELPER_REQUIRED_SWIFT_TOOLS_MINOR ))
+}
+
+# mlx-swift's own Package.swift requires Swift tools 6.3+, which can be
+# newer than Xcode's currently-selected default toolchain. Scope any
+# substitute strictly to this one helper build via TOOLCHAINS (Xcode's own
+# toolchain-selection mechanism, so SDK resolution stays correct) -- the
+# main OpenClaw app's SwiftUI macro plugins and AVKit resolution depend on
+# Xcode's own default toolchain and must not be affected by this choice.
+mlx_helper_toolchain_env() {
+  local default_swift="$1"
+  local candidate candidate_swift bundle_id
+
+  if swift_tools_version_at_least "$default_swift"; then
+    return 0
+  fi
+
+  for candidate in "$HOME/Library/Developer/Toolchains"/*.xctoolchain; do
+    [[ -d "$candidate" ]] || continue
+    candidate_swift="$candidate/usr/bin/swift"
+    [[ -x "$candidate_swift" ]] || continue
+    swift_tools_version_at_least "$candidate_swift" || continue
+    bundle_id="$(plutil -extract CFBundleIdentifier raw "$candidate/Info.plist" 2>/dev/null)" || continue
+    [[ -n "$bundle_id" ]] || continue
+    echo "⚠️  Default Swift toolchain is older than ${MLX_HELPER_REQUIRED_SWIFT_TOOLS_MAJOR}.${MLX_HELPER_REQUIRED_SWIFT_TOOLS_MINOR}; using installed toolchain $bundle_id for $MLX_TTS_HELPER_PRODUCT only" >&2
+    printf 'TOOLCHAINS=%s\n' "$bundle_id"
+    return 0
+  done
+}
+
 build_mlx_tts_helper() {
   local arch="$1"
   local swift_path
   local toolchain_metal
   local swift_args=(build)
+  local toolchain_env=()
+  local toolchain_override
 
   swift_path="$(xcrun --find swift)"
   toolchain_metal="$(dirname "$swift_path")/metal"
+
+  toolchain_override="$(mlx_helper_toolchain_env "$swift_path")"
+  if [[ -n "$toolchain_override" ]]; then
+    toolchain_env=(env "$toolchain_override")
+  fi
 
   if [[ -x "$toolchain_metal" ]] &&
     ! "$toolchain_metal" --version >/dev/null 2>&1 &&
@@ -101,7 +154,7 @@ build_mlx_tts_helper() {
     swift_args+=(--build-system native)
   fi
 
-  swift "${swift_args[@]}" \
+  "${toolchain_env[@]}" swift "${swift_args[@]}" \
     --package-path "$MLX_TTS_HELPER_ROOT" \
     -c "$BUILD_CONFIG" \
     --product "$MLX_TTS_HELPER_PRODUCT" \
