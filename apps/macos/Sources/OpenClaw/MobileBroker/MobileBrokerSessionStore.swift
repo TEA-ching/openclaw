@@ -66,12 +66,15 @@ public final class MobileBrokerSessionStore: Sendable {
     public func storeSession(_ session: Session, forGatewayStableID gatewayStableID: String) throws {
         let data = try JSONEncoder().encode(session)
 
+        // Plain legacy macOS Keychain, matching MacGatewayProfileStore's own
+        // query shape: kSecUseDataProtectionKeychain requires a
+        // keychain-access-groups entitlement this single, unsandboxed app
+        // doesn't have, and fails writes with errSecMissingEntitlement (-34018).
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: self.keychainKey(for: gatewayStableID),
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecUseDataProtectionKeychain as String: true,
         ]
 
         // Delete existing item first
