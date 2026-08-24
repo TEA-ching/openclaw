@@ -391,7 +391,16 @@ echo "🔨 Building $PRODUCT ($BUILD_CONFIG) [${BUILD_ARCHS[*]}]"
 for arch in "${BUILD_ARCHS[@]}"; do
   BUILD_PATH="$(build_path_for_arch "$arch")"
   echo "📦 Resolving Swift packages [$arch]"
-  run_with_locked_swift_packages swift package --scratch-path "$BUILD_PATH" resolve
+  # `swift package resolve` alone computes a pruned dependency graph that
+  # omits packages only reachable through specific build targets (e.g.
+  # ElevenLabsKit, needed transitively via OpenClawKit but invisible to a
+  # bare resolve) -- even restoring Package.resolved's bytes afterward
+  # leaves that pruned view in the scratch path's cached workspace state,
+  # so a subsequent build still "corrects" it and trips the lock check
+  # below. Priming with a real (unlocked) build instead performs the same
+  # complete resolution `swift build` needs, so nothing changes once the
+  # locked build call below runs against it.
+  swift build -c "$BUILD_CONFIG" --product "$PRODUCT" --build-path "$BUILD_PATH" --arch "$arch" -Xlinker -rpath -Xlinker @executable_path/../Frameworks
   patch_swiftpm_resource_lookups "$BUILD_PATH"
   echo "🔨 Building $PRODUCT ($BUILD_CONFIG) [$arch]"
   run_with_locked_swift_packages swift build -c "$BUILD_CONFIG" --product "$PRODUCT" --build-path "$BUILD_PATH" --arch "$arch" -Xlinker -rpath -Xlinker @executable_path/../Frameworks
