@@ -867,6 +867,12 @@ extension GatewayConnection {
         }
         let activationBindingKey = self.activationBindingKeyProvider()
         let sessionBox = self.sessionProvider(endpoint.tls)
+        let mobileBrokerStableID = endpoint.deviceAuthGatewayID ?? config.url.absoluteString
+        if config.url.isMobileBrokerHost {
+            await MobileBrokerSessionStore.shared.refreshIfNeeded(
+                forURL: config.url,
+                gatewayStableID: mobileBrokerStableID)
+        }
         let client = GatewayChannelActor(
             url: config.url,
             token: config.token,
@@ -901,6 +907,11 @@ extension GatewayConnection {
                 await self?.handleDisconnect(
                     routeGeneration: configuredRouteGeneration,
                     socketGeneration: socketGeneration)
+            },
+            extraHeadersProvider: {
+                MobileBrokerSessionStore.shared.authorizationHeaders(
+                    forURL: config.url,
+                    gatewayStableID: mobileBrokerStableID)
             })
         self.configuredConnection = ConfiguredConnection(
             client: client,

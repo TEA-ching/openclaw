@@ -106,7 +106,6 @@ final class GatewayConnectionController {
     private var currentScenePhase: ScenePhase = .inactive
     private var didAutoConnect = false
     private var pendingServiceResolvers: [String: GatewayServiceResolver] = [:]
-    var mobileBrokerAuthStates: [String: MobileBrokerAuthState] = [:]
     private var pendingTrustConnect: GatewayPendingTrustConnect?
     private var trustProbeGeneration: UInt64 = 0
     private var connectAttemptGeneration: UInt64 = 0

@@ -191,8 +191,21 @@ private struct GatewayProfileEditor: View {
     @State private var password = ""
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var showsMobileBrokerSignIn = false
+    @State private var mobileBrokerSession: MobileBrokerSessionStore.Session?
 
     let onSaved: (MacGatewayProfile) -> Void
+
+    /// The URL typed so far, if it parses to a mobile-broker host. Heuristic
+    /// only, mirroring the iOS app: no persisted per-profile "auth mode" flag.
+    private var mobileBrokerCanonicalURL: URL? {
+        let rawURL = self.url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let typedURL = URL(string: rawURL),
+              let canonical = try? MacGatewayProfileStore.canonicalURL(typedURL),
+              canonical.isMobileBrokerHost
+        else { return nil }
+        return canonical
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -210,16 +223,26 @@ private struct GatewayProfileEditor: View {
                     Text("Gateway URL")
                     TextField("wss://gateway.example.com", text: self.$url)
                         .textFieldStyle(.roundedBorder)
+                        .onChange(of: self.url) { _, _ in
+                            self.mobileBrokerSession = nil
+                        }
                 }
-                GridRow {
-                    Text("Token")
-                    SecureField("Optional", text: self.$token)
-                        .textFieldStyle(.roundedBorder)
-                }
-                GridRow {
-                    Text("Password")
-                    SecureField("Optional", text: self.$password)
-                        .textFieldStyle(.roundedBorder)
+                if let brokerURL = self.mobileBrokerCanonicalURL {
+                    GridRow {
+                        Text("GitHub Sign-In")
+                        self.mobileBrokerSignInRow(brokerURL: brokerURL)
+                    }
+                } else {
+                    GridRow {
+                        Text("Token")
+                        SecureField("Optional", text: self.$token)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
+                        Text("Password")
+                        SecureField("Optional", text: self.$password)
+                            .textFieldStyle(.roundedBorder)
+                    }
                 }
             }
             .gridColumnAlignment(.leading)
@@ -243,11 +266,50 @@ private struct GatewayProfileEditor: View {
                     Task { await self.save() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(self.isSaving || self.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(self.isSaving || !self.canSave)
             }
         }
         .padding(24)
         .frame(width: 540)
+        .sheet(isPresented: self.$showsMobileBrokerSignIn) {
+            if let brokerURL = self.mobileBrokerCanonicalURL,
+               let brokerConfig = brokerURL.mobileBrokerConfigFromHost
+            {
+                MobileBrokerSignInSheet(viewModel: MobileBrokerSignInSheet.ViewModel(
+                    authClient: MobileBrokerAuthClient(config: brokerConfig),
+                    sessionStore: MobileBrokerSessionStore.shared,
+                    gatewayStableID: MacGatewayProfileStore.profileID(url: brokerURL),
+                    onComplete: { session in
+                        self.mobileBrokerSession = session
+                    },
+                    onDismiss: {
+                        self.showsMobileBrokerSignIn = false
+                    }))
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        guard !self.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard self.mobileBrokerCanonicalURL != nil else { return true }
+        return self.mobileBrokerSession != nil
+    }
+
+    private func mobileBrokerSignInRow(brokerURL: URL) -> some View {
+        HStack(spacing: 8) {
+            if self.mobileBrokerSession != nil {
+                Label("Signed in", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Button("Sign In Again") {
+                    self.showsMobileBrokerSignIn = true
+                }
+            } else {
+                Button("Sign in with GitHub") {
+                    self.showsMobileBrokerSignIn = true
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
     }
 
     private func save() async {
@@ -259,11 +321,12 @@ private struct GatewayProfileEditor: View {
             guard let url = URL(string: rawURL) else {
                 throw MacGatewayProfileError.invalidURL
             }
+            let usesMobileBroker = self.mobileBrokerCanonicalURL != nil
             let profile = try await MacGatewayProfileStore.shared.upsert(
                 name: self.name,
                 url: url,
-                token: self.token,
-                password: self.password)
+                token: usesMobileBroker ? nil : self.token,
+                password: usesMobileBroker ? nil : self.password)
             WebChatManager.shared.gatewayProfileDidSave(profileID: profile.id)
             self.onSaved(profile)
             self.dismiss()
