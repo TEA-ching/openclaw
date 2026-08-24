@@ -1098,6 +1098,19 @@ extension GatewayConnection {
 
 extension GatewayConnection {
     func controlUiAutoAuthToken(config: Config) async -> String? {
+        // Mobile-broker connections authenticate the WS upgrade out-of-band via
+        // extraHeadersProvider, never negotiating one of the in-band
+        // authBinding sources (.sharedToken/.deviceToken/etc.) the guard chain
+        // below requires -- so client.authBinding(...) is nil and every route
+        // through that logic returns nil for these connections. The Control
+        // UI page loaded into Dashboard/Canvas needs this same access token
+        // (passed via dashboardURL's #token= fragment) to authenticate its
+        // own in-page WebSocket reconnect, or it reports "gateway not
+        // reachable" forever despite the native connection being fine.
+        if config.url.isMobileBrokerHost {
+            return (try? MobileBrokerSessionStore.shared.retrieveSession(
+                forGatewayStableID: config.url.mobileBrokerGatewayStableID ?? ""))?.accessToken
+        }
         guard let endpoint = try? await currentEndpoint(),
               endpoint.config.url == config.url,
               endpoint.config.token == config.token,
