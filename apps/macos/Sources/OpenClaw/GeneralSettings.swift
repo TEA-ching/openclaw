@@ -26,6 +26,8 @@ struct GeneralSettings: View {
     @State private var gatewayStatus: GatewayEnvironmentStatus = .checking
     @State private var remoteStatus: RemoteStatus = .idle
     @State private var showRemoteAdvanced = false
+    @State private var showsMobileBrokerSignIn = false
+    @State private var mobileBrokerSession: MobileBrokerSessionStore.Session?
     @State private var computerControlPermissions = ComputerControlPermissionSnapshot.probe()
     private let isPreview = ProcessInfo.processInfo.isPreview
     private var isNixMode: Bool {
@@ -486,6 +488,19 @@ struct GeneralSettings: View {
         }
     }
 
+    /// The remote Gateway URL, canonicalized the same way the real connection
+    /// resolution path does (`GatewayRemoteConfig.normalizeGatewayUrl`), if it
+    /// matches the mobile-broker hostname heuristic. Heuristic only, mirroring
+    /// both the iOS app and the Gateways-tab profile editor: no persisted
+    /// "auth mode" flag.
+    private var mobileBrokerCanonicalURL: URL? {
+        guard self.state.remoteTransport == .direct else { return nil }
+        guard let canonical = GatewayRemoteConfig.normalizeGatewayUrl(self.state.remoteUrl),
+              canonical.isMobileBrokerHost
+        else { return nil }
+        return canonical
+    }
+
     private var remoteCard: some View {
         VStack(alignment: .leading, spacing: 20) {
             SettingsCardGroup("Remote Access") {
@@ -496,7 +511,11 @@ struct GeneralSettings: View {
                 } else {
                     self.remoteDirectRow
                 }
-                self.remoteTokenRow
+                if let brokerURL = self.mobileBrokerCanonicalURL {
+                    self.remoteMobileBrokerRow(brokerURL: brokerURL)
+                } else {
+                    self.remoteTokenRow
+                }
                 GatewayConfigConflictRecoveryView(state: self.state)
             }
 
@@ -512,6 +531,56 @@ struct GeneralSettings: View {
             }
         }
         .transition(.opacity)
+        .onChange(of: self.state.remoteUrl) { _, _ in
+            self.mobileBrokerSession = nil
+        }
+        .sheet(isPresented: self.$showsMobileBrokerSignIn) {
+            if let brokerURL = self.mobileBrokerCanonicalURL,
+               let brokerConfig = brokerURL.mobileBrokerConfigFromHost
+            {
+                MobileBrokerSignInSheet(viewModel: MobileBrokerSignInSheet.ViewModel(
+                    authClient: MobileBrokerAuthClient(config: brokerConfig),
+                    sessionStore: MobileBrokerSessionStore.shared,
+                    gatewayStableID: self.mobileBrokerGatewayStableID(brokerURL: brokerURL),
+                    onComplete: { session in
+                        self.mobileBrokerSession = session
+                    },
+                    onDismiss: {
+                        self.showsMobileBrokerSignIn = false
+                    }))
+            }
+        }
+    }
+
+    /// The same stable id `GatewayEndpointStore` will compute for this exact
+    /// URL/transport once connected (`GatewayDiscoveryPreferences.deviceAuthGatewayID`),
+    /// so the session stored here is the one the real connect path looks up.
+    private func mobileBrokerGatewayStableID(brokerURL: URL) -> String {
+        GatewayDiscoveryPreferences.deviceAuthGatewayID(
+            connectionMode: .remote,
+            remoteTransport: .direct,
+            remoteURL: brokerURL.absoluteString,
+            remoteTarget: self.state.remoteTarget) ?? brokerURL.absoluteString
+    }
+
+    private func remoteMobileBrokerRow(brokerURL: URL) -> some View {
+        SettingsCardRow(
+            title: "GitHub Sign-In",
+            subtitle: "This Gateway uses mobile-broker authentication instead of a token.")
+        {
+            if self.mobileBrokerSession != nil {
+                Label("Signed in", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Button("Sign In Again") {
+                    self.showsMobileBrokerSignIn = true
+                }
+            } else {
+                Button("Sign in with GitHub") {
+                    self.showsMobileBrokerSignIn = true
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
     }
 
     private var remoteDiscoveryRow: some View {
