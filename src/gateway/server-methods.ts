@@ -101,6 +101,8 @@ const CORE_GATEWAY_HANDLER_MODULES = {
   fs: () => import("./server-methods/fs.js").then((module) => module.fsHandlers),
   health: () => import("./server-methods/health.js").then((module) => module.healthHandlers),
   logs: () => import("./server-methods/logs.js").then((module) => module.logsHandlers),
+  "local-desktop": () =>
+    import("./server-methods/local-desktop.js").then((module) => module.localDesktopHandlers),
   "memory-search": () =>
     import("./server-methods/memory-search.js").then((module) => module.memorySearchHandlers),
   terminal: () => import("./server-methods/terminal.js").then((module) => module.terminalHandlers),

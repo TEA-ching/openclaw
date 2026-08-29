@@ -143,6 +143,8 @@ export {
   WorkerDesktopObserveResultSchema,
   WorkerDesktopLaunchParamsSchema,
   WorkerDesktopLaunchResultSchema,
+  LocalDesktopObserveParamsSchema,
+  LocalDesktopObserveResultSchema,
   SystemInfoParamsSchema,
   SystemInfoResultSchema,
   StateVersionSchema,

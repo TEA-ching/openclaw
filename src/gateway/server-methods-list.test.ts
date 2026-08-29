@@ -66,7 +66,7 @@ describe("listGatewayMethods", () => {
   });
 
   it("appends new methods after model probing without shifting older method indices", () => {
-    expect(listGatewayMethods().slice(-46)).toEqual([
+    expect(listGatewayMethods().slice(-47)).toEqual([
       "models.probe",
       "migrations.memory.plan",
       "migrations.memory.apply",
@@ -106,6 +106,7 @@ describe("listGatewayMethods", () => {
       "projects.register",
       "projects.remove",
       "worker.desktop.launch",
+      "desktop.observeLocal",
       "secrets.store.list",
       "secrets.store.set",
       "secrets.store.delete",
@@ -204,7 +205,7 @@ describe("listGatewayMethods", () => {
       "exec.approval.get",
     ]);
     expect(methods).toContain("tts.speak");
-    expect(coreMethods.slice(-53)).toEqual([
+    expect(coreMethods.slice(-54)).toEqual([
       "sessions.catalog.continue",
       "sessions.catalog.archive",
       "approval.get",
@@ -251,6 +252,7 @@ describe("listGatewayMethods", () => {
       "projects.register",
       "projects.remove",
       "worker.desktop.launch",
+      "desktop.observeLocal",
       "secrets.store.list",
       "secrets.store.set",
       "secrets.store.delete",
@@ -274,9 +276,10 @@ describe("listGatewayMethods", () => {
     expect(methods.indexOf("projects.register")).toBe(methods.indexOf("projects.list") + 1);
     expect(methods.indexOf("projects.remove")).toBe(methods.indexOf("projects.register") + 1);
     expect(methods.indexOf("worker.desktop.launch")).toBe(methods.indexOf("projects.remove") + 1);
-    expect(methods.indexOf("secrets.store.list")).toBe(
+    expect(methods.indexOf("desktop.observeLocal")).toBe(
       methods.indexOf("worker.desktop.launch") + 1,
     );
+    expect(methods.indexOf("secrets.store.list")).toBe(methods.indexOf("desktop.observeLocal") + 1);
     expect(methods.indexOf("secrets.store.set")).toBe(methods.indexOf("secrets.store.list") + 1);
     expect(methods.indexOf("secrets.store.delete")).toBe(methods.indexOf("secrets.store.set") + 1);
     expect(methods.indexOf("users.prefs.get")).toBe(methods.indexOf("secrets.store.delete") + 1);

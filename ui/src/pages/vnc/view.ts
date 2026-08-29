@@ -1,10 +1,6 @@
 // Control UI view renders VNC screen content.
 import { html, nothing } from "lit";
-import {
-  renderSettingsPage,
-  renderSettingsRow,
-  renderSettingsStatus,
-} from "../../components/settings-ui.ts";
+import { renderSettingsPage, renderSettingsStatus } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
 
 type VncProps = {
@@ -19,7 +15,7 @@ export function renderVnc(props: VncProps) {
   switch (props.connectionStatus) {
     case "connecting":
       statusContent = renderSettingsStatus({
-        kind: "info",
+        kind: "muted",
         label: t("vnc.connecting"),
       });
       break;

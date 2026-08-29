@@ -264,6 +264,7 @@ const NAVIGATION_ICONS: NavigationItem = {
   logs: "scrollText",
   plugin: "puzzle",
   "new-session": "plus",
+  vnc: "monitor",
 };
 
 export function isSettingsNavigationRoute(routeId: NavigationRouteId): boolean {

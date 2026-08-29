@@ -145,6 +145,18 @@ export const WorkerDesktopLaunchResultSchema = closedObject({
   status: Type.Literal("ready"),
 });
 
+/** Observes this Gateway process's own local desktop (e.g. a pod-local x11vnc). */
+export const LocalDesktopObserveParamsSchema = closedObject({});
+
+// Transport mirrors the worker desktop contract; the local desktop always grants full
+// control, so there is no separate control/observer role to negotiate here.
+export const LocalDesktopObserveResultSchema = closedObject({
+  transport: Type.String({ enum: ["rfb"] }),
+  wsPath: NonEmptyString,
+  expiresAtMs: Type.Integer({ minimum: 0 }),
+  vncPassword: Type.Optional(NonEmptyString),
+});
+
 export type EnvironmentStatus = Static<typeof EnvironmentStatusSchema>;
 export type WorkerEnvironmentState = Static<typeof WorkerEnvironmentStateSchema>;
 export type WorkerTunnelStatus = Static<typeof WorkerTunnelStatusSchema>;
@@ -163,3 +175,5 @@ export type WorkerDesktopObserveParams = Static<typeof WorkerDesktopObserveParam
 export type WorkerDesktopObserveResult = Static<typeof WorkerDesktopObserveResultSchema>;
 export type WorkerDesktopLaunchParams = Static<typeof WorkerDesktopLaunchParamsSchema>;
 export type WorkerDesktopLaunchResult = Static<typeof WorkerDesktopLaunchResultSchema>;
+export type LocalDesktopObserveParams = Static<typeof LocalDesktopObserveParamsSchema>;
+export type LocalDesktopObserveResult = Static<typeof LocalDesktopObserveResultSchema>;

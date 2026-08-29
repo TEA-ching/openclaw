@@ -1026,6 +1026,19 @@ export function attachGatewayUpgradeHandler(opts: {
         });
         return;
       }
+      if (requestPath === "/desktop/observe-local") {
+        // Pod-local desktop observe: independent of the cloud-workers session registry above,
+        // so it stays reachable even when the worker-environments subsystem is not running.
+        if (isGatewayWorkAdmissionClosed()) {
+          writeGatewayUpgradeServiceUnavailable(socket, "Gateway websocket admission closed");
+          socket.destroy();
+          return;
+        }
+        const { handleLocalDesktopObserveUpgrade } =
+          await import("./desktop/local-desktop-bridge.js");
+        handleLocalDesktopObserveUpgrade(req, socket, head);
+        return;
+      }
       // Plugin-owned upgrade routes have already had the opportunity to claim the socket.
       // Core Gateway control connections remain reachable while suspension is prepared.
       try {

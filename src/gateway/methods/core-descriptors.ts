@@ -499,6 +499,9 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["projects.register", "projects", "operator.admin", "2026.8"],
   ["projects.remove", "projects", "operator.admin", "2026.8"],
   ["worker.desktop.launch", "environments", "operator.admin", "2026.8", { startup: true }],
+  // Observes this Gateway process's own local desktop (e.g. a pod-local x11vnc), independent
+  // of the cloud-workers subsystem that worker.desktop.observe depends on.
+  ["desktop.observeLocal", "local-desktop", "operator.admin", "2026.8"],
   // Store CRUD shares the auxiliary secrets runtime owner and appends for stable indices.
   ["secrets.store.list", null, "operator.admin", "2026.8"],
   ["secrets.store.set", null, "operator.admin", "2026.8", { controlPlaneWrite: true }],
