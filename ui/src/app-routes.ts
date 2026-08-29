@@ -54,6 +54,7 @@ import { page as skillWorkshopPage } from "./pages/skill-workshop/route.ts";
 import { page as skillsPage } from "./pages/skills/route.ts";
 import { page as tasksPage } from "./pages/tasks/route.ts";
 import { page as usagePage } from "./pages/usage/route.ts";
+import { page as vncPage } from "./pages/vnc/route.ts";
 import { page as workboardPage } from "./pages/workboard/route.ts";
 import { page as worktreesPage } from "./pages/worktrees/route.ts";
 
@@ -105,6 +106,7 @@ const APP_ROUTE_TREE = [
   cronPage,
   tasksPage,
   devicesPage,
+  vncPage,
   pluginPage,
 ] as const;
 

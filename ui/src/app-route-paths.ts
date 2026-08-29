@@ -68,6 +68,7 @@ const APP_ROUTE_DEFINITIONS = {
   cron: { path: "/automations", aliases: ["/cron"] },
   tasks: { path: "/tasks" },
   devices: { path: "/settings/devices", aliases: ["/nodes"] },
+  vnc: { path: "/vnc" },
   plugin: { path: "/plugin" },
 } as const;
 

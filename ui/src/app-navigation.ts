@@ -381,6 +381,7 @@ const NAVIGATION_COPY: Record<NavigationRouteId, { titleKey: string; subtitleKey
   secrets: { titleKey: "tabs.secrets", subtitleKey: "secretsStore.hint" },
   advanced: { titleKey: "routeTitles.advanced", subtitleKey: "subtitles.advanced" },
   debug: { titleKey: "tabs.debug", subtitleKey: "subtitles.debug" },
+  vnc: { titleKey: "vnc.title", subtitleKey: "subtitles.vnc" },
   logs: { titleKey: "tabs.logs", subtitleKey: "subtitles.logs" },
   plugin: { titleKey: "tabs.plugin", subtitleKey: "subtitles.plugin" },
   "new-session": { titleKey: "newSession.title", subtitleKey: "newSession.hint" },
