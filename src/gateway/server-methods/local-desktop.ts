@@ -3,17 +3,12 @@ import {
   errorShape,
   validateLocalDesktopObserveParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import { respondInvalidParams } from "./nodes.helpers.js";
 import type { GatewayRequestHandlers } from "./types.js";
+import { assertValidParams } from "./validation.js";
 
 export const localDesktopHandlers: GatewayRequestHandlers = {
   "desktop.observeLocal": async ({ params, respond }) => {
-    if (!validateLocalDesktopObserveParams(params)) {
-      respondInvalidParams({
-        respond,
-        method: "desktop.observeLocal",
-        validator: validateLocalDesktopObserveParams,
-      });
+    if (!assertValidParams(params, validateLocalDesktopObserveParams, "desktop.observeLocal", respond)) {
       return;
     }
     const vncPassword = process.env.VNC_PASSWORD;

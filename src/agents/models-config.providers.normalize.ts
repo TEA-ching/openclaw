@@ -1,6 +1,7 @@
 /**
  * Normalizes configured provider model rows for runtime/discovery use.
  */
+import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginManifestRecord, PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { ensureAuthProfileStore } from "./auth-profiles/store.js";
@@ -17,7 +18,10 @@ import {
   resolveApiKeyFromProfiles,
   resolveMissingProviderApiKey,
 } from "./models-config.providers.secret-helpers.js";
-import { enforceSourceManagedProviderSecrets } from "./models-config.providers.source-managed.js";
+import {
+  enforceSourceManagedProviderSecrets,
+  normalizeSourceProviderLookup,
+} from "./models-config.providers.source-managed.js";
 
 type ModelsConfig = NonNullable<OpenClawConfig["models"]>;
 type ProviderModelConfig = NonNullable<
@@ -32,10 +36,12 @@ function getProviderModelId(model: ProviderModelConfig): string | undefined {
 }
 
 function normalizeModelCostForCatalog(model: ProviderModelConfig): ProviderModelConfig {
-  const cost = model.cost as unknown as Record<string, number | undefined>;
+  const cost = model.cost;
   if (
     !cost ||
-    ["input", "output", "cacheRead", "cacheWrite"].every((key) => cost[key] !== undefined)
+    (["input", "output", "cacheRead", "cacheWrite"] as const).every(
+      (key) => cost[key] !== undefined,
+    )
   ) {
     return model;
   }
@@ -74,9 +80,9 @@ function normalizeProviderModelsForConfig(
   provider: ProviderConfig,
   options: ProviderModelNormalizationOptions = {},
   completeCatalogCosts = false,
-): { provider: ProviderConfig; mutated: boolean } {
+): ProviderConfig {
   if (!Array.isArray(provider.models) || provider.models.length === 0) {
-    return { provider, mutated: false };
+    return provider;
   }
 
   let mutated = false;
@@ -120,9 +126,7 @@ function normalizeProviderModelsForConfig(
     }
   }
 
-  return mutated
-    ? { provider: { ...provider, models: nextModels }, mutated }
-    : { provider, mutated };
+  return mutated ? { ...provider, models: nextModels } : provider;
 }
 
 export function normalizeProviderCatalogModelsForConfig(
@@ -139,10 +143,8 @@ export function normalizeProviderCatalogModelsForConfig(
     // Complete the publication schema after duplicate rows merge, or synthetic
     // zeroes can mask explicit cache prices supplied by a later row.
     const normalized = normalizeProviderModelsForConfig(providerKey, provider, options, true);
-    if (normalized.mutated) {
-      mutated = true;
-    }
-    next[providerKey] = normalized.provider;
+    mutated ||= normalized !== provider;
+    next[providerKey] = normalized;
   }
 
   return mutated ? next : providers;
@@ -153,8 +155,7 @@ export function normalizeProviders(params: {
   agentDir: string;
   env?: NodeJS.ProcessEnv;
   secretDefaults?: SecretDefaults;
-  sourceProviders?: ModelsConfig["providers"];
-  sourceSecretDefaults?: SecretDefaults;
+  sourceConfigForSecrets?: OpenClawConfig;
   secretRefManagedProviders?: Set<string>;
   manifestPlugins?: ProviderModelNormalizationOptions["manifestPlugins"];
   manifestRegistry?: Pick<PluginManifestRegistry, "plugins">;
@@ -164,6 +165,9 @@ export function normalizeProviders(params: {
     return providers;
   }
   const env = params.env ?? process.env;
+  const sourceProviders = normalizeSourceProviderLookup(
+    params.sourceConfigForSecrets?.models?.providers,
+  );
   let authStore: ReturnType<typeof ensureAuthProfileStore> | undefined;
   const resolveProfileApiKey = (providerKey: string) => {
     authStore ??= ensureAuthProfileStore(params.agentDir, {
@@ -187,41 +191,52 @@ export function normalizeProviders(params: {
     if (normalizedKey !== key) {
       mutated = true;
     }
+    // Only authored fields inherit loader facts; plugin-discovered inputs keep their own syntax.
+    const sourceProvider = sourceProviders.get(normalizeProviderId(normalizedKey));
+    const source =
+      sourceProvider && params.sourceConfigForSecrets
+        ? {
+            config: params.sourceConfigForSecrets,
+            providerKey: sourceProvider.providerKey,
+          }
+        : undefined;
     let normalizedProvider = provider;
     const normalizedHeaders = normalizeHeaderValues({
       headers: normalizedProvider.headers,
       secretDefaults: params.secretDefaults,
+      source,
     });
     if (normalizedHeaders.mutated) {
-      mutated = true;
       normalizedProvider = { ...normalizedProvider, headers: normalizedHeaders.headers };
     }
-    const providerWithConfiguredApiKey = normalizeConfiguredProviderApiKey({
+    const sourceInput =
+      sourceProvider?.providerConfig.apiKey !== undefined
+        ? {
+            config: params.sourceConfigForSecrets,
+            path: `models.providers.${sourceProvider.providerKey}.apiKey`,
+            value: sourceProvider.providerConfig.apiKey,
+            defaults: params.sourceConfigForSecrets?.secrets?.defaults,
+          }
+        : undefined;
+    normalizedProvider = normalizeConfiguredProviderApiKey({
       providerKey: normalizedKey,
+      sourceInput,
       provider: normalizedProvider,
       secretDefaults: params.secretDefaults,
       profileApiKey: undefined,
       secretRefManagedProviders: params.secretRefManagedProviders,
     });
-    if (providerWithConfiguredApiKey !== normalizedProvider) {
-      mutated = true;
-      normalizedProvider = providerWithConfiguredApiKey;
-    }
 
     // Reverse-lookup: if apiKey looks like a resolved secret value (not an env
     // var name), check whether it matches the canonical env var for this provider.
     // This prevents resolveConfigEnvVars()-resolved secrets from being persisted
     // to models.json as plaintext. (Fixes #38757)
-    const providerWithResolvedEnvApiKey = normalizeResolvedEnvApiKey({
+    normalizedProvider = normalizeResolvedEnvApiKey({
       providerKey: normalizedKey,
       provider: normalizedProvider,
       env,
       secretRefManagedProviders: params.secretRefManagedProviders,
     });
-    if (providerWithResolvedEnvApiKey !== normalizedProvider) {
-      mutated = true;
-      normalizedProvider = providerWithResolvedEnvApiKey;
-    }
 
     const needsProfileApiKey =
       Array.isArray(normalizedProvider.models) &&
@@ -234,7 +249,7 @@ export function normalizeProviders(params: {
     const providerApiKeyResolver = needsProfileApiKey
       ? resolveProviderConfigApiKeyResolver(normalizedKey, undefined, params.manifestRegistry)
       : undefined;
-    const providerWithApiKey = resolveMissingProviderApiKey({
+    normalizedProvider = resolveMissingProviderApiKey({
       providerKey: normalizedKey,
       provider: normalizedProvider,
       env,
@@ -242,32 +257,17 @@ export function normalizeProviders(params: {
       secretRefManagedProviders: params.secretRefManagedProviders,
       providerApiKeyResolver,
     });
-    if (providerWithApiKey !== normalizedProvider) {
-      mutated = true;
-      normalizedProvider = providerWithApiKey;
-    }
 
-    const providerSpecificNormalized = normalizeProviderSpecificConfig(
+    normalizedProvider = normalizeProviderSpecificConfig(
       normalizedKey,
       normalizedProvider,
       params.manifestRegistry,
     );
-    if (providerSpecificNormalized !== normalizedProvider) {
-      mutated = true;
-      normalizedProvider = providerSpecificNormalized;
-    }
 
-    const providerWithNormalizedModels = normalizeProviderModelsForConfig(
-      normalizedKey,
-      normalizedProvider,
-      {
-        manifestPlugins: params.manifestPlugins,
-      },
-    );
-    if (providerWithNormalizedModels.mutated) {
-      mutated = true;
-      normalizedProvider = providerWithNormalizedModels.provider;
-    }
+    normalizedProvider = normalizeProviderModelsForConfig(normalizedKey, normalizedProvider, {
+      manifestPlugins: params.manifestPlugins,
+    });
+    mutated ||= normalizedProvider !== provider;
 
     const existing = next[normalizedKey];
     if (existing) {
@@ -287,8 +287,7 @@ export function normalizeProviders(params: {
   const normalizedProviders = mutated ? next : providers;
   return enforceSourceManagedProviderSecrets({
     providers: normalizedProviders,
-    sourceProviders: params.sourceProviders,
-    sourceSecretDefaults: params.sourceSecretDefaults,
+    sourceConfigForSecrets: params.sourceConfigForSecrets,
     secretRefManagedProviders: params.secretRefManagedProviders,
   });
 }

@@ -92,7 +92,8 @@ export async function recoverEmbeddedRunTimeout(
     return false;
   }
 
-  input.state.autoCompactionCount += 1;
+  const compactionCount = ++input.state.autoCompactionCount;
+  input.runParams.onAutoCompactionSucceeded?.(compactionCount);
   const tokensAfter = timeoutCompactResult.result?.tokensAfter;
   if (typeof tokensAfter === "number" && Number.isFinite(tokensAfter) && tokensAfter >= 0) {
     input.state.lastCompactionTokensAfter = Math.floor(tokensAfter);
@@ -111,5 +112,6 @@ export async function recoverEmbeddedRunTimeout(
     `[timeout-compaction] compaction succeeded for ${input.provider}/${input.modelId}; retrying prompt`,
   );
   input.armPostCompactionGuard();
+  await input.prepareCompactedTranscriptRetry();
   return true;
 }

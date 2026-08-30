@@ -10,6 +10,7 @@ import {
 } from "../../../media/media-facts.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import type { PluginMetadataSnapshot } from "../../../plugins/plugin-metadata-snapshot.types.js";
+import type { NestedToolActivity } from "../../../sessions/nested-tool-activity.js";
 import { createPreparedEmbeddedAgentSettingsManager } from "../../agent-project-settings.js";
 import {
   applyAgentAutoCompactionGuard,
@@ -18,6 +19,7 @@ import {
   resolveEffectiveCompactionMode,
 } from "../../agent-settings.js";
 import { toToolDefinitions } from "../../agent-tool-definition-adapter.js";
+import { sanitizeCompactionReplayMessages } from "../../compaction-replay.js";
 import { resolveUserTimezone } from "../../date-time.js";
 import { bootstrapHarnessContextEngine } from "../../harness/context-engine-lifecycle.js";
 import { relocateCurrentRuntimeContextCarrierToTail } from "../../internal-runtime-context.js";
@@ -48,7 +50,8 @@ import { buildAfterTurnRuntimeContext } from "./attempt-prompt-helpers.js";
 import { resolveExistingAttemptTranscriptState } from "./attempt-transcript-helpers.js";
 import type { EmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle.js";
 import { createUserTranscriptContextRegistry } from "./attempt-user-transcript-context-registry.js";
-import { installCodeModeRepairHook } from "./code-mode-repair.js";
+import { installCodeModeOutcomeHook } from "./code-mode-outcome.js";
+import { buildCodeModeRecoveryCandidate } from "./code-mode-reconciliation.js";
 import { installMessageToolOnlyTerminalHook } from "./message-tool-terminal.js";
 import { reconcilePrePersistedCurrentUserTurn } from "./pre-persisted-user-turn.js";
 import { resolveSessionBoundaryPromptCacheKey } from "./session-boundary-prompt-cache-key.js";
@@ -87,6 +90,7 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
   sessionAgentId: string;
   transcriptLifecycle: EmbeddedAttemptTranscriptLifecycle;
   sessionManager: AttemptSessionManager;
+  nestedToolActivities: readonly NestedToolActivity[];
 }) {
   const { attempt } = input;
   const settingsManager = createPreparedEmbeddedAgentSettingsManager({
@@ -203,7 +207,10 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
     // Without a resolved model budget, the outer loop cannot own bounded recovery.
     contextOverflowRecoveryOwner: attempt.contextTokenBudget === undefined ? "session" : "caller",
     beforeToolBatch: input.clientToolPreparation.catalogToolHookContext
-      ? createToolLoopBatchAdmission(input.clientToolPreparation.catalogToolHookContext)
+      ? createToolLoopBatchAdmission(
+          input.clientToolPreparation.catalogToolHookContext,
+          attempt.codeModeRecovery,
+        )
       : undefined,
   });
   const activeSession = createdSession.session;
@@ -221,6 +228,8 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
   };
   setActiveSessionSystemPrompt(input.initialSystemPrompt);
   let didDeliverSourceReplyViaMessageTool = false;
+  let codeModeRecoveryCandidate: ReturnType<typeof buildCodeModeRecoveryCandidate> | undefined;
+  let codeModeReconciliationReadAuthorized = false;
   const markSourceReplyDelivered = () => {
     didDeliverSourceReplyViaMessageTool = true;
   };
@@ -228,9 +237,29 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
     agent: activeSession.agent,
     sourceReplyDeliveryMode: attempt.sourceReplyDeliveryMode,
     onDeliveredSourceReply: markSourceReplyDelivered,
+    config: attempt.config,
+    currentProvider: attempt.messageChannel ?? attempt.messageProvider,
+    currentAccountId: attempt.agentAccountId,
+    currentChannelId: attempt.currentChannelId,
+    currentMessagingTarget: attempt.currentMessagingTarget,
+    currentThreadId: attempt.currentThreadTs,
+    currentMessageId: attempt.currentMessageId,
+    replyToMode: attempt.replyToMode,
+    hasRepliedRef: attempt.hasRepliedRef,
+    sessionKey: attempt.sessionKey,
   });
   if (input.clientToolPreparation.codeModeControlsEnabledForRun) {
-    installCodeModeRepairHook({ agent: activeSession.agent });
+    installCodeModeOutcomeHook({
+      agent: activeSession.agent,
+      onReconciliationCandidate: (parentToolCallId) => {
+        if (codeModeReconciliationReadAuthorized) {
+          codeModeRecoveryCandidate = buildCodeModeRecoveryCandidate({
+            parentToolCallId,
+            nestedToolActivities: input.nestedToolActivities,
+          });
+        }
+      },
+    });
   }
   input.markStage("agent-session");
 
@@ -238,9 +267,13 @@ export async function prepareEmbeddedAttemptAgentSession(input: {
     activeSession,
     allCustomTools,
     ...clientToolRuntime,
+    getCodeModeRecoveryCandidate: () => codeModeRecoveryCandidate,
     hasDeliveredSourceReply: () => didDeliverSourceReplyViaMessageTool,
     hookRunner,
     markSourceReplyDelivered,
+    setCodeModeReconciliationReadAuthorized: (value: boolean) => {
+      codeModeReconciliationReadAuthorized = clientToolRuntime.coreReadAuthorized && value;
+    },
     setActiveSessionSystemPrompt,
     settingsManager,
   };
@@ -317,7 +350,9 @@ export function prepareEmbeddedAttemptSessionBoundary(input: {
     // discard the merged replacement prompt.
     sessionManager.clearNextUserMessagePersistenceSuppression?.();
     attempt.onUserMessagePersistenceInvalidated?.();
-    activeSession.agent.state.messages = sessionManager.buildSessionContext().messages;
+    activeSession.agent.state.messages = sanitizeCompactionReplayMessages(
+      sessionManager.buildSessionContext().messages,
+    );
   }
 
   // This is the single timestamping source for user messages sent to the LLM.
@@ -419,10 +454,18 @@ export async function prepareEmbeddedAttemptSessionManager(input: {
         ? SessionManager.open(
             attempt.sessionTarget as SessionTranscriptRuntimeTarget,
             input.effectiveCwd,
+            {
+              maxBytes: Math.min(
+                64 * 1024 * 1024,
+                Math.max(1024, (attempt.contextTokenBudget ?? 128_000) * 8),
+              ),
+              maxEvents: 10_000,
+            },
           )
         : SessionManager.inMemory(input.effectiveCwd)),
     {
       agentId: input.sessionAgentId,
+      runId: attempt.runId,
       sessionKey: attempt.sessionKey,
       config: attempt.config,
       contextWindowTokens: attempt.contextTokenBudget,
@@ -440,6 +483,7 @@ export async function prepareEmbeddedAttemptSessionManager(input: {
         attempt.suppressTranscriptOnlyAssistantPersistence,
       suppressAssistantErrorPersistence: attempt.suppressAssistantErrorPersistence,
       skipBeforeMessageWriteHooks: attempt.operation === "settled-tool-finalization",
+      prepareAssistantTranscriptMessage: attempt.prepareAssistantTranscriptMessage,
       onUserMessagePreparingForPersistence: (_message, recorder) => {
         latestPersistedUserMessage = undefined;
         latestUserTurnTranscriptRecorder = recorder;
@@ -518,6 +562,7 @@ export async function prepareEmbeddedAttemptSessionManager(input: {
           runtimeSettings: contextParams.runtimeSettings,
           config: attempt.config,
           agentId: input.sessionAgentId,
+          contextEngineAgentId: attempt.contextEngineAgentId,
         }),
       warn: (message) => log.warn(message),
     });

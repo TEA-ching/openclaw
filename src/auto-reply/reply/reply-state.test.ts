@@ -25,6 +25,7 @@ import {
 import {
   hasAlreadyFlushedForCurrentCompaction,
   resolveMemoryFlushContextWindowTokens,
+  resolveCompactionThreshold,
   shouldRunMemoryFlush,
   shouldRunPreflightCompaction,
 } from "./memory-flush.js";
@@ -270,9 +271,7 @@ describe("shouldRunMemoryFlush", () => {
     expect(
       shouldRunMemoryFlush({
         entry: { totalTokens: 0, totalTokensFresh: true, totalTokensVersion: 1 },
-        contextWindowTokens: 16_000,
-        reserveTokensFloor: 20_000,
-        softThresholdTokens: 4_000,
+        threshold: 0,
       }),
     ).toBe(false);
   });
@@ -281,20 +280,56 @@ describe("shouldRunMemoryFlush", () => {
     expect(
       shouldRunMemoryFlush({
         entry: undefined,
-        contextWindowTokens: 16_000,
-        reserveTokensFloor: 1_000,
-        softThresholdTokens: 4_000,
+        threshold: 11_000,
       }),
     ).toBe(false);
   });
+
+  it.each([
+    [8_000, 4_000, 4_000],
+    [16_000, 8_000, 8_000],
+    [24_000, 16_000, 8_000],
+    [32_768, 20_000, 12_768],
+    [128_000, 20_000, 108_000],
+    [200_000, 20_000, 180_000],
+    [32_000, 50_000, 0],
+  ])(
+    "honors the selected reserve in a %i-token window",
+    (contextWindowTokens, reserveTokensFloor, expected) => {
+      const threshold = resolveCompactionThreshold({ contextWindowTokens, reserveTokensFloor });
+      expect(threshold).toBe(expected);
+      for (const tokenCount of [expected - 1, expected, expected + 1]) {
+        expect(
+          shouldRunPreflightCompaction({
+            entry: { totalTokens: tokenCount, totalTokensFresh: true, totalTokensVersion: 1 },
+            threshold,
+          }),
+        ).toBe(expected > 0 && tokenCount >= expected);
+      }
+    },
+  );
+
+  it.each([
+    [12_000, 12_768],
+    [16_000, 16_000],
+  ])(
+    "honors a server floor of %i without lowering the local threshold",
+    (minimumThresholdTokens, expected) => {
+      expect(
+        resolveCompactionThreshold({
+          contextWindowTokens: 32_768,
+          reserveTokensFloor: 20_000,
+          minimumThresholdTokens,
+        }),
+      ).toBe(expected);
+    },
+  );
 
   it("skips when under threshold", () => {
     expect(
       shouldRunMemoryFlush({
         entry: { totalTokens: 10_000, totalTokensFresh: true, totalTokensVersion: 1 },
-        contextWindowTokens: 100_000,
-        reserveTokensFloor: 20_000,
-        softThresholdTokens: 10_000,
+        threshold: 70_000,
       }),
     ).toBe(false);
   });
@@ -303,9 +338,7 @@ describe("shouldRunMemoryFlush", () => {
     expect(
       shouldRunMemoryFlush({
         entry: { totalTokens: 85, totalTokensFresh: true, totalTokensVersion: 1 },
-        contextWindowTokens: 100,
-        reserveTokensFloor: 10,
-        softThresholdTokens: 5,
+        threshold: 85,
       }),
     ).toBe(true);
   });
@@ -314,15 +347,13 @@ describe("shouldRunMemoryFlush", () => {
     expect(
       shouldRunMemoryFlush({
         entry: {
-          totalTokens: 90_000,
+          totalTokens: 96_000,
           totalTokensFresh: true,
           totalTokensVersion: 1,
           compactionCount: 2,
           memoryFlush: { kind: "succeeded", compactionCount: 2 },
         },
-        contextWindowTokens: 100_000,
-        reserveTokensFloor: 5_000,
-        softThresholdTokens: 2_000,
+        threshold: 93_000,
       }),
     ).toBe(false);
   });
@@ -336,18 +367,14 @@ describe("shouldRunMemoryFlush", () => {
           totalTokensVersion: 1,
           compactionCount: 1,
         },
-        contextWindowTokens: 100_000,
-        reserveTokensFloor: 5_000,
-        softThresholdTokens: 2_000,
+        threshold: 93_000,
       }),
     ).toBe(true);
   });
 
   it("runs on consecutive compaction cycles when flush records the pre-increment count", () => {
     const params = {
-      contextWindowTokens: 100_000,
-      reserveTokensFloor: 5_000,
-      softThresholdTokens: 2_000,
+      threshold: 93_000,
     };
 
     for (const entry of [
@@ -380,9 +407,7 @@ describe("shouldRunMemoryFlush", () => {
     expect(
       shouldRunMemoryFlush({
         entry: { totalTokens: 96_000, totalTokensFresh: false, compactionCount: 1 },
-        contextWindowTokens: 100_000,
-        reserveTokensFloor: 5_000,
-        softThresholdTokens: 2_000,
+        threshold: 93_000,
       }),
     ).toBe(false);
   });
@@ -393,9 +418,7 @@ describe("shouldRunPreflightCompaction", () => {
     expect(
       shouldRunPreflightCompaction({
         entry: { totalTokens: 96_000, totalTokensFresh: false },
-        contextWindowTokens: 100_000,
-        reserveTokensFloor: 5_000,
-        softThresholdTokens: 2_000,
+        threshold: 93_000,
       }),
     ).toBe(false);
   });
@@ -405,9 +428,7 @@ describe("shouldRunPreflightCompaction", () => {
       shouldRunPreflightCompaction({
         entry: { totalTokens: 10, totalTokensFresh: false },
         tokenCount: 93_000,
-        contextWindowTokens: 100_000,
-        reserveTokensFloor: 5_000,
-        softThresholdTokens: 2_000,
+        threshold: 93_000,
       }),
     ).toBe(true);
   });
@@ -450,10 +471,6 @@ describe("hasAlreadyFlushedForCurrentCompaction", () => {
 });
 
 describe("resolveMemoryFlushContextWindowTokens", () => {
-  it("falls back to agent config or default tokens", () => {
-    expect(resolveMemoryFlushContextWindowTokens({ agentCfgContextTokens: 42_000 })).toBe(42_000);
-  });
-
   it("uses provider-specific configured limits when the same model id exists on multiple providers", () => {
     const cfg = {
       models: {
@@ -478,24 +495,6 @@ describe("resolveMemoryFlushContextWindowTokens", () => {
       }),
     ).toBe(200_000);
   });
-
-  it("prefers agent contextTokens override over the provider configured window", () => {
-    const cfg = {
-      models: {
-        providers: {
-          "provider-b": { models: [{ id: "shared-model", contextWindow: 512_000 }] },
-        },
-      },
-    };
-    expect(
-      resolveMemoryFlushContextWindowTokens({
-        cfg: cfg as never,
-        provider: "provider-b",
-        modelId: "shared-model",
-        agentCfgContextTokens: 100_000,
-      }),
-    ).toBe(100_000);
-  });
 });
 
 describe("incrementCompactionCount", () => {
@@ -513,6 +512,58 @@ describe("incrementCompactionCount", () => {
 
     const stored = { [sessionKey]: await loadStoredEntry(storePath, sessionKey) };
     expect(requireStoredSession(stored, sessionKey).compactionCount).toBe(3);
+  });
+
+  it.each([
+    {
+      action: "clears",
+      compactionKind: "context-engine" as const,
+      expectedIds: undefined,
+    },
+    {
+      action: "preserves",
+      compactionKind: "native-harness" as const,
+      expectedIds: { "claude-cli": "claude-session", "codex-cli": "codex-session" },
+    },
+    {
+      action: "preserves",
+      compactionKind: "server-endpoint" as const,
+      expectedIds: { "claude-cli": "claude-session", "codex-cli": "codex-session" },
+    },
+  ])("$action CLI bindings after $compactionKind compaction", async (testCase) => {
+    const entry = {
+      sessionId: "s1",
+      updatedAt: Date.now(),
+      cliSessionIds: { "claude-cli": "claude-session", "codex-cli": "codex-session" },
+      cliSessionBindings: {
+        "claude-cli": { sessionId: "claude-session" },
+        "codex-cli": { sessionId: "codex-session" },
+      },
+      claudeCliSessionId: "claude-session",
+    } as SessionEntry;
+    const { storePath, sessionKey, sessionStore } = await createCompactionSessionFixture(entry);
+
+    await incrementCompactionCount({
+      sessionEntry: entry,
+      sessionStore,
+      sessionKey,
+      storePath,
+      compactionKind: testCase.compactionKind,
+    });
+
+    const stored = await loadStoredEntry(storePath, sessionKey);
+    expect(stored.cliSessionIds).toEqual(testCase.expectedIds);
+    expect(stored.cliSessionBindings).toEqual(
+      testCase.expectedIds
+        ? {
+            "claude-cli": { sessionId: "claude-session" },
+            "codex-cli": { sessionId: "codex-session" },
+          }
+        : undefined,
+    );
+    expect(stored.claudeCliSessionId).toBe(
+      testCase.compactionKind === "context-engine" ? undefined : "claude-session",
+    );
   });
 
   it("persists incognito compaction metadata only in the scoped store", async () => {

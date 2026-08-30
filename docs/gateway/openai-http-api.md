@@ -15,7 +15,8 @@ Once enabled, it serves all of these on the same port as the Gateway (WS + HTTP 
 | GET    | `/v1/models`           |
 | GET    | `/v1/models/{id}`      |
 | POST   | `/v1/embeddings`       |
-| POST   | `/v1/responses`        |
+
+`POST /v1/responses` is enabled separately with `gateway.http.endpoints.responses.enabled`. See [OpenResponses API](/gateway/openresponses-http-api).
 
 Requests run as a normal Gateway agent run (same codepath as `openclaw agent`), so routing, permissions, and config match your Gateway.
 
@@ -305,6 +306,8 @@ curl -sS http://127.0.0.1:18789/v1/embeddings \
 ```
 
 `/v1/embeddings` supports `input` as a string or array of strings.
+
+For models that support it, a positive integer `dimensions` requests the output vector size. It overrides the selected agent's active `memory.search.outputDimensionality` and also applies when memory search is disabled. Omitting it keeps the configured or provider default size.
 
 ## Related
 

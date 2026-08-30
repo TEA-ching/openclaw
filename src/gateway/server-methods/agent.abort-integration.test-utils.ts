@@ -2,6 +2,11 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerExecApprovalFollowupRuntimeHandoff } from "../../agents/bash-tools.exec-approval-followup-state.js";
+import {
+  addSubagentRunForTests,
+  getSubagentRunByChildSessionKey,
+  testing as subagentRegistryTesting,
+} from "../../agents/subagents/registry/subagent-registry.test-helpers.js";
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions.js";
 import { runExclusiveSessionLifecycleMutation } from "../../sessions/session-lifecycle-admission.js";
 import { setGatewayDedupeEntry } from "../agent-turn/agent-job.js";
@@ -10,8 +15,8 @@ import { createAgentTurnIo } from "../agent-turn/io.js";
 import { resolveAgentRunExpiresAtMs } from "../chat-abort.js";
 import {
   getAgentTestMocks,
+  operatorWriteCliClient,
   makeContext,
-  type AgentHandlerArgs,
   waitForAssertion,
   requireValue,
   expectRecordFields,
@@ -27,6 +32,7 @@ import {
   describe1AfterEach1,
   prime,
 } from "./agent.test-harness.js";
+import { handleChatAbortRequest } from "./chat-abort-handler.js";
 import { chatHandlers } from "./chat.js";
 import type { GatewayRequestContext } from "./types.js";
 
@@ -54,7 +60,7 @@ describe("gateway agent handler chat.abort integration", () => {
       {
         context,
         reqId: runId,
-        client: { connId: "conn-1" } as AgentHandlerArgs["client"],
+        client: { ...operatorWriteCliClient(), connId: "conn-1" },
       },
     );
 
@@ -211,10 +217,7 @@ describe("gateway agent handler chat.abort integration", () => {
     expect(context.chatAbortControllers.has(runId)).toBe(true);
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main", runId },
       respond: abortRespond as never,
       context,
@@ -359,10 +362,7 @@ describe("gateway agent handler chat.abort integration", () => {
     });
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: requestedSessionKey, runId },
       respond: abortRespond as never,
       context,
@@ -456,10 +456,7 @@ describe("gateway agent handler chat.abort integration", () => {
     });
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "global", agentId: "work", runId },
       respond: abortRespond as never,
       context,
@@ -615,10 +612,7 @@ describe("gateway agent handler chat.abort integration", () => {
     expect(context.chatAbortControllers.has(runId)).toBe(false);
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main" },
       respond: abortRespond as never,
       context,
@@ -714,10 +708,7 @@ describe("gateway agent handler chat.abort integration", () => {
     expect(context.chatAbortControllers.has(runId)).toBe(false);
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main", runId },
       respond: abortRespond as never,
       context,
@@ -966,10 +957,7 @@ describe("gateway agent handler chat.abort integration", () => {
     expect(context.chatAbortControllers.has(runId)).toBe(false);
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "global", agentId: "work", runId },
       respond: abortRespond as never,
       context,
@@ -1057,10 +1045,7 @@ describe("gateway agent handler chat.abort integration", () => {
     expect(context.chatAbortControllers.has(runId)).toBe(false);
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main", runId },
       respond: abortRespond as never,
       context,
@@ -1229,7 +1214,7 @@ describe("gateway agent handler chat.abort integration", () => {
         context,
         respond,
         reqId: runId,
-        client: { connect: { scopes: ["operator.admin"] } } as AgentHandlerArgs["client"],
+        client: operatorWriteCliClient(["operator.admin"]),
       },
     );
     await waitForAssertion(() => expect(releaseReset).toBeTypeOf("function"));
@@ -1279,7 +1264,7 @@ describe("gateway agent handler chat.abort integration", () => {
       {
         context,
         reqId: "restart-after-reset-commit",
-        client: { connect: { scopes: ["operator.admin"] } } as AgentHandlerArgs["client"],
+        client: operatorWriteCliClient(["operator.admin"]),
       },
     );
 
@@ -1324,7 +1309,7 @@ describe("gateway agent handler chat.abort integration", () => {
       {
         context,
         reqId: "restart-after-bare-reset",
-        client: { connect: { scopes: ["operator.admin"] } } as AgentHandlerArgs["client"],
+        client: operatorWriteCliClient(["operator.admin"]),
       },
     );
 
@@ -1364,7 +1349,7 @@ describe("gateway agent handler chat.abort integration", () => {
       {
         context,
         reqId: "post-commit-reset-failure",
-        client: { connect: { scopes: ["operator.admin"] } } as AgentHandlerArgs["client"],
+        client: operatorWriteCliClient(["operator.admin"]),
       },
     );
 
@@ -1402,7 +1387,7 @@ describe("gateway agent handler chat.abort integration", () => {
       {
         context,
         reqId: "restart-after-reset-later",
-        client: { connect: { scopes: ["operator.admin"] } } as AgentHandlerArgs["client"],
+        client: operatorWriteCliClient(["operator.admin"]),
       },
     );
 
@@ -1452,22 +1437,19 @@ describe("gateway agent handler chat.abort integration", () => {
         respond,
         reqId: runId,
         flushDispatch: false,
-        client: { connId: "owner-conn" } as AgentHandlerArgs["client"],
+        client: { ...operatorWriteCliClient(), connId: "owner-conn" },
       },
     );
     await waitForAssertion(() => expect(sessionWriteCalls).toBe(1));
     expect(context.chatAbortControllers.has(runId)).toBe(false);
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main", runId },
       respond: abortRespond as never,
       context,
       req: { type: "req", id: "abort-req", method: "chat.abort" },
-      client: { connId: "other-conn" } as AgentHandlerArgs["client"],
+      client: { ...operatorWriteCliClient(), connId: "other-conn" },
       isWebchatConnect: () => false,
     });
 
@@ -1559,10 +1541,7 @@ describe("gateway agent handler chat.abort integration", () => {
     });
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:telegram:direct:123", runId },
       respond: abortRespond as never,
       context,
@@ -1635,6 +1614,7 @@ describe("gateway agent handler chat.abort integration", () => {
 
     try {
       const pending = prepareAgentRunDispatch({
+        promptedAt: nowMs,
         request: {
           message: "wait for dispatch admission",
           timeout: 120,
@@ -1918,10 +1898,7 @@ describe("gateway agent handler chat.abort integration", () => {
     expect(capturedSignal?.aborted).toBe(false);
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main", runId },
       respond: abortRespond as never,
       context,
@@ -1937,6 +1914,72 @@ describe("gateway agent handler chat.abort integration", () => {
     });
     expect(capturedSignal?.aborted).toBe(true);
     expect(context.chatAbortControllers.has(runId)).toBe(false);
+  });
+
+  it("chat.abort by runId kills only subagents owned by that requester turn", async () => {
+    prime();
+    subagentRegistryTesting.setDepsForTest({
+      persistSubagentRunsToDisk: () => {},
+      persistSubagentRunsToDiskOrThrow: () => {},
+    });
+    const pending = new Promise(() => {});
+    let capturedSignal: AbortSignal | undefined;
+    mocks.agentCommand.mockImplementationOnce((opts: { abortSignal?: AbortSignal }) => {
+      capturedSignal = opts.abortSignal;
+      return pending;
+    });
+
+    const context = makeContext();
+    const runId = "idem-abort-owned-subagents";
+    const ownedChildSessionKey = "agent:main:subagent:owned-by-aborted-turn";
+    const unrelatedChildSessionKey = "agent:main:subagent:owned-by-other-turn";
+    await invokeAgent(
+      {
+        message: "hi",
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        idempotencyKey: runId,
+      },
+      { context, reqId: runId },
+    );
+    for (const [childSessionKey, requesterTurnRunId] of [
+      [ownedChildSessionKey, runId],
+      [unrelatedChildSessionKey, "other-parent-turn"],
+    ] as const) {
+      addSubagentRunForTests({
+        runId: `child-${requesterTurnRunId}`,
+        childSessionKey,
+        controllerSessionKey: "agent:main:main",
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        requesterAgentId: "main",
+        requesterTurnRunId,
+        task: requesterTurnRunId,
+        cleanup: "keep",
+        createdAt: Date.now() - 2_000,
+        startedAt: Date.now() - 1_000,
+      });
+    }
+
+    const abortRespond = vi.fn();
+    await handleChatAbortRequest({
+      params: { sessionKey: "agent:main:main", runId },
+      respond: abortRespond as never,
+      context,
+      req: { type: "req", id: "abort-req", method: "chat.abort" },
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    expect(mockCallArg(abortRespond)).toBe(true);
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(getSubagentRunByChildSessionKey(ownedChildSessionKey)).toMatchObject({
+      endedReason: "subagent-killed",
+      killReconciliation: { suppressTaskDelivery: true },
+    });
+    expect(
+      getSubagentRunByChildSessionKey(unrelatedChildSessionKey)?.execution.endedAt,
+    ).toBeUndefined();
   });
 
   it("chat.abort by runId allows the owner connection to use a stale session key", async () => {
@@ -1960,7 +2003,7 @@ describe("gateway agent handler chat.abort integration", () => {
       {
         context,
         reqId: runId,
-        client: { connId: "owner-conn" } as AgentHandlerArgs["client"],
+        client: { ...operatorWriteCliClient(), connId: "owner-conn" },
       },
     );
 
@@ -1971,15 +2014,12 @@ describe("gateway agent handler chat.abort integration", () => {
     });
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main", runId },
       respond: abortRespond as never,
       context,
       req: { type: "req", id: "abort-req", method: "chat.abort" },
-      client: { connId: "owner-conn" } as AgentHandlerArgs["client"],
+      client: { ...operatorWriteCliClient(), connId: "owner-conn" },
       isWebchatConnect: () => false,
     });
 
@@ -2018,10 +2058,7 @@ describe("gateway agent handler chat.abort integration", () => {
     );
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main", runId },
       respond: abortRespond as never,
       context,
@@ -2079,10 +2116,7 @@ describe("gateway agent handler chat.abort integration", () => {
     );
 
     const abortRespond = vi.fn();
-    await expectDefined(
-      chatHandlers["chat.abort"],
-      'chatHandlers["chat.abort"] test invariant',
-    )({
+    await handleChatAbortRequest({
       params: { sessionKey: "agent:main:main" },
       respond: abortRespond as never,
       context,
@@ -2499,10 +2533,15 @@ describe("gateway agent handler chat.abort integration", () => {
     });
 
     expect(mocks.agentCommand).toHaveBeenCalledTimes(1);
-    expect(duplicateRespond).toHaveBeenCalledWith(true, { runId, status: "in_flight" }, undefined, {
-      cached: true,
-      runId,
-    });
+    expect(duplicateRespond).toHaveBeenCalledWith(
+      true,
+      { runId, status: "in_flight", agentId: "main" },
+      undefined,
+      {
+        cached: true,
+        runId,
+      },
+    );
 
     finishRun({ payloads: [{ text: "ok" }], meta: { durationMs: 1 } });
   });
@@ -2580,7 +2619,7 @@ describe("gateway agent handler chat.abort integration", () => {
     expect(mocks.agentCommand).not.toHaveBeenCalled();
     expect(duplicateRespond).toHaveBeenCalledWith(
       true,
-      { runId, status: "in_flight", sessionKey: "agent:main:main" },
+      { runId, status: "in_flight", sessionKey: "agent:main:main", agentId: "main" },
       undefined,
       {
         cached: true,

@@ -65,6 +65,7 @@ function makeInput(overrides: RecoveryOverrides = {}): RecoveryInput {
       workspaceDir: "/tmp/workspace",
       prompt: "continue",
       timeoutMs: 1_000,
+      onAutoCompactionSucceeded: vi.fn(),
     },
     state,
     contextEngine: {
@@ -99,6 +100,7 @@ function makeInput(overrides: RecoveryOverrides = {}): RecoveryInput {
     runOwnsCompactionAfterHook: vi.fn(async () => {}),
     adoptCompactionTranscript: vi.fn(async () => undefined),
     getActiveSession: () => ({ id: "session-1", file: "/tmp/session-1.jsonl" }),
+    prepareCompactedTranscriptRetry: vi.fn(async () => {}),
     armPostCompactionGuard: vi.fn(),
     ...inputOverrides,
   } as unknown as RecoveryInput;
@@ -188,7 +190,9 @@ describe("recoverEmbeddedRunTimeout", () => {
       autoCompactionCount: 1,
       lastCompactionTokensAfter: 80_000,
     });
+    expect(input.runParams.onAutoCompactionSucceeded).toHaveBeenCalledWith(1);
     expect(input.armPostCompactionGuard).toHaveBeenCalledOnce();
+    expect(input.prepareCompactedTranscriptRetry).toHaveBeenCalledOnce();
   });
 
   it("counts compacted-false results against the shared retry cap", async () => {

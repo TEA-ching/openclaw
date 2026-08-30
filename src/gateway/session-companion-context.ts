@@ -142,6 +142,7 @@ async function readSessionCompanionContext(params: {
     let rawBytes = 0;
     let scannedMessages = 0;
     let totalMessages = 0;
+    let stoppedAtOlderByteBoundary = false;
     let snapshot:
       | {
           activeLeafEntryId?: string | null;
@@ -163,7 +164,7 @@ async function readSessionCompanionContext(params: {
         ),
         offset,
       });
-      if (params.signal?.aborted || page.events.length !== page.scannedMessages) {
+      if (params.signal?.aborted) {
         return { kind: "unavailable" };
       }
       const pageSnapshot = {
@@ -182,18 +183,36 @@ async function readSessionCompanionContext(params: {
         return { kind: "unavailable" };
       }
       totalMessages = page.totalMessages;
+      const pageIsPartial = page.newestContiguousEventCount !== page.scannedMessages;
+      // Sparse bounded pages may include older rows beyond an oversized gap.
+      // Only the contiguous newest suffix is authoritative companion context.
+      const pageEvents =
+        page.newestContiguousEventCount === page.events.length
+          ? page.events
+          : page.events.slice(page.events.length - page.newestContiguousEventCount);
       rawBytes += page.serializedBytes;
       scannedMessages += page.scannedMessages;
       offset += page.scannedMessages;
       contextMessages = [
-        ...sanitizeContextMessages(readPageMessages(page.events)),
+        ...sanitizeContextMessages(readPageMessages(pageEvents)),
         ...contextMessages,
       ].slice(-CONTEXT_MAX_MESSAGES);
+      if (pageIsPartial) {
+        if (contextMessages.length === 0) {
+          return { kind: "unavailable" };
+        }
+        stoppedAtOlderByteBoundary = true;
+        break;
+      }
       if (page.scannedMessages === 0 || offset >= totalMessages) {
         break;
       }
     }
-    if (contextMessages.length < CONTEXT_MAX_MESSAGES && offset < totalMessages) {
+    if (
+      contextMessages.length < CONTEXT_MAX_MESSAGES &&
+      offset < totalMessages &&
+      !stoppedAtOlderByteBoundary
+    ) {
       return { kind: "unavailable" };
     }
     const fence = readSessionTranscriptBoundedMessageTailPage(scope, {

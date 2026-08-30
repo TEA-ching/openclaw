@@ -76,7 +76,7 @@ class VncPage extends OpenClawLightDomElement {
       const connection = await this.desktopClient.connect({
         wsUrl: observed.wsPath,
         gatewayUrl: client.gatewayUrl,
-        password: observed.vncPassword,
+        credentials: observed.vncPassword ? { password: observed.vncPassword } : undefined,
         viewOnly: false,
         target,
         onConnect: () => {

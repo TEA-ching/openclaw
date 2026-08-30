@@ -15,6 +15,10 @@ import {
 import { ErrorCodes } from "../../../packages/gateway-protocol/src/schema/error-codes.js";
 import { getRuntimeConfig, resolveGatewayPort } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import {
+  createAgentRuntimeExecutionLineageHandoff,
+  readAgentRuntimeExecutionLineage,
+} from "../../gateway/agent-runtime-execution-lineage.js";
 import { mintAgentRuntimeIdentityToken } from "../../gateway/agent-runtime-identity-token.js";
 import { callGateway } from "../../gateway/call.js";
 import { resolveGatewayCredentialsFromConfig, trimToUndefined } from "../../gateway/credentials.js";
@@ -24,6 +28,7 @@ import {
   type OperatorScope,
 } from "../../gateway/method-scopes.js";
 import { getOperatorApprovalRuntimeToken } from "../../gateway/operator-approval-runtime-token.js";
+import { getActiveAgentRunDelegatedAuthority } from "../../infra/agent-run-registry.js";
 import {
   loadDeviceIdentityIfPresent,
   loadOrCreateDeviceIdentity,
@@ -33,6 +38,7 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { readPositiveIntegerParam, readToolStringParam } from "./common.js";
 import { getGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import { getGatewaySessionSpawnContext } from "./gateway-session-spawn-context.js";
+import { getGatewaySessionSpawnParentExecutionIdentityToken } from "./gateway-session-spawn-execution-identity.js";
 
 /** Optional gateway connection overrides accepted by agent tools. */
 export type GatewayCallOptions = {
@@ -225,9 +231,13 @@ const AGENT_RUNTIME_IDENTITY_METHODS = new Set<string>([
   "cron.remove",
   "cron.run",
   "cron.runs",
+  "secrets.store.delete",
 ]);
 
-const OPTIONAL_LOCAL_AGENT_RUNTIME_IDENTITY_METHODS = new Set<string>(["node.invoke"]);
+const OPTIONAL_LOCAL_AGENT_RUNTIME_IDENTITY_METHODS = new Set<string>([
+  "node.invoke",
+  "question.request",
+]);
 
 function resolveApprovalRuntimeTokenForGatewayTool(params: {
   method: string;
@@ -367,7 +377,7 @@ async function resolveAgentRuntimeIdentityTokenForGatewayTool(params: {
   const hasGatewayUrlOverride = trimToUndefined(params.opts.gatewayUrl) !== undefined;
   const hasGatewayTokenOverride = trimToUndefined(params.opts.gatewayToken) !== undefined;
   if (hasGatewayUrlOverride || hasGatewayTokenOverride || params.target !== "local") {
-    // Optional provenance must never turn a supported remote node call into an auth failure.
+    // Optional provenance must never turn a supported remote call into an auth failure.
     if (optionalLocalIdentity && !params.required) {
       return undefined;
     }
@@ -375,6 +385,10 @@ async function resolveAgentRuntimeIdentityTokenForGatewayTool(params: {
   }
   if (identity.signedAgentRuntimeIdentityToken) {
     return identity.signedAgentRuntimeIdentityToken;
+  }
+  // Independent CLI runs have local claims, not authority in the target Gateway.
+  if (optionalLocalIdentity && !params.required && !identity.gatewayContextResolver) {
+    return undefined;
   }
   if (!identity.operationalRunInstance) {
     if (optionalLocalIdentity && !params.required) {
@@ -384,11 +398,43 @@ async function resolveAgentRuntimeIdentityTokenForGatewayTool(params: {
   }
   try {
     const sessionSpawnContext = getGatewaySessionSpawnContext();
-    return await mintAgentRuntimeIdentityToken({
-      ...identity,
-      operationalRunInstance: identity.operationalRunInstance,
-      ...(sessionSpawnContext ? { sessionSpawnContext } : {}),
-    });
+    const parentExecutionIdentityToken = getGatewaySessionSpawnParentExecutionIdentityToken();
+    const activeAuthority = getActiveAgentRunDelegatedAuthority(identity.operationalRunInstance);
+    const executionLineage = readAgentRuntimeExecutionLineage(sessionSpawnContext);
+    if (executionLineage && !activeAuthority) {
+      throw new Error("execution lineage handoff requires active parent authority");
+    }
+    const lineageHandoff =
+      sessionSpawnContext && executionLineage && activeAuthority
+        ? createAgentRuntimeExecutionLineageHandoff({
+            agentId: identity.agentId,
+            sessionKey: identity.sessionKey,
+            operationalRunInstance: identity.operationalRunInstance,
+            delegatedAuthority: activeAuthority,
+            ...(parentExecutionIdentityToken
+              ? { executionIdentity: parentExecutionIdentityToken }
+              : {}),
+            sessionSpawnContext,
+          })
+        : undefined;
+    if (executionLineage && !lineageHandoff) {
+      throw new Error("execution lineage handoff could not bind the parent admission");
+    }
+    try {
+      return await mintAgentRuntimeIdentityToken({
+        ...identity,
+        operationalRunInstance: identity.operationalRunInstance,
+        ...(lineageHandoff ? { executionIdentityToken: undefined } : {}),
+        ...(lineageHandoff
+          ? { executionLineageHandoffId: lineageHandoff.id }
+          : sessionSpawnContext
+            ? { executionIdentityToken: parentExecutionIdentityToken, sessionSpawnContext }
+            : {}),
+      });
+    } catch (error) {
+      lineageHandoff?.revoke();
+      throw error;
+    }
   } catch (error) {
     if (optionalLocalIdentity && !params.required) {
       return undefined;
@@ -401,6 +447,7 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   opts: GatewayCallOptions;
   target: "local" | "remote";
   turnCapability?: string;
+  turnCapabilitySessionKey?: string;
   runId?: string;
   sessionId?: string;
   sourceReplyFinal?: boolean;
@@ -426,11 +473,13 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   if (usesUntrustedGatewayContext && !terminalSourceReply) {
     return undefined;
   }
+  const turnCapabilitySessionKey =
+    normalizeOptionalString(params.turnCapabilitySessionKey) ?? identity.sessionKey;
   const messageActionContext = resolveMessageActionTurnCapability({
     token: params.turnCapability,
     agentId: identity.agentId,
     runId: params.runId,
-    sessionKey: identity.sessionKey,
+    sessionKey: turnCapabilitySessionKey,
     sessionId: params.sessionId,
   });
   if (!messageActionContext) {
@@ -462,16 +511,19 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   const resolvedMessageActionContext = terminalSourceReply
     ? {
         ...messageActionContext,
+        turnCapability: params.turnCapability,
         sourceReplyFinal: true as const,
         sourceReplyToolCallId: sourceReplyToolCallId!,
       }
     : {
         ...messageActionContext,
+        turnCapability: params.turnCapability,
         ...(params.sourceReplyFinal === false ? { sourceReplyFinal: false as const } : {}),
         ...(sourceReplyToolCallId ? { sourceReplyToolCallId } : {}),
       };
   return await mintAgentRuntimeIdentityToken({
     ...identity,
+    sessionKey: turnCapabilitySessionKey,
     operationalRunInstance: identity.operationalRunInstance,
     messageActionContext: resolvedMessageActionContext,
   });
@@ -541,6 +593,7 @@ export async function callGatewayTool<T = Record<string, unknown>>(
   },
 ) {
   const gateway = resolveGatewayOptions(opts);
+  const resolveGatewayContext = getGatewayToolCallerIdentity()?.gatewayContextResolver;
   const callParams = attachNodeInvokeTurnSource(method, params);
   const scopes = Array.isArray(extra?.scopes)
     ? extra.scopes
@@ -578,18 +631,25 @@ export async function callGatewayTool<T = Record<string, unknown>>(
     ...(deviceIdentity ? { deviceIdentity } : {}),
     scopes,
   };
+  const dispatch = (options: typeof callOptions) => {
+    // Token minting and a prior RPC may await; never downgrade a retired owner.
+    if (resolveGatewayContext && !resolveGatewayContext()) {
+      throw new Error("The admitting Gateway is no longer available. Retry from a new agent run.");
+    }
+    return callGateway<T>(options);
+  };
   try {
-    return await callGateway<T>(callOptions);
+    return await dispatch(callOptions);
   } catch (error) {
     if (method === "node.invoke" && isStaleGatewayNodeInvokeTurnSourceRejection(error)) {
-      return await callGateway<T>({
+      return await dispatch({
         ...callOptions,
         params: stripNodeInvokeTurnSource(callOptions.params),
       });
     }
     if (agentRuntimeIdentityToken && isStaleGatewayAgentRuntimeIdentityRejection(error)) {
       if (method === "node.invoke" && extra?.requireAgentRuntimeIdentity !== true) {
-        return await callGateway<T>({
+        return await dispatch({
           ...callOptions,
           params: stripNodeInvokeTurnSource(callOptions.params),
           agentRuntimeIdentityToken: undefined,

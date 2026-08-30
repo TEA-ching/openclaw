@@ -4,7 +4,7 @@ import { isModernCohereModelId } from "./models.js";
 import { applyCohereConfig } from "./onboard.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
 import { COHERE_LIVE_MODEL_DISCOVERY } from "./provider-catalog.js";
-import { createCohereCompletionsWrapper } from "./stream.js";
+import { wrapCohereCompletionsStream } from "./stream.js";
 
 const PROVIDER_ID = "cohere";
 
@@ -24,9 +24,9 @@ export default defineSingleProviderPluginEntry({
     // opening error; Cohere's payload-patch wrapper composes on top of
     // whichever attempt rotation ultimately commits to.
     wrapStreamFn: (ctx) =>
-      createCohereCompletionsWrapper(createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn)),
+      wrapCohereCompletionsStream(createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn)),
     wrapSimpleCompletionStreamFn: (ctx) =>
-      createCohereCompletionsWrapper(createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn)),
+      wrapCohereCompletionsStream(createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn)),
     isModernModelRef: ({ modelId }) => isModernCohereModelId(modelId),
   },
 });

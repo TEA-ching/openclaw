@@ -1,21 +1,23 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import {
   DESKTOP_OBSERVE_PATH,
   handleDesktopObserveUpgrade,
   mintDesktopObserverToken,
 } from "./observe-bridge.js";
+import type { RfbPreauthDescriptor } from "./rfb-preauth.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(cleanup.splice(0).map((run) => run()));
+  vi.useRealTimers();
 });
 
 describe("worker desktop observer tokens", () => {
@@ -33,30 +35,45 @@ describe("worker desktop observer tokens", () => {
 });
 
 async function createProxyHarness(
-  params: { control?: boolean; getBufferedAmount?: () => number } = {},
+  params: {
+    control?: boolean;
+    getBufferedAmount?: () => number;
+    preauth?: RfbPreauthDescriptor;
+  } = {},
 ) {
-  const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "desktop-observe-"));
+  // macOS sockaddr_un cannot hold the test runner's nested temporary path.
+  const root = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "oc-desktop-observe-"));
   const localSocketPath = path.join(root, "desktop.sock");
   let desktopPeer: net.Socket | undefined;
-  const peerConnected = new Promise<net.Socket>((resolve) => {
-    const server = net.createServer((socket) => {
-      desktopPeer = socket;
-      resolve(socket);
+  const peerConnected = createDeferred<net.Socket>();
+  const server = net.createServer((socket) => {
+    desktopPeer = socket;
+    peerConnected.resolve(socket);
+  });
+  cleanup.push(async () => {
+    desktopPeer?.destroy();
+    await new Promise<void>((resolveClose) => {
+      server.close(() => resolveClose());
     });
-    server.listen(localSocketPath);
-    cleanup.push(
-      async () =>
-        await new Promise<void>((resolveClose) => {
-          server.close(() => resolveClose());
-        }),
-    );
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(localSocketPath, resolve);
   });
   const release = vi.fn();
   const closeObserver = vi.fn();
   const httpServer = http.createServer();
+  cleanup.push(
+    async () =>
+      await new Promise<void>((resolveClose) => {
+        httpServer.close(() => resolveClose());
+      }),
+  );
   httpServer.on("upgrade", (req, socket, head) => {
     handleDesktopObserveUpgrade(req, socket, head, {
       registry: {
+        claimStream: () => undefined,
         attachObserver: (_environmentId, observer) => {
           closeObserver.mockImplementation((code: number, reason: string) => {
             observer.close(code, reason);
@@ -67,25 +84,20 @@ async function createProxyHarness(
       ...(params.getBufferedAmount ? { getBufferedAmount: () => params.getBufferedAmount!() } : {}),
     });
   });
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once("error", reject);
     httpServer.listen(0, "127.0.0.1", resolve);
   });
   const address = httpServer.address();
   if (!address || typeof address === "string") {
     throw new Error("expected TCP test server address");
   }
-  cleanup.push(async () => {
-    desktopPeer?.destroy();
-    await new Promise<void>((resolveClose) => {
-      httpServer.close(() => resolveClose());
-    });
-    await fs.rm(root, { recursive: true, force: true });
-  });
   const minted = mintDesktopObserverToken({
     sourceKey: "worker:pump",
     ownerEpoch: 2,
     control: params.control ?? false,
     attachment: { kind: "unix-socket", socketPath: localSocketPath },
+    ...(params.preauth ? { preauth: params.preauth } : {}),
   });
   const ws = new WebSocket(
     `ws://127.0.0.1:${address.port}${DESKTOP_OBSERVE_PATH}?token=${minted.token}`,
@@ -95,7 +107,13 @@ async function createProxyHarness(
     ws.once("open", resolve);
     ws.once("error", reject);
   });
-  return { closeObserver, desktopPeer: await peerConnected, observerUrl: ws.url, release, ws };
+  return {
+    closeObserver,
+    desktopPeer: await peerConnected.promise,
+    observerUrl: ws.url,
+    release,
+    ws,
+  };
 }
 
 function readSocketBytes(socket: net.Socket, byteLength: number): Promise<Buffer> {
@@ -128,7 +146,47 @@ async function expectUnauthorizedObserver(url: string): Promise<void> {
   });
 }
 
-describe("worker desktop observer proxy", () => {
+describe.runIf(process.platform !== "win32")("worker desktop observer proxy", () => {
+  it("keeps an idle observer alive without adding bytes to RFB and retires on owner close", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const harness = await createProxyHarness({ control: true });
+    const pings: Buffer[] = [];
+    const onDesktopData = vi.fn();
+    harness.ws.on("ping", (data) => pings.push(data));
+    harness.desktopPeer.on("data", onDesktopData);
+
+    vi.advanceTimersByTime(25_000);
+    await expect.poll(() => pings.length).toBe(1);
+    vi.advanceTimersByTime(25_000);
+    await expect.poll(() => pings.length).toBe(2);
+    expect(onDesktopData).not.toHaveBeenCalled();
+
+    const closed = new Promise<number>((resolve) => {
+      harness.ws.once("close", resolve);
+    });
+    harness.closeObserver(1012, "desktop tunnel closed");
+    await expect(closed).resolves.toBe(1012);
+    expect(harness.release).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(25_000);
+    expect(pings).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears the credential-bearing token timer when the token is consumed", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    await createProxyHarness({
+      preauth: {
+        auth: "ard-account",
+        credentials: { username: "operator", password: "memory-only-password" },
+      },
+    });
+    const expiryCallIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 60_000);
+    expect(expiryCallIndex).toBeGreaterThanOrEqual(0);
+    const expiryTimer = setTimeoutSpy.mock.results[expiryCallIndex]?.value;
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(expiryTimer);
+  });
+
   it("rejects consumed, expired, and unknown tokens", async () => {
     const harness = await createProxyHarness();
     await expectUnauthorizedObserver(harness.observerUrl);
@@ -187,7 +245,7 @@ describe("worker desktop observer proxy", () => {
       harness.ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
     });
     harness.ws.send(
-      Buffer.concat([Buffer.from("RFB 003.008\n", "ascii"), Buffer.from([1, 1, 255])]),
+      Buffer.concat([Buffer.from("RFB 003.008\n", "ascii"), Buffer.from([1, 1, 254])]),
     );
     await expect(closed).resolves.toEqual({
       code: 1008,

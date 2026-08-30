@@ -3,8 +3,11 @@ import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TemplateContext } from "../templating.js";
 import type { FollowupRun, QueueSettings } from "./queue.js";
-import type { ReplyOperation } from "./reply-run-registry.js";
-import { createMockFollowupRun, createMockTypingController } from "./test-helpers.js";
+import {
+  createMockFollowupRun,
+  createMockReplyOperation,
+  createMockTypingController,
+} from "./test-helpers.js";
 
 const executeAgentTurnMock = vi.fn();
 const resolveOutboundAttachmentFromUrlMock = vi.fn();
@@ -64,6 +67,7 @@ vi.mock("../../media/outbound-attachment.js", () => ({
 vi.mock("./agent-runner-failure-reply.js", () => ({
   buildEmptyInteractiveReplyPayload: vi.fn(() => undefined),
   buildKnownAgentRunFailureReplyPayload: vi.fn(() => undefined),
+  markPostCompactionModelFailurePayload: (_failure: true | undefined, payload: unknown) => payload,
 }));
 
 vi.mock("./agent-runner-execution.js", () => ({
@@ -75,7 +79,7 @@ vi.mock("./agent-runner-memory.js", () => ({
     sessionEntry,
     outcome: "skipped",
   }),
-  runPreflightCompactionIfNeeded: async ({ sessionEntry }: { sessionEntry?: unknown }) =>
+  runSessionCompactionIfNeeded: async ({ sessionEntry }: { sessionEntry?: unknown }) =>
     sessionEntry,
 }));
 
@@ -108,20 +112,6 @@ const { runReplyAgent } = await import("./agent-runner.js");
 type AgentTurnExecutionResult = Awaited<
   ReturnType<typeof import("./agent-runner-execution.js").executeAgentTurn>
 >;
-
-function createReplyOperation(): ReplyOperation {
-  return {
-    result: undefined,
-    startedAtMs: Date.now(),
-    lastActivityAtMs: Date.now(),
-    recordActivity: vi.fn(),
-    setPhase: vi.fn(),
-    freezeAbort: vi.fn(),
-    fail: vi.fn(),
-    complete: vi.fn(),
-    completeThen: vi.fn(),
-  } as unknown as ReplyOperation;
-}
 
 function makeRunReplyAgentParams(
   overrides: Partial<Parameters<typeof runReplyAgent>[0]> = {},
@@ -162,7 +152,7 @@ function makeRunReplyAgentParams(
     resolvedBlockStreamingBreak: "message_end",
     shouldInjectGroupIntro: false,
     typingMode: "instant",
-    replyOperation: createReplyOperation(),
+    replyOperation: createMockReplyOperation().replyOperation,
     ...overrides,
   };
 }

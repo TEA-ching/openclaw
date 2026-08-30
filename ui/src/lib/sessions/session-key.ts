@@ -1,9 +1,10 @@
 // Control UI module implements session key behavior.
+import { normalizeAgentId } from "@openclaw/normalization-core/agent-id";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
-} from "../string-coerce.ts";
+} from "@openclaw/normalization-core/string-coerce";
 
 type ParsedAgentSessionKey = {
   agentId: string;
@@ -23,12 +24,10 @@ type UiSessionDefaults = {
   defaultAgentId?: string | null;
   mainKey?: string | null;
   mainSessionKey?: string | null;
+  modelConfigured?: boolean;
 };
 
-const VALID_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
-const INVALID_CHARS_RE = /[^a-z0-9_-]+/g;
-const LEADING_DASH_RE = /^-+/;
-const TRAILING_DASH_RE = /-+$/;
+export { normalizeAgentId };
 
 export function parseAgentSessionKey(
   sessionKey: string | undefined | null,
@@ -84,6 +83,10 @@ export function normalizeSessionKeyForUiComparison(sessionKey: string | undefine
     bodyStart += 1;
   }
   const channel = parts[bodyStart]?.toLowerCase();
+  // Catalog source identifiers are opaque; only the agent prefix is normalized.
+  if (channel === "catalog") {
+    return parts.join(":");
+  }
   const peerKind = parts[bodyStart + 1]?.toLowerCase();
   const preservesMatrixTail =
     channel === "matrix" && (peerKind === "channel" || peerKind === "group");
@@ -109,7 +112,7 @@ export function normalizeSessionKeyForUiComparison(sessionKey: string | undefine
   return parts.join(":");
 }
 
-function readSessionDefaults(
+export function readSessionDefaults(
   host: Pick<UiSessionDefaultsHost, "hello">,
 ): UiSessionDefaults | undefined {
   const snapshot = host.hello?.snapshot;
@@ -326,23 +329,6 @@ export function uiSessionRowMatchesSelectedChat(
   );
 }
 
-export function normalizeAgentId(value: string | undefined | null): string {
-  const trimmed = normalizeOptionalString(value) ?? "";
-  if (!trimmed) {
-    return DEFAULT_AGENT_ID;
-  }
-  if (VALID_ID_RE.test(trimmed)) {
-    return normalizeLowercaseStringOrEmpty(trimmed);
-  }
-  return (
-    normalizeLowercaseStringOrEmpty(trimmed)
-      .replace(INVALID_CHARS_RE, "-")
-      .replace(LEADING_DASH_RE, "")
-      .replace(TRAILING_DASH_RE, "")
-      .slice(0, 64) || DEFAULT_AGENT_ID
-  );
-}
-
 export function buildAgentMainSessionKey(params: {
   agentId: string;
   mainKey?: string | undefined;
@@ -352,7 +338,9 @@ export function buildAgentMainSessionKey(params: {
   return `agent:${agentId}:${mainKey}`;
 }
 
-function normalizeDefaultMainSessionAliasForUi(sessionKey: string | undefined | null): string {
+export function normalizeDefaultMainSessionAliasForUi(
+  sessionKey: string | undefined | null,
+): string {
   const normalized = normalizeSessionKeyForUiComparison(sessionKey);
   return normalized === DEFAULT_MAIN_KEY
     ? buildAgentMainSessionKey({ agentId: DEFAULT_AGENT_ID, mainKey: DEFAULT_MAIN_KEY })

@@ -5,18 +5,16 @@ import {
 } from "openclaw/plugin-sdk/number-runtime";
 import {
   createRealtimeVoiceTurnContextTracker,
+  isRealtimeVoiceWakeNameRequired,
   matchRealtimeVoiceActivationName,
   type RealtimeVoiceActivationNameTranscriptResult,
   type RealtimeVoiceBridgeSession,
   type RealtimeVoiceTurnContextHandle,
   type RealtimeVoiceTurnContextTracker,
+  type RealtimeVoiceWakeNamePolicy,
 } from "openclaw/plugin-sdk/realtime-voice";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
-import {
-  isDiscordRealtimeWakeNameRequired,
-  type DiscordRealtimeWakeNamePolicy,
-} from "./activation.js";
 import { convertDiscordPcm48kStereoToRealtimePcm24kMono } from "./audio.js";
 import type { DiscordRealtimePlaybackPort } from "./realtime-playback.js";
 import { mergeRealtimePartialTranscript } from "./realtime-transcript.js";
@@ -38,6 +36,8 @@ const DISCORD_REALTIME_TRAILING_SILENCE_MAX_MS = 3_000;
 export type DiscordRealtimeSpeakerContext = VoiceRealtimeSpeakerContext & { userId: string };
 
 type PendingSpeakerTurnStats = {
+  // Final text keeps the audio turn's subscription across capture replacement.
+  transcripts: VoiceSessionEntry["transcripts"];
   inputDiscordBytes: number;
   inputRealtimeBytes: number;
   inputChunks: number;
@@ -50,6 +50,7 @@ type PendingSpeakerTurn = RealtimeVoiceTurnContextHandle<
 >;
 
 type TranscriptUtteranceAttribution = {
+  transcripts: VoiceSessionEntry["transcripts"];
   context: DiscordRealtimeSpeakerContext;
   startedAt: number;
 };
@@ -74,6 +75,7 @@ export class DiscordRealtimeTurns {
         context: DiscordRealtimeSpeakerContext;
         startedAt: number;
         expiresAt: number;
+        transcripts: VoiceSessionEntry["transcripts"];
       }
     | undefined;
 
@@ -93,7 +95,7 @@ export class DiscordRealtimeTurns {
       realtimeConfig: () => DiscordRealtimeVoiceConfig;
       recordInputAudio: (audio: Buffer) => boolean;
       stopped: () => boolean;
-      wakeNamePolicy: () => DiscordRealtimeWakeNamePolicy;
+      wakeNamePolicy: () => RealtimeVoiceWakeNamePolicy;
       wakeNames: () => string[];
     },
   ) {}
@@ -103,6 +105,7 @@ export class DiscordRealtimeTurns {
     const turn = this.speakerTurns.open(
       { ...context, userId },
       {
+        transcripts: this.params.entry.transcripts,
         inputDiscordBytes: 0,
         inputRealtimeBytes: 0,
         inputChunks: 0,
@@ -315,13 +318,15 @@ export class DiscordRealtimeTurns {
   private isWakeNameRequired(
     humanParticipantCount = this.params.getHumanParticipantCount(),
   ): boolean {
-    return isDiscordRealtimeWakeNameRequired(this.params.wakeNamePolicy(), humanParticipantCount);
+    return isRealtimeVoiceWakeNameRequired(this.params.wakeNamePolicy(), humanParticipantCount);
   }
 
   private transcriptAttributionFromTurn(
     turn: PendingSpeakerTurn | undefined,
   ): TranscriptUtteranceAttribution | undefined {
-    return turn ? { context: turn.context, startedAt: turn.startedAt } : undefined;
+    return turn
+      ? { context: turn.context, startedAt: turn.startedAt, transcripts: turn.transcripts }
+      : undefined;
   }
 
   private recordTranscriptUtterance(
@@ -329,8 +334,8 @@ export class DiscordRealtimeTurns {
     attribution: TranscriptUtteranceAttribution | undefined,
     providerEpoch: number,
   ): void {
-    const transcripts = this.params.entry.transcripts;
-    if (!transcripts || !attribution) {
+    const transcripts = attribution?.transcripts;
+    if (!transcripts || !attribution || this.params.entry.transcripts !== transcripts) {
       return;
     }
     const context = attribution.context;
@@ -349,7 +354,10 @@ export class DiscordRealtimeTurns {
     };
     void Promise.resolve()
       .then(() => {
-        if (providerEpoch !== this.params.providerEpoch()) {
+        if (
+          providerEpoch !== this.params.providerEpoch() ||
+          this.params.entry.transcripts !== transcripts
+        ) {
           return;
         }
         return transcripts.onUtterance(utterance);
@@ -376,6 +384,7 @@ export class DiscordRealtimeTurns {
     }
     this.pendingWakeNameFollowup = {
       context,
+      transcripts: turn?.transcripts,
       startedAt: turn?.startedAt ?? Date.now(),
       expiresAt,
     };
@@ -399,7 +408,11 @@ export class DiscordRealtimeTurns {
     if (currentTurn) {
       this.consumePendingSpeakerContext();
     }
-    return { context: pending.context, startedAt: pending.startedAt };
+    return {
+      context: pending.context,
+      startedAt: pending.startedAt,
+      transcripts: pending.transcripts,
+    };
   }
 
   private rememberIgnoredWakeNameSpeakerContext(

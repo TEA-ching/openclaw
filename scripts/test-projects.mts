@@ -5,7 +5,10 @@ import fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import pMap from "p-map";
 import { formatMs } from "./lib/check-timing-summary.mts";
-import { acquireLocalHeavyCheckLockSync } from "./lib/local-heavy-check-runtime.mts";
+import {
+  prepareE2eVitestRuntime,
+  prepareVitestRuntime,
+} from "./lib/vitest-build-prerequisites.mts";
 import {
   isCiLikeEnv,
   resolveLocalFullSuiteProfile,
@@ -39,7 +42,6 @@ import {
   resolveParallelFullSuiteConcurrency,
   resolveChangedTestTargetPlanForArgs,
   resolveChangedTargetArgs,
-  shouldAcquireLocalHeavyCheckLock,
   shouldRetryVitestNoOutputTimeout,
   type FailedVitestShard,
   type VitestRunSpec as BaseVitestRunSpec,
@@ -55,19 +57,6 @@ type VitestCommandOutcome = {
 };
 
 type ShardTiming = NonNullable<ReturnType<typeof createShardTimingSample>>;
-
-// Keep this shim so `pnpm test -- src/foo.test.ts` still forwards filters
-// cleanly instead of leaking pnpm's passthrough sentinel to Vitest.
-let releaseLock = () => {};
-let lockReleased = false;
-
-const releaseLockOnce = () => {
-  if (lockReleased) {
-    return;
-  }
-  lockReleased = true;
-  releaseLock();
-};
 
 function isWrapperMetadataRequest(args: string[]) {
   for (const arg of args) {
@@ -99,13 +88,12 @@ function cleanupVitestRunSpec(spec: VitestRunSpec) {
   }
 }
 
-function runPnpmSpecCommand(spec: VitestRunSpec, pnpmArgs: string[], label: string) {
+function runPnpmSpecCommand(spec: VitestRunSpec, pnpmArgs: string[]) {
   let noOutputTimedOut = false;
   return new Promise<VitestCommandOutcome>((resolve, reject) => {
     const { completion, getForwardedSignal } = spawnWatchedVitestProcess({
       pnpmArgs,
       env: spec.env,
-      label,
       onNoOutputTimeout: () => {
         noOutputTimedOut = true;
       },
@@ -141,16 +129,12 @@ async function runVitestSpec(spec: VitestRunSpec) {
   try {
     if (spec.preflightPnpmArgs) {
       console.error(`[test] preflight ${spec.config}`);
-      const preflightResult = await runPnpmSpecCommand(
-        spec,
-        spec.preflightPnpmArgs,
-        `${spec.config}:preflight`,
-      );
+      const preflightResult = await runPnpmSpecCommand(spec, spec.preflightPnpmArgs);
       if (preflightResult.code !== 0 || preflightResult.signal) {
         return preflightResult;
       }
     }
-    return await runPnpmSpecCommand(spec, spec.pnpmArgs, spec.config);
+    return await runPnpmSpecCommand(spec, spec.pnpmArgs);
   } finally {
     cleanupVitestRunSpec(spec);
   }
@@ -190,7 +174,6 @@ async function runLoggedVitestSpec(spec: VitestRunSpec) {
   }
   if (result.signal) {
     console.error(`[test] ${spec.config} exited by signal ${result.signal}`);
-    releaseLockOnce();
     process.kill(process.pid, result.signal);
     return null;
   }
@@ -325,13 +308,23 @@ async function main() {
     return;
   }
 
-  releaseLock = shouldAcquireLocalHeavyCheckLock(runSpecs, baseEnv)
-    ? acquireLocalHeavyCheckLockSync({
-        cwd: process.cwd(),
-        env: baseEnv,
-        toolName: "test",
-      })
-    : () => {};
+  const e2eSpecs = runSpecs.filter((spec) => spec.config === "test/vitest/vitest.e2e.config.ts");
+  if (e2eSpecs.length > 0) {
+    const preparedEnv = await prepareE2eVitestRuntime(baseEnv);
+    for (const spec of e2eSpecs) {
+      spec.env = { ...spec.env, ...preparedEnv };
+    }
+  } else {
+    const code = await prepareVitestRuntime(
+      runSpecs.map((spec) => ({ configs: [spec.config], includePatterns: spec.includePatterns })),
+      baseEnv,
+    );
+    if (code !== 0) {
+      printTestSummary("failed", 0, performance.now() - suiteStartedAt);
+      process.exitCode = code;
+      return;
+    }
+  }
 
   const isFullSuiteRun =
     targetArgs.length === 0 &&
@@ -380,7 +373,6 @@ async function main() {
       for (const line of formatFailedShardDigest(failures)) {
         console.error(line);
       }
-      releaseLockOnce();
       if (parallelExitCode !== 0) {
         process.exitCode = parallelExitCode;
       }
@@ -402,7 +394,6 @@ async function main() {
       exitCode = exitCode || result.code;
       if (spec.continueOnFailure !== true) {
         printTestSummary("failed", timings.length, performance.now() - suiteStartedAt);
-        releaseLockOnce();
         process.exitCode = result.code;
         return;
       }
@@ -415,7 +406,6 @@ async function main() {
     performance.now() - suiteStartedAt,
   );
 
-  releaseLockOnce();
   if (exitCode !== 0) {
     process.exitCode = exitCode;
   }
@@ -434,7 +424,6 @@ function printTestSummary(
 }
 
 main().catch((error: unknown) => {
-  releaseLockOnce();
   console.error(error);
   process.exitCode = 1;
 });

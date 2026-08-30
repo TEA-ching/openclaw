@@ -3,17 +3,115 @@ import {
   WORKSPACE,
   captureProjectUiProof,
   captureUiProofEnabled,
+  controlUiSessionPath,
   createNewSessionPageE2eSuite,
   installMockGateway,
   pollLocatorText,
   prepareProjectUiProof,
   projectProofArtifactDir,
+  waitForCommittedChatRoute,
 } from "./new-session-page.test-support.ts";
 
 const suite = createNewSessionPageE2eSuite();
+const remoteSearchResult = {
+  credential: "missing",
+  projects: [
+    {
+      name: "openclaw",
+      fullName: "openclaw/openclaw",
+      description: "Personal AI assistant",
+      cloneUrl: "https://github.com/openclaw/openclaw.git",
+      webUrl: "https://github.com/openclaw/openclaw",
+      private: false,
+    },
+  ],
+};
 
 suite.define(() => {
-  it("searches GitHub, clones a remote project with progress, and starts its session", async () => {
+  it("offers a worktree for a GitHub result before its checkout exists", async () => {
+    await prepareProjectUiProof();
+    await suite.withPage(
+      {
+        locale: "en-US",
+        serviceWorkers: "block",
+        ...(captureUiProofEnabled
+          ? {
+              recordVideo: { dir: projectProofArtifactDir, size: { height: 900, width: 1280 } },
+              viewport: { height: 900, width: 1280 },
+            }
+          : {}),
+      },
+      async ({ page }) => {
+        const gateway = await installMockGateway(page, {
+          workspace: WORKSPACE,
+          workspaceGit: false,
+          featureMethods: [
+            "chat.metadata",
+            "chat.startup",
+            "projects.add",
+            "projects.list",
+            "projects.searchRemote",
+            "sessions.create",
+          ],
+          methodResponses: {
+            "projects.list": { projects: [] },
+            "projects.searchRemote": remoteSearchResult,
+            "sessions.create": { key: "agent:main:github-worktree-e2e" },
+          },
+        });
+        await page.goto(`${suite.server.baseUrl}new`);
+        await gateway.waitForRequest("projects.list");
+        await page.locator("#new-session-project-trigger").click();
+        const projects = page.locator("wa-popover.new-session-page__project-popover");
+        await projects
+          .getByRole("searchbox", { name: "Search projects or paste a Git URL" })
+          .fill("openclaw");
+        await projects.getByRole("button", { name: /openclaw\/openclaw/u }).click();
+
+        await captureProjectUiProof(page, "github-worktree-direct.png");
+        const detail = page.locator("#new-session-detail-trigger");
+        await expect.poll(() => detail.isVisible()).toBe(true);
+        await pollLocatorText(detail).toContain("Runs directly");
+        await detail.click();
+        const branches = page.locator("wa-popover.new-session-page__detail-popover");
+        await branches.getByRole("button", { name: "Worktree", exact: true }).click();
+        await expect.poll(() => detail.getAttribute("data-worktree")).toBe("true");
+        const baseRef = branches.getByLabel("Base branch");
+        expect(await baseRef.getAttribute("placeholder")).toBe("Base branch");
+        expect(await baseRef.inputValue()).toBe("");
+        expect(await branches.locator("datalist option").count()).toBe(0);
+        await captureProjectUiProof(page, "github-worktree-selected.png");
+        await page.locator(".new-session-page__message").fill("inspect the worktree");
+        await page.getByRole("button", { name: "Start session" }).click();
+
+        const create = await gateway.waitForRequest("sessions.create");
+        expect(create.params).toMatchObject({
+          projectGitUrl: "https://github.com/openclaw/openclaw.git",
+          worktree: true,
+          message: "inspect the worktree",
+        });
+        expect(create.params).not.toHaveProperty("projectId");
+        expect(create.params).not.toHaveProperty("worktreeBaseRef");
+        expect(await gateway.getRequests("projects.add")).toHaveLength(0);
+        expect(await gateway.getRequests("sessions.create")).toHaveLength(1);
+      },
+    );
+  });
+
+  it.each([
+    { name: "shows workspace preparation in the admitted session", failure: null, worktree: false },
+    {
+      name: "keeps a project preparation failure actionable in the admitted session",
+      failure: "Repository clone failed; verify repository access and try again.",
+      worktree: false,
+    },
+    { name: "shows worktree preparation in the admitted session", failure: null, worktree: true },
+    {
+      name: "keeps a worktree setup failure actionable in the admitted session",
+      failure: "Worktree setup failed; fix the setup command and try again.",
+      worktree: true,
+    },
+  ])("keeps GitHub selection inert and $name", async ({ failure, worktree }) => {
     await prepareProjectUiProof();
     const context = await suite.browser.newContext({
       locale: "en-US",
@@ -29,19 +127,58 @@ suite.define(() => {
         : {}),
     });
     const page = await context.newPage();
-    const clonedProject = {
-      id: "openclaw",
-      displayName: "OpenClaw",
-      repoRoot: "/state/projects/fingerprint/openclaw",
-      originUrl: "https://github.com/openclaw/openclaw.git",
-      source: "cloned",
-    };
+    const sessionKey = "agent:main:cloned-project-e2e";
+    const runId = "run-cloned-project-e2e";
+    const message = "inspect the cloned project";
+    let releaseChatModule!: () => void;
+    let chatModuleRequested = false;
+    const chatModuleBlocked = new Promise<void>((resolve) => {
+      releaseChatModule = resolve;
+    });
+    await page.route("**/assets/chat-page-*.js*", async (route) => {
+      chatModuleRequested = true;
+      await chatModuleBlocked;
+      await route.continue();
+    });
     const gateway = await installMockGateway(page, {
       workspace: WORKSPACE,
       workspaceGit: true,
-      deferredMethods: ["projects.add"],
+      historyMessages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: message }],
+          timestamp: Date.now(),
+          __openclaw: {
+            id: "persisted-remote-project-prompt",
+            idempotencyKey: `${runId}:user`,
+            seq: 1,
+          },
+        },
+      ],
+      inFlightRun: {
+        runId,
+        startedAt: Date.now(),
+        events: [
+          {
+            runId,
+            sessionKey,
+            seq: 1,
+            stream: "run_status",
+            ts: Date.now(),
+            data: { phase: "preparing_workspace" },
+          },
+        ],
+      },
+      sessionInfo: {
+        hasActiveRun: true,
+        activeRunIds: [runId],
+        key: sessionKey,
+        status: "running",
+      },
       featureMethods: [
+        "chat.abort",
         "chat.metadata",
+        "chat.send",
         "chat.startup",
         "projects.add",
         "projects.list",
@@ -50,34 +187,22 @@ suite.define(() => {
         "worktrees.branches",
       ],
       methodResponses: {
-        "projects.list": { sequence: [{ projects: [] }, { projects: [clonedProject] }] },
-        "projects.searchRemote": {
-          credential: "missing",
-          projects: [
-            {
-              name: "openclaw",
-              fullName: "openclaw/openclaw",
-              description: "Personal AI assistant",
-              cloneUrl: "https://github.com/openclaw/openclaw.git",
-              webUrl: "https://github.com/openclaw/openclaw",
-              private: false,
-            },
-          ],
-        },
+        "projects.list": { projects: [] },
+        "projects.searchRemote": remoteSearchResult,
         "worktrees.branches": {
           branches: [{ kind: "local", name: "main" }],
           defaultBranch: "main",
           repositoryStatus: "git",
         },
-        "sessions.create": { key: "agent:main:cloned-project-e2e" },
+        "sessions.create": { key: sessionKey, runStarted: true, runId, messageSeq: 1 },
       },
     });
 
     try {
       await page.goto(`${suite.server.baseUrl}new`);
       await gateway.waitForRequest("projects.list");
-      const trigger = page.locator("#new-session-place-trigger");
-      const place = page.locator("wa-popover.new-session-page__place-popover");
+      const trigger = page.locator("#new-session-project-trigger");
+      const place = page.locator("wa-popover.new-session-page__project-popover");
       await trigger.click();
       const search = place.getByRole("searchbox", {
         name: "Search projects or paste a Git URL",
@@ -86,35 +211,128 @@ suite.define(() => {
 
       const searchRequest = await gateway.waitForRequest("projects.searchRemote");
       expect(searchRequest.params).toEqual({ query: "openclaw" });
-      await place.getByText("GH_TOKEN is not configured; public GitHub results only.").waitFor();
+      await place
+        .getByText(
+          "No Control UI GitHub credential or shared Gateway environment token is configured; public GitHub results only.",
+        )
+        .waitFor();
       await place.getByRole("button", { name: /openclaw\/openclaw/u }).click();
 
-      const addRequest = await gateway.waitForRequest("projects.add");
-      expect(addRequest.params).toEqual({ gitUrl: "https://github.com/openclaw/openclaw.git" });
-      await place.getByRole("status").getByText("Cloning project…").waitFor();
-      await captureProjectUiProof(page, "project-cloning.png");
-      await gateway.resolveDeferred("projects.add", clonedProject);
+      expect(await gateway.getRequests("projects.add")).toHaveLength(0);
+      await pollLocatorText(trigger.locator(".new-session-page__trigger-label")).toBe(
+        "openclaw/openclaw",
+      );
+      expect(await trigger.getAttribute("data-project-id")).toBeNull();
 
-      await expect.poll(async () => (await gateway.getRequests("projects.list")).length).toBe(2);
-      await pollLocatorText(trigger.locator(".new-session-page__trigger-label")).toBe("OpenClaw");
-      expect(await trigger.getAttribute("data-project-id")).toBe("openclaw");
-      await expect
-        .poll(async () => (await gateway.getRequests("worktrees.branches")).at(-1)?.params)
-        .toEqual({
-          repoRoot: "/state/projects/fingerprint/openclaw",
-          includeRepositoryStatus: true,
-        });
+      if (worktree) {
+        const detailTrigger = page.locator("#new-session-detail-trigger");
+        await detailTrigger.click();
+        await page
+          .locator("wa-popover.new-session-page__detail-popover")
+          .getByRole("button", { name: "Worktree", exact: true })
+          .click();
+        await expect.poll(() => detailTrigger.getAttribute("data-worktree")).toBe("true");
+        await page.keyboard.press("Escape");
+      }
 
-      await page.locator(".new-session-page__message").fill("inspect the cloned project");
+      const permission = page.locator('[data-chat-permission-select="true"]');
+      await permission.click();
+      await page.locator('[data-chat-permission-option="read-only"]').click();
+      await page.locator(".new-session-page__message").fill(message);
       await page.getByRole("button", { name: "Start session" }).click();
       const create = await gateway.waitForRequest("sessions.create");
       expect(create.params).toMatchObject({
         agentId: "main",
-        message: "inspect the cloned project",
-        projectId: "openclaw",
+        message,
+        permissionMode: "read-only",
+        projectGitUrl: "https://github.com/openclaw/openclaw.git",
+        ...(worktree ? { worktree: true } : {}),
       });
       expect(create.params).not.toHaveProperty("cwd");
+      expect(create.params).not.toHaveProperty("projectId");
+      expect(await gateway.getRequests("projects.add")).toHaveLength(0);
+
+      await expect.poll(() => chatModuleRequested).toBe(true);
+      expect(new URL(page.url()).pathname).toBe(controlUiSessionPath(sessionKey));
+      expect(await gateway.getRequests("chat.startup")).toHaveLength(0);
+      await gateway.emitGatewayEvent("chat", {
+        runId,
+        sessionKey,
+        seq: 1,
+        state: "status",
+        phase: "preparing_workspace",
+      });
+      releaseChatModule();
+      await waitForCommittedChatRoute(page);
+      expect(new URL(page.url()).pathname).toBe(controlUiSessionPath(sessionKey));
+      await gateway.waitForRequest("chat.startup");
+
+      const working = page.locator('.chat-working-indicator[role="status"]');
+      await pollLocatorText(working).toContain("Preparing workspace…");
+      await expect.poll(() => page.locator(".chat-group.user").count()).toBe(1);
+      expect(await working.locator(".chat-reading-indicator").count()).toBe(1);
+      expect(await gateway.getRequests("chat.send")).toHaveLength(0);
+      await captureProjectUiProof(
+        page,
+        worktree ? "worktree-preparing.png" : "project-cloning.png",
+      );
+
+      if (worktree) {
+        let seq = 1;
+        for (const [phase, label] of [
+          ["naming_worktree", "Naming worktree…"],
+          ["creating_worktree", "Creating worktree…"],
+          ["running_setup", "Running setup…"],
+        ] as const) {
+          await gateway.emitGatewayEvent("chat", {
+            runId,
+            sessionKey,
+            seq: ++seq,
+            state: "status",
+            phase,
+          });
+          await pollLocatorText(working).toContain(label);
+          expect(await page.locator(".chat-group.user").count()).toBe(1);
+        }
+        await captureProjectUiProof(page, "worktree-running-setup.png");
+      }
+
+      if (!failure) {
+        await gateway.emitChatFinal({ runId, sessionKey, text: "Project workspace is ready." });
+        await page
+          .getByRole("paragraph")
+          .filter({ hasText: "Project workspace is ready." })
+          .waitFor();
+        await expect.poll(() => working.count()).toBe(0);
+        expect(await gateway.getRequests("sessions.create")).toHaveLength(1);
+        return;
+      }
+
+      await gateway.emitGatewayEvent("chat", {
+        runId,
+        sessionKey,
+        seq: 5,
+        state: "error",
+        errorMessage: failure,
+      });
+      const alert = page.locator('.chat-error[role="alert"]');
+      await pollLocatorText(alert).toContain(failure);
+      await expect.poll(() => working.count()).toBe(0);
+      const composer = page.locator(".agent-chat__composer-combobox textarea");
+      await expect.poll(() => composer.isEnabled()).toBe(true);
+      await captureProjectUiProof(
+        page,
+        worktree ? "worktree-setup-failed.png" : "project-cloning-failed.png",
+      );
+
+      await composer.fill(message);
+      await page.getByRole("button", { name: "Send message" }).click();
+      const retry = await gateway.waitForRequest("chat.send");
+      expect(retry.params).toMatchObject({ sessionKey, message });
+      expect(await gateway.getRequests("sessions.create")).toHaveLength(1);
+      expect(await gateway.getRequests("projects.add")).toHaveLength(0);
     } finally {
+      releaseChatModule();
       await context.close();
     }
   });

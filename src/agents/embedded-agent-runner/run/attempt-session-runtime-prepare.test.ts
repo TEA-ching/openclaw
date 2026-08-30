@@ -76,6 +76,7 @@ function createFixture() {
   const anthropicPayloadLogger = { kind: "payload-logger" };
   const trajectoryRecorder = { kind: "trajectory" };
   const transport = {
+    compactionReplayEnabled: true,
     effectiveAgentTransport: "sse",
     effectiveExtraParams: { cacheRetention: "long" },
     effectivePromptCacheRetention: "long",
@@ -163,6 +164,7 @@ function createFixture() {
     effectiveWorkspace: "/workspace",
     initialSystemPrompt: "initial prompt",
     isRawModelRun: false,
+    nestedToolActivities: [],
     sessionManager: {
       replayAllowedToolNames: new Set(["read"]),
       resolveActiveContextEnginePluginId: vi.fn(),
@@ -254,6 +256,7 @@ describe("prepareEmbeddedAttemptSessionRuntime", () => {
       }),
     );
     expect(result.state).toEqual({
+      currentTurnImageFailureCount: 0,
       prePromptMessageCount: 2,
       promptCache: undefined,
       systemPromptText: "runtime prompt",
@@ -282,7 +285,11 @@ describe("prepareEmbeddedAttemptSessionRuntime", () => {
     expect(guardInput.getPrePromptMessageCount()).toBe(7);
     expect(guardInput.getPromptCache()).toEqual({ cacheRead: 3 });
     expect(guardInput.getPromptCacheRetention()).toBe("long");
+    expect(guardInput.getCompactionReplayEnabled()).toBe(true);
     expect(guardInput.getSystemPrompt()).toBe("updated prompt");
+    guardInput.onCurrentTurnImageFailure(2);
+    guardInput.onCurrentTurnImageFailure(1);
+    expect(result.state.currentTurnImageFailureCount).toBe(2);
   });
 
   it("publishes every cleanup owner before a later transport failure", async () => {
