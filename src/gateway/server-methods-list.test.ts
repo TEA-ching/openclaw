@@ -77,7 +77,7 @@ describe("listGatewayMethods", () => {
   });
 
   it("appends new methods after model probing without shifting older method indices", () => {
-    expect(listGatewayMethods().slice(-66)).toEqual([
+    expect(listGatewayMethods().slice(-67)).toEqual([
       "models.probe",
       "migrations.memory.plan",
       "migrations.memory.apply",
@@ -267,7 +267,7 @@ describe("listGatewayMethods", () => {
       "exec.approval.get",
     ]);
     expect(methods).toContain("tts.speak");
-    expect(coreMethods.slice(-73)).toEqual([
+    expect(coreMethods.slice(-74)).toEqual([
       "sessions.catalog.continue",
       "sessions.catalog.archive",
       "approval.get",
