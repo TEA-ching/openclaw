@@ -320,6 +320,30 @@ export function createGatewayHttpServer(opts: {
       const pluginPathContext = resolvePluginRoutePathContext(scopedRequestPath);
       const nodeCapability = resolvePluginNodeCapabilityRoute?.(pluginPathContext);
       if (ingressAttribution.kind === "unattributable-proxy") {
+        const unattributableProbeStatus = classifyGatewayProbePath(scopedRequestPath);
+        if (
+          unattributableProbeStatus === "live" ||
+          unattributableProbeStatus === "ready" ||
+          unattributableProbeStatus === "startup"
+        ) {
+          // Kubelet-style HTTP probes (and any other unattributable in-cluster caller)
+          // still get a probe answer instead of a 403: shouldIncludeGatewayProbeDetails
+          // independently re-verifies bearer auth / trusted-proxy origin policy below, so
+          // this never grants more than the same minimal boolean an untrusted direct
+          // caller already gets on this same endpoint.
+          await handleGatewayProbeRequest(
+            req,
+            res,
+            scopedRequestPath,
+            getResolvedAuth(),
+            trustedProxies,
+            allowRealIpFallback,
+            rateLimiter,
+            getReadiness,
+            getStartup,
+          );
+          return;
+        }
         opts.reportUnattributableProxy?.(ingressAttribution);
         if (
           !nodeCapability &&

@@ -550,7 +550,12 @@ describe("gateway probe endpoints", () => {
     });
   });
 
-  it("fails closed with guidance for unattributable proxied readiness", async () => {
+  it("still answers unattributable proxied readiness with the safe minimal probe body", async () => {
+    // Kubelet-style HTTP probes reach the pod directly and can never present a parseable
+    // forwarded-client chain, so an unattributable-proxy-shaped caller must not 403 on a
+    // probe endpoint the same way it would on an ordinary authenticated route -- it falls
+    // through to the same minimal response an untrusted direct caller already gets,
+    // matching the unconditional bypass /healthz (liveness) has always had.
     const getReadiness: ReadinessChecker = () => ({
       ready: true,
       failing: [],
@@ -570,14 +575,8 @@ describe("gateway probe endpoints", () => {
           headers: { forwarded: "for=203.0.113.10" },
         });
 
-        expect(res.statusCode).toBe(403);
-        expect(JSON.parse(getBody())).toEqual({
-          error: {
-            message:
-              "Proxy client attribution is required. Configure gateway.trustedProxies narrowly and make the proxy overwrite or safely rebuild forwarded client headers.",
-            type: "proxy_attribution_required",
-          },
-        });
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(getBody())).toEqual({ ready: true });
       },
     });
   });
