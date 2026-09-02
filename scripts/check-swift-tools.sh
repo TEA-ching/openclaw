@@ -3,7 +3,7 @@
 set -euo pipefail
 
 readonly swiftformat_version="0.62.1"
-readonly swiftlint_version="0.65.0"
+readonly swiftlint_version="0.65.1"
 
 usage() {
   echo "usage: $0 [swiftformat|swiftlint]" >&2
