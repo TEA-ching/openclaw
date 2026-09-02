@@ -52,7 +52,7 @@ public final class MobileBrokerSessionStore: Sendable {
     // MARK: - Keychain Keys
 
     private func keychainKey(for gatewayStableID: String) -> String {
-        "com.openclaw.mobileBrokerSession.\(gatewayStableID)"
+        "\(KeychainConstants.mobileBrokerSessionPrefix)\(gatewayStableID)"
     }
 
     // MARK: - Store Session
@@ -157,18 +157,40 @@ public final class MobileBrokerSessionStore: Sendable {
     /// Clears all mobile broker sessions
     /// - Throws: Keychain error
     public func clearAllSessions() throws {
+        // kSecAttrAccount matches exactly, not by prefix, so deleting every
+        // per-gateway session (keyed "prefix<stableID>") requires enumerating
+        // and filtering client-side rather than one prefix-only SecItemDelete.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: "com.openclaw.mobileBrokerSession.",
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
         ]
 
-        // Add access group if configured
         var finalQuery = query
         if let accessGroup {
             finalQuery[kSecAttrAccessGroup as String] = accessGroup
         }
 
-        SecItemDelete(finalQuery as CFDictionary)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(finalQuery as CFDictionary, &result)
+        guard status != errSecItemNotFound else { return }
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
+            throw KeychainError.unhandledError(status: status)
+        }
+
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String,
+                  account.hasPrefix(KeychainConstants.mobileBrokerSessionPrefix)
+            else { continue }
+            var deleteQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrAccount as String: account,
+            ]
+            if let accessGroup {
+                deleteQuery[kSecAttrAccessGroup as String] = accessGroup
+            }
+            SecItemDelete(deleteQuery as CFDictionary)
+        }
     }
 
     // MARK: - Check Expiration

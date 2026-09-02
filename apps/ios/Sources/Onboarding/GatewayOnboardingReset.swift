@@ -135,6 +135,8 @@ enum GatewayOnboardingReset {
                     profile: .shareExtension)
             }
             GatewayTLSStore.clearFingerprint(stableID: gatewayStableID)
+            try? KeychainAccessGroupConfig.createSessionStore()
+                .deleteSession(forGatewayStableID: gatewayStableID)
         } else {
             // Full onboarding reset is the only path that intentionally forgets every gateway.
             DeviceAuthStore.clearToken(deviceId: deviceId, role: "node")
@@ -142,6 +144,7 @@ enum GatewayOnboardingReset {
             DeviceAuthStore.clearAll(profile: .shareExtension)
             GatewayTLSStore.clearAllFingerprints()
             GatewaySettingsStore.clearGatewayCustomHeaders()
+            try? KeychainAccessGroupConfig.createSessionStore().clearAllSessions()
         }
 
         if gatewayStableID == nil {

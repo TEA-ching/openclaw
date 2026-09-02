@@ -277,7 +277,9 @@ struct SettingsProTab: View {
                         .font(OpenClawType.subheadSemiBold)
                 }
             } message: {
-                Text("This disconnects, clears saved gateway credentials, and reopens onboarding.")
+                Text(
+                    "This disconnects, clears saved gateway credentials and mobile broker sign-in, "
+                        + "and reopens onboarding.")
                     .font(OpenClawType.subhead)
             }
             .alert(
