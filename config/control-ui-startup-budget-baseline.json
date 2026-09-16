@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 346185,
-  "reason": "Per-session colors in the boot path (#132570): sidebar stripe render, color tokens, and menu wiring measured 346185 B, +579 B over the prior baseline and 3 B past its growth allowance; below the maintainer-approved 347323 B ceiling; hard cap and allowances unchanged",
-  "updatedAt": "2026-08-29"
+  "startupJsGzipBytes": 348457,
+  "reason": "sctg-claw fork carries additional Control UI surface (VNC / local-desktop-observe route) beyond upstream's tuned baseline; measured after the v2026.8.2 upstream merge",
+  "updatedAt": "2026-09-16"
 }

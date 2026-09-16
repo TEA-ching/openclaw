@@ -579,7 +579,7 @@ export async function runWithGatewayRequestEnvelope<T>(
     return await options.reject(preAdmissionRateLimitError);
   }
   const rootWorkAdmission =
-    tryBeginGatewayRootWorkAdmission() ??
+    tryBeginGatewayRootWorkAdmission(`ws:${method}`) ??
     (method === "gateway.restart.request" &&
     isTargetedNonSafeGatewayRestartRequest(options.requestParams)
       ? tryBeginGatewayPreparedRestartRootWorkAdmission()

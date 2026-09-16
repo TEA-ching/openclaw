@@ -401,6 +401,8 @@ export {
   SystemAgentSetupVerifyResultSchema,
   SystemAgentSetupActivateParamsSchema,
   SystemAgentSetupActivateResultSchema,
+  SystemAgentSetupActivateStartParamsSchema,
+  SystemAgentSetupActivateStartResultSchema,
   SystemAgentSetupAuthStartParamsSchema,
   SystemAgentSetupAuthStartResultSchema,
   WizardStartParamsSchema,
