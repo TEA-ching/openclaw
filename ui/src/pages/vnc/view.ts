@@ -1,6 +1,6 @@
 // Control UI view renders VNC screen content.
 import { html, nothing } from "lit";
-import { renderSettingsPage, renderSettingsStatus } from "../../components/settings-ui.ts";
+import { renderSettingsStatus } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
 
 type VncProps = {
@@ -54,10 +54,7 @@ export function renderVnc(props: VncProps) {
   }
 
   const vncScreen = html`
-    <div
-      id="vnc-screen"
-      style="width: 100%; height: calc(100vh - 200px); border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;"
-    >
+    <div id="vnc-screen" class="vnc-workspace__screen">
       ${props.connectionStatus === "connected"
         ? nothing
         : html`<div
@@ -68,11 +65,10 @@ export function renderVnc(props: VncProps) {
     </div>
   `;
 
-  return renderSettingsPage(
-    html`
-      <div class="settings-row">${statusContent}</div>
+  return html`
+    <div class="vnc-workspace">
+      <div class="settings-row vnc-workspace__status">${statusContent}</div>
       ${vncScreen}
-    `,
-    { wide: true },
-  );
+    </div>
+  `;
 }

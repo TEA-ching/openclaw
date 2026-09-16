@@ -41,6 +41,7 @@ export const CONTROL_UI_RESERVED_ROUTE_SEGMENTS: readonly string[] = Object.free
   "skills",
   "tasks",
   "usage",
+  "vnc",
   "workboard",
   "worktrees",
 ]);

@@ -1,0 +1,53 @@
+/* The remote desktop is a canvas, not a reading column: unlike other settings
+   pages it must not be capped by .settings-page's centered max-width, or it
+   renders at a small fraction of the available viewport. This bypasses that
+   column entirely and fills the full .content area instead; noVNC's own
+   scaleViewport option (see desktop-client.ts) then scales the remote
+   framebuffer to fit here while preserving its aspect ratio. Scaffolding
+   mirrors logs.css's fill-height page pattern: .content stops scrolling
+   itself, the router outlet and the (layout-transparent) page element form
+   an unbroken flex/height chain down to .vnc-workspace. */
+.content:has(openclaw-vnc-page) {
+  overflow: hidden;
+}
+
+.content:has(openclaw-vnc-page) > openclaw-router-outlet {
+  display: flex;
+  flex-direction: column;
+  margin-top: 0;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+}
+
+openclaw-vnc-page {
+  display: contents;
+}
+
+.content:has(openclaw-vnc-page) .content-header {
+  flex: 0 0 auto;
+}
+
+.vnc-workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: var(--space-3);
+}
+
+.vnc-workspace__status {
+  flex: 0 0 auto;
+}
+
+.vnc-workspace__screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

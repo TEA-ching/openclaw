@@ -1,3 +1,4 @@
+import "../../styles/vnc.css";
 import { consume } from "@lit/context";
 import type { LocalDesktopObserveResult } from "@openclaw/gateway-protocol";
 import { html } from "lit";
@@ -131,7 +132,7 @@ class VncPage extends OpenClawLightDomElement {
           <div class="page-title">${titleForRoute("vnc")}</div>
         </div>
       </section>
-      ${renderSettingsWorkspace(vncView)}
+      ${renderSettingsWorkspace(vncView, { fillHeight: true })}
     `;
   }
 }

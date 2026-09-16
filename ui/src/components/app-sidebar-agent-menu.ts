@@ -469,6 +469,9 @@ export function renderSidebarIdentityMenu(params: SidebarIdentityMenuParams) {
           case `${COMMAND_VALUE_PREFIX}debug-overlay`:
             requestDebugOverlayToggle();
             break;
+          case `${COMMAND_VALUE_PREFIX}vnc`:
+            params.onNavigate("vnc");
+            break;
           case `${COMMAND_VALUE_PREFIX}retry-connect`:
             params.onRetryConnect?.();
             break;
@@ -542,6 +545,10 @@ export function renderSidebarIdentityMenu(params: SidebarIdentityMenuParams) {
         <span slot="details" class="session-menu__shortcut" aria-hidden="true"
           >${DEBUG_OVERLAY_SHORTCUT_LABEL}</span
         >
+      </wa-dropdown-item>
+      <wa-dropdown-item class="sidebar-customize-menu__item" value="command:vnc">
+        <span slot="icon" class="nav-item__icon" aria-hidden="true">${icons.monitor}</span>
+        <span class="sidebar-customize-menu__text">${titleForRoute("vnc")}</span>
       </wa-dropdown-item>
       <div class="sidebar-customize-menu__separator" role="separator"></div>
       <wa-dropdown-item
