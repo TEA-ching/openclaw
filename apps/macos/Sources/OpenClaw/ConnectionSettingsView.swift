@@ -14,6 +14,8 @@ struct ConnectionSettingsView: View {
     @State private var gatewayDiscovery = GatewayDiscoveryModel(
         localDisplayName: InstanceIdentity.displayName)
     @State private var remoteStatus: RemoteStatus = .idle
+    @State private var showsMobileBrokerSignIn = false
+    @State private var mobileBrokerSession: MobileBrokerSessionStore.Session?
     private let isPreview = ProcessInfo.processInfo.isPreview
     private var isNixMode: Bool {
         ProcessInfo.processInfo.isNixMode
@@ -174,6 +176,19 @@ struct ConnectionSettingsView: View {
         GatewayConnectionPresentation(state: ControlChannel.shared.state).statusLine
     }
 
+    /// The remote Gateway URL, canonicalized the same way the real connection
+    /// resolution path does (`GatewayRemoteConfig.normalizeGatewayUrl`), if it
+    /// matches the mobile-broker hostname heuristic. Heuristic only, mirroring
+    /// both the iOS app and the Gateways-tab profile editor: no persisted
+    /// "auth mode" flag.
+    private var mobileBrokerCanonicalURL: URL? {
+        guard self.state.remoteTransport == .direct else { return nil }
+        guard let canonical = GatewayRemoteConfig.normalizeGatewayUrl(self.state.remoteUrl),
+              canonical.isMobileBrokerHost
+        else { return nil }
+        return canonical
+    }
+
     // MARK: - Gateway
 
     private var gatewayModeSection: some View {
@@ -308,24 +323,28 @@ struct ConnectionSettingsView: View {
                 self.remoteDirectRow
             }
 
-            LabeledContent {
-                SecureField("Gateway token", text: self.$state.remoteToken, prompt: Text("gateway.remote.token"))
-                    .labelsHidden()
-                    .multilineTextAlignment(.leading)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: Self.fieldWidth)
-            } label: {
-                Text("Gateway token")
-                Text("Used when the remote Gateway requires token auth.")
-            }
+            if let brokerURL = self.mobileBrokerCanonicalURL {
+                self.remoteMobileBrokerRow(brokerURL: brokerURL)
+            } else {
+                LabeledContent {
+                    SecureField("Gateway token", text: self.$state.remoteToken, prompt: Text("gateway.remote.token"))
+                        .labelsHidden()
+                        .multilineTextAlignment(.leading)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: Self.fieldWidth)
+                } label: {
+                    Text("Gateway token")
+                    Text("Used when the remote Gateway requires token auth.")
+                }
 
-            if self.state.remoteTokenUnsupported {
-                Text(
-                    "The current gateway.remote.token value is not plain text. "
-                        + "OpenClaw for macOS cannot use it directly; "
-                        + "enter a plaintext token here to replace it.")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
+                if self.state.remoteTokenUnsupported {
+                    Text(
+                        "The current gateway.remote.token value is not plain text. "
+                            + "OpenClaw for macOS cannot use it directly; "
+                            + "enter a plaintext token here to replace it.")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
             }
 
             GatewayConfigConflictRecoveryView(state: self.state)
@@ -337,6 +356,47 @@ struct ConnectionSettingsView: View {
             Text("Remote Access")
         } footer: {
             self.remoteAccessFooter
+        }
+        .onChange(of: self.state.remoteUrl) { _, _ in
+            self.mobileBrokerSession = nil
+        }
+        .sheet(isPresented: self.$showsMobileBrokerSignIn) {
+            if let brokerURL = self.mobileBrokerCanonicalURL,
+               let brokerConfig = brokerURL.mobileBrokerConfigFromHost
+            {
+                MobileBrokerSignInSheet(viewModel: MobileBrokerSignInSheet.ViewModel(
+                    authClient: MobileBrokerAuthClient(config: brokerConfig),
+                    sessionStore: MobileBrokerSessionStore.shared,
+                    gatewayStableID: brokerURL.mobileBrokerGatewayStableID ?? brokerConfig.hostname,
+                    onComplete: { session in
+                        self.mobileBrokerSession = session
+                    },
+                    onDismiss: {
+                        self.showsMobileBrokerSignIn = false
+                    }))
+            }
+        }
+    }
+
+    private func remoteMobileBrokerRow(brokerURL: URL) -> some View {
+        LabeledContent {
+            if self.mobileBrokerSession != nil {
+                HStack(spacing: 8) {
+                    Label("Signed in", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Button("Sign In Again") {
+                        self.showsMobileBrokerSignIn = true
+                    }
+                }
+            } else {
+                Button("Sign in with GitHub") {
+                    self.showsMobileBrokerSignIn = true
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        } label: {
+            Text("GitHub Sign-In")
+            Text("This Gateway uses mobile-broker authentication instead of a token.")
         }
     }
 
