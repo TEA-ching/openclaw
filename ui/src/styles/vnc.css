@@ -40,6 +40,31 @@ openclaw-vnc-page {
   flex: 0 0 auto;
 }
 
+/* Browsers block unprompted reads of the system clipboard, so paste-to-send
+   goes through an ordinary textarea (a real paste event, no permission
+   needed) instead of the Clipboard API. See desktop-client.ts's onClipboard/
+   sendClipboardText, which forward this to/from the RFB clipboard channel. */
+.vnc-workspace__clipboard {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.vnc-workspace__clipboard-label {
+  font-size: var(--control-ui-text-sm);
+  color: var(--text-muted);
+}
+
+/* .settings-input's own textarea rule (min-height, monospace) is element +
+   class specificity; matching that alone risks losing to load order if
+   settings.css happens to import after this file, so scope under the parent
+   too for an unambiguous win. */
+.vnc-workspace textarea.vnc-workspace__clipboard-input {
+  min-height: 44px;
+  font-family: inherit;
+}
+
 .vnc-workspace__screen {
   flex: 1 1 auto;
   min-height: 0;

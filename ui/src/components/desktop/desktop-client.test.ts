@@ -22,6 +22,7 @@ function createFakeRfb() {
     viewOnly = false;
     scaleViewport = false;
     readonly disconnect = vi.fn();
+    readonly clipboardPasteFrom = vi.fn();
 
     constructor(
       readonly target: HTMLElement,
@@ -102,6 +103,28 @@ describe("DesktopClient", () => {
 
     handle.disconnect();
     expect(instances[0]?.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("forwards clipboard text both ways through the RFB clipboard channel", async () => {
+    const { Rfb, instances } = createFakeRfb();
+    const socket = new FakeSocket("ws://control.example.test/desktop/observe");
+    const onClipboard = vi.fn();
+    const client = new DesktopClient(Rfb, () => socket as unknown as WebSocket);
+
+    const handle = await client.connect({
+      wsUrl: "ws://control.example.test/desktop/observe",
+      viewOnly: false,
+      target: document.createElement("div"),
+      onClipboard,
+    });
+
+    handle.sendClipboardText?.("local text to send");
+    expect(instances[0]?.clipboardPasteFrom).toHaveBeenCalledWith("local text to send");
+
+    instances[0]?.dispatchEvent(
+      new CustomEvent("clipboard", { detail: { text: "remote text copied" } }),
+    );
+    expect(onClipboard).toHaveBeenCalledWith("remote text copied");
   });
 
   it("forwards socket close metadata through the RFB disconnect callback", async () => {

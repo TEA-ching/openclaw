@@ -23,6 +23,7 @@ class VncPage extends OpenClawLightDomElement {
   @state() private connectionStatus: "connecting" | "connected" | "failed" | "disconnected" =
     "connecting";
   @state() private errorMessage: string | null = null;
+  @state() private clipboardText = "";
 
   private readonly desktopClient = new DesktopClient();
   private connection: DesktopConnectionHandle | null = null;
@@ -98,6 +99,16 @@ class VncPage extends OpenClawLightDomElement {
             this.errorMessage = detail.reason || t("vnc.connectionFailed");
           }
         },
+        onClipboard: (text) => {
+          if (operationId !== this.operationId) {
+            return;
+          }
+          this.clipboardText = text;
+          // Best-effort: browsers may block an unprompted clipboard write
+          // (permissions, insecure context). The textarea below always shows
+          // the received text either way, so a manual copy still works.
+          void navigator.clipboard?.writeText(text).catch(() => {});
+        },
       });
       if (operationId !== this.operationId) {
         connection.disconnect();
@@ -119,10 +130,17 @@ class VncPage extends OpenClawLightDomElement {
     this.connection = null;
   }
 
+  private handleClipboardInput(text: string) {
+    this.clipboardText = text;
+    this.connection?.sendClipboardText?.(text);
+  }
+
   override render() {
     const vncView = renderVnc({
       connectionStatus: this.connectionStatus,
       errorMessage: this.errorMessage,
+      clipboardText: this.clipboardText,
+      onClipboardInput: (text) => this.handleClipboardInput(text),
       onRetry: () => void this.connectVnc(),
     });
 

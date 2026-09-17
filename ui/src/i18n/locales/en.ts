@@ -1569,6 +1569,10 @@ export const en: TranslationMap = {
     connected: "Connected",
     disconnected: "Disconnected from remote desktop",
     connectionFailed: "Failed to connect to remote desktop",
+    clipboardLabel: "Clipboard",
+    clipboardHint:
+      "Paste here (Cmd/Ctrl+V) to send text to the remote session. Text the remote copies appears here too.",
+    clipboardPlaceholder: "Paste to send to the remote desktop…",
   },
   configForm: {
     redactedPlaceholder: "[redacted - click reveal to view]",

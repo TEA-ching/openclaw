@@ -6,6 +6,8 @@ import { t } from "../../i18n/index.ts";
 type VncProps = {
   connectionStatus: "connecting" | "connected" | "failed" | "disconnected";
   errorMessage: string | null;
+  clipboardText: string;
+  onClipboardInput: (text: string) => void;
   onRetry: () => void;
 };
 
@@ -65,10 +67,28 @@ export function renderVnc(props: VncProps) {
     </div>
   `;
 
+  const clipboard = html`
+    <div class="vnc-workspace__clipboard">
+      <label class="vnc-workspace__clipboard-label" for="vnc-clipboard">
+        ${t("vnc.clipboardLabel")}
+      </label>
+      <textarea
+        id="vnc-clipboard"
+        class="settings-input vnc-workspace__clipboard-input"
+        rows="2"
+        placeholder=${t("vnc.clipboardPlaceholder")}
+        title=${t("vnc.clipboardHint")}
+        .value=${props.clipboardText}
+        @input=${(event: InputEvent) =>
+          props.onClipboardInput((event.target as HTMLTextAreaElement).value)}
+      ></textarea>
+    </div>
+  `;
+
   return html`
     <div class="vnc-workspace">
       <div class="settings-row vnc-workspace__status">${statusContent}</div>
-      ${vncScreen}
+      ${clipboard} ${vncScreen}
     </div>
   `;
 }

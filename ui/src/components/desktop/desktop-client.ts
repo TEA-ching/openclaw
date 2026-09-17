@@ -15,6 +15,8 @@ type DesktopConnectOptions = {
   onConnect?: () => void;
   onDisconnect?: (detail: DesktopDisconnectDetail) => void;
   onSecurityFailure?: (detail: DesktopSecurityFailureDetail) => void;
+  /** Fires when the remote session's clipboard changes (a "copy" on the remote side). */
+  onClipboard?: (text: string) => void;
   scaleViewport?: boolean;
   target: HTMLElement;
   viewOnly: boolean;
@@ -27,6 +29,8 @@ export type DesktopConnectionHandle = {
   sendKeyboardEvent?(event: KeyboardEvent): void;
   sendText?(text: string): void;
   setScaleViewport?(enabled: boolean): void;
+  /** Pushes local clipboard text into the remote session's clipboard (a local "paste"). */
+  sendClipboardText?(text: string): void;
 };
 
 type RfbClient = EventTarget & {
@@ -34,6 +38,7 @@ type RfbClient = EventTarget & {
   disconnect(): void;
   scaleViewport: boolean;
   viewOnly: boolean;
+  clipboardPasteFrom(text: string): void;
 };
 
 type RfbConstructor = new (
@@ -101,6 +106,12 @@ export class DesktopClient {
       const detail = (event as CustomEvent<DesktopSecurityFailureDetail>).detail ?? {};
       options.onSecurityFailure?.(detail);
     });
+    rfb.addEventListener("clipboard", (event) => {
+      const text = (event as CustomEvent<{ text: string }>).detail?.text;
+      if (typeof text === "string") {
+        options.onClipboard?.(text);
+      }
+    });
     const dispatchKeyboardEvent = (event: KeyboardEvent) => {
       // noVNC owns keyboard translation and attaches its listeners to the
       // canvas. Forward the offscreen mobile input's event to that same
@@ -126,6 +137,7 @@ export class DesktopClient {
       setScaleViewport: (enabled) => {
         rfb.scaleViewport = enabled;
       },
+      sendClipboardText: (text) => rfb.clipboardPasteFrom(text),
       sendKeyboardEvent: (event) => dispatchKeyboardEvent(cloneKeyboardEvent(event)),
       sendText: (text) => {
         // Mobile IMEs can omit keydown/keyup. "Unidentified" asks noVNC's
