@@ -47,6 +47,7 @@ export async function installDesktopClientFake(panel: Locator): Promise<void> {
           sendKeyboardEvent() {},
           sendText() {},
           setScaleViewport() {},
+          sendClipboardText() {},
           disconnect() {
             element.dataset.disconnectCount = String(
               Number(element.dataset.disconnectCount ?? "0") + 1,

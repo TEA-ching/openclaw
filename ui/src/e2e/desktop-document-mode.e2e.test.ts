@@ -72,6 +72,7 @@ async function installDesktopClientFake(panel: import("playwright").Locator) {
           setScaleViewport(enabled) {
             element.dataset.scaleViewport = String(enabled);
           },
+          sendClipboardText() {},
         };
       },
     });
