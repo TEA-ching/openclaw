@@ -12,15 +12,16 @@ import type {
   PluginRegistrySnapshotDiagnostic,
   PluginRegistrySnapshotSource,
 } from "./plugin-registry-snapshot.types.js";
+import type { DeclaredProviderOwnerIndex } from "./provider-owner-index.js";
 
 export type PluginMetadataSnapshotPluginIdScope = {
-  key: string;
   resolve: (params: { index: InstalledPluginIndex }) => readonly string[] | undefined;
 };
 
 export type PluginProviderAuthAliasCandidate = {
   plugin: PluginManifestRecord;
   target: string;
+  baseUrls?: readonly string[];
   /** First eligible declaration owns public map order, even if a later candidate wins. */
   order: number;
 };
@@ -68,16 +69,22 @@ export type PluginMetadataSnapshot = {
   byPluginId: ReadonlyMap<string, PluginManifestRecord>;
   normalizePluginId: (pluginId: string) => string;
   owners: PluginMetadataSnapshotOwnerMaps;
+  /** Strict first-winner literal/setup ownership, separate from public alias maps. */
+  declaredProviderOwners: DeclaredProviderOwnerIndex;
   metrics: PluginMetadataSnapshotMetrics;
   discovery?: PluginDiscoveryResult;
 };
 
 export type PluginMetadataRegistryView = Pick<
   PluginMetadataSnapshot,
-  "index" | "manifestRegistry" | "discovery"
->;
+  "index" | "manifestRegistry" | "discovery" | "workspaceDir"
+> &
+  Partial<Pick<PluginMetadataSnapshot, "declaredProviderOwners">>;
 
-export type PluginMetadataManifestView = Pick<PluginMetadataSnapshot, "index" | "plugins">;
+export type PluginMetadataManifestView = Pick<
+  PluginMetadataSnapshot,
+  "index" | "plugins" | "byPluginId"
+>;
 
 export type LoadPluginMetadataSnapshotParams = {
   config?: OpenClawConfig;

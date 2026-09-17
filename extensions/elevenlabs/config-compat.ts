@@ -2,6 +2,7 @@
 // Keep this doctor-contract closure free of provider-auth-runtime: doctor
 // enumeration cold-loads this module, and provider-auth-runtime statically
 // reaches execa (see api-key-fallback.ts for ELEVENLABS_API_KEY(S) resolution).
+import { mergeMissing } from "openclaw/plugin-sdk/runtime-doctor-migrations";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 const LEGACY_TALK_FIELD_KEYS = [
@@ -32,22 +33,6 @@ function ensureRecord(root: JsonRecord, key: string): JsonRecord {
 
 function isBlockedObjectKey(key: string): boolean {
   return key === "__proto__" || key === "prototype" || key === "constructor";
-}
-
-function mergeMissing(target: JsonRecord, source: JsonRecord): void {
-  for (const [key, value] of Object.entries(source)) {
-    if (value === undefined || isBlockedObjectKey(key)) {
-      continue;
-    }
-    const existing = target[key];
-    if (existing === undefined) {
-      target[key] = value;
-      continue;
-    }
-    if (isRecord(existing) && isRecord(value)) {
-      mergeMissing(existing, value);
-    }
-  }
 }
 
 function hasLegacyTalkFields(value: unknown): value is JsonRecord {

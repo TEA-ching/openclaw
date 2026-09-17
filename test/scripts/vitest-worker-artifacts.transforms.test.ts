@@ -6,17 +6,11 @@ import { createWorkerArtifactTest, workerProbe } from "./vitest-worker-artifacts
 
 const root = process.cwd();
 const it = createWorkerArtifactTest();
-
-describe.concurrent("fresh compiled subprocess invocation", () => {
-  it.for(
-    (["single", "projects"] as const).flatMap((layout) =>
-      (["fresh generations", "source mode", "source and config edits"] as const).map(
-        (invariant) => ({ layout, invariant }),
-      ),
-    ),
-  )(
-    "preserves filesystem transforms for $invariant ($layout)",
-    ({ layout, invariant }, { workerArtifacts }) =>
+// Each sequence rebuilds all workers; avoid competing builds within one runner.
+describe("fresh compiled subprocess invocation", { concurrent: false }, () => {
+  it.for((["single", "projects"] as const).map((layout) => ({ layout })))(
+    "preserves filesystem transforms across fresh generations, source mode, and edits ($layout)",
+    ({ layout }, { workerArtifacts }) =>
       workerArtifacts.fixtureLifetime.run(async () => {
         const { node } = workerArtifacts.createFixtureCommands();
         const directory = workerArtifacts.fixtureDirectory();
@@ -64,7 +58,7 @@ describe.concurrent("fresh compiled subprocess invocation", () => {
               path.join(root, ".artifacts", "vitest-workers"),
             );
             expect(fileURLToPath(generation)).toBe(
-              path.join(generationDirectory, "dist/infra/runtime-process-entrypoints.js"),
+              path.join(generationDirectory, "dist/infra/sqlite-readonly-location.worker.js"),
             );
             expect(observed.args[0]).toBe(
               path.join(generationDirectory, "dist/infra/sqlite-readonly-location.worker.js"),
@@ -72,7 +66,7 @@ describe.concurrent("fresh compiled subprocess invocation", () => {
             expect(fileURLToPath(observed.knn)).toBe(
               path.join(
                 generationDirectory,
-                "dist/extensions/memory-core/manager-search-knn-entrypoint.js",
+                "dist/extensions/memory-core/memory-search-knn.child.js",
               ),
             );
             // Each completed repository invocation must dispose before the next starts.
@@ -80,11 +74,12 @@ describe.concurrent("fresh compiled subprocess invocation", () => {
           } else {
             expect(result.stderr).not.toContain("[vitest-workers] prepared");
             expect(fileURLToPath(generation)).toBe(
-              path.join(root, "src/infra/runtime-process-entrypoints.ts"),
+              path.join(root, "src/infra/sqlite-readonly-location.worker.ts"),
             );
-            expect(observed.args.slice(0, 2)).toEqual(["--import", "tsx"]);
+            expect(observed.args[0]).toBe("--import");
+            expect(observed.args[1]).toMatch(/^file:\/\//);
             expect(fileURLToPath(observed.knn)).toBe(
-              path.join(root, "extensions/memory-core/src/memory/manager-search-knn-entrypoint.ts"),
+              path.join(root, "extensions/memory-core/src/memory/manager-search-knn.child.ts"),
             );
           }
           console.log(
@@ -97,30 +92,26 @@ describe.concurrent("fresh compiled subprocess invocation", () => {
         expect(
           JSON.parse(fs.readFileSync(path.join(cacheDirectory, "_metadata.json"), "utf8")),
         ).toEqual({ lockfileHash: expect.stringMatching(/^[a-f\d]{8}$/u) });
-        if (invariant === "fresh generations") {
-          await launch("compiled");
-          expect(counts(), "unchanged parents must reuse filesystem transforms").toEqual([1, 1]);
-        } else if (invariant === "source mode") {
-          await launch("source");
-          expect(counts()).toEqual([2, 2]);
-          await launch("compiled");
-          expect(counts()).toEqual([2, 2]);
-        } else {
-          fs.writeFileSync(value, 'export const value: string = "second";');
-          await launch("compiled", "second");
-          expect(counts()).toEqual([2, 1]);
-          fs.writeFileSync(
-            config,
-            fs
-              .readFileSync(config, "utf8")
-              .replace(
-                `replacement:${JSON.stringify(value)}`,
-                `replacement:${JSON.stringify(configuredValue)}`,
-              ),
-          );
-          await launch("compiled", "configured");
-          expect(counts()).toEqual([3, 2]);
-        }
+        await launch("compiled");
+        expect(counts(), "unchanged parents must reuse filesystem transforms").toEqual([1, 1]);
+        await launch("source");
+        expect(counts()).toEqual([2, 2]);
+        // Switching back with a leaf edit also proves the unchanged parent reuses
+        // its compiled transform, without preparing another complete worker set.
+        fs.writeFileSync(value, 'export const value: string = "second";');
+        await launch("compiled", "second");
+        expect(counts()).toEqual([3, 2]);
+        fs.writeFileSync(
+          config,
+          fs
+            .readFileSync(config, "utf8")
+            .replace(
+              `replacement:${JSON.stringify(value)}`,
+              `replacement:${JSON.stringify(configuredValue)}`,
+            ),
+        );
+        await launch("compiled", "configured");
+        expect(counts()).toEqual([4, 3]);
       }),
   );
 });

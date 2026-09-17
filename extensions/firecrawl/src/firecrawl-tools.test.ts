@@ -26,11 +26,25 @@ vi.mock("./firecrawl-client.js", () => ({
   runFirecrawlScrape,
 }));
 
+function createSearchSecretRefPlugins(source: "env" | "file", provider: string, id: string) {
+  return {
+    entries: {
+      firecrawl: {
+        config: {
+          webSearch: {
+            apiKey: { source, provider, id },
+          },
+        },
+      },
+    },
+  };
+}
+
 describe("firecrawl tools", () => {
   const priorFetch = global.fetch;
   let fetchFirecrawlContent: typeof import("../api.js").fetchFirecrawlContent;
   let createFirecrawlWebSearchProvider: typeof import("./firecrawl-search-provider.js").createFirecrawlWebSearchProvider;
-  let createFirecrawlFreeWebSearchProvider: typeof import("./firecrawl-free-search-provider.js").createFirecrawlFreeWebSearchProvider;
+  let createFirecrawlFreeWebSearchProvider: typeof import("./firecrawl-search-provider.js").createFirecrawlFreeWebSearchProvider;
   let createFirecrawlWebFetchProvider: typeof import("./firecrawl-fetch-provider.js").createFirecrawlWebFetchProvider;
   let createFirecrawlSearchTool: typeof import("./firecrawl-search-tool.js").createFirecrawlSearchTool;
   let createFirecrawlScrapeTool: typeof import("./firecrawl-scrape-tool.js").createFirecrawlScrapeTool;
@@ -43,8 +57,7 @@ describe("firecrawl tools", () => {
     ({ fetchFirecrawlContent } = await import("../api.js"));
     ({ createFirecrawlWebFetchProvider } = await import("./firecrawl-fetch-provider.js"));
     ({ createFirecrawlWebSearchProvider } = await import("./firecrawl-search-provider.js"));
-    ({ createFirecrawlFreeWebSearchProvider } =
-      await import("./firecrawl-free-search-provider.js"));
+    ({ createFirecrawlFreeWebSearchProvider } = await import("./firecrawl-search-provider.js"));
     ({ createFirecrawlSearchTool } = await import("./firecrawl-search-tool.js"));
     ({ createFirecrawlScrapeTool } = await import("./firecrawl-scrape-tool.js"));
     ({
@@ -1351,21 +1364,7 @@ describe("firecrawl tools", () => {
   it("resolves env SecretRefs for Firecrawl API key without requiring a runtime snapshot", () => {
     vi.stubEnv("FIRECRAWL_API_KEY", "firecrawl-env-ref-key");
     const cfg = {
-      plugins: {
-        entries: {
-          firecrawl: {
-            config: {
-              webSearch: {
-                apiKey: {
-                  source: "env",
-                  provider: "default",
-                  id: "FIRECRAWL_API_KEY",
-                },
-              },
-            },
-          },
-        },
-      },
+      plugins: createSearchSecretRefPlugins("env", "default", "FIRECRAWL_API_KEY"),
     } as OpenClawConfig;
 
     expect(resolveFirecrawlApiKey(cfg)).toBe("firecrawl-env-ref-key");
@@ -1374,21 +1373,7 @@ describe("firecrawl tools", () => {
   it("does not use env fallback when a non-env SecretRef is configured but unavailable", () => {
     vi.stubEnv("FIRECRAWL_API_KEY", "firecrawl-env-fallback");
     const cfg = {
-      plugins: {
-        entries: {
-          firecrawl: {
-            config: {
-              webSearch: {
-                apiKey: {
-                  source: "file",
-                  provider: "vault",
-                  id: "/firecrawl/api-key",
-                },
-              },
-            },
-          },
-        },
-      },
+      plugins: createSearchSecretRefPlugins("file", "vault", "/firecrawl/api-key"),
     } as OpenClawConfig;
 
     expect(resolveFirecrawlApiKey(cfg)).toBeUndefined();
@@ -1397,21 +1382,7 @@ describe("firecrawl tools", () => {
   it("does not read arbitrary env SecretRef ids for Firecrawl API key resolution", () => {
     vi.stubEnv("UNRELATED_SECRET", "should-not-be-read");
     const cfg = {
-      plugins: {
-        entries: {
-          firecrawl: {
-            config: {
-              webSearch: {
-                apiKey: {
-                  source: "env",
-                  provider: "default",
-                  id: "UNRELATED_SECRET",
-                },
-              },
-            },
-          },
-        },
-      },
+      plugins: createSearchSecretRefPlugins("env", "default", "UNRELATED_SECRET"),
     } as OpenClawConfig;
 
     expect(resolveFirecrawlApiKey(cfg)).toBeUndefined();
@@ -1428,21 +1399,7 @@ describe("firecrawl tools", () => {
           },
         },
       },
-      plugins: {
-        entries: {
-          firecrawl: {
-            config: {
-              webSearch: {
-                apiKey: {
-                  source: "env",
-                  provider: "firecrawl-env",
-                  id: "FIRECRAWL_API_KEY",
-                },
-              },
-            },
-          },
-        },
-      },
+      plugins: createSearchSecretRefPlugins("env", "firecrawl-env", "FIRECRAWL_API_KEY"),
     } as OpenClawConfig;
 
     expect(resolveFirecrawlApiKey(cfg)).toBeUndefined();
@@ -1459,21 +1416,7 @@ describe("firecrawl tools", () => {
           },
         },
       },
-      plugins: {
-        entries: {
-          firecrawl: {
-            config: {
-              webSearch: {
-                apiKey: {
-                  source: "env",
-                  provider: "firecrawl-env",
-                  id: "FIRECRAWL_API_KEY",
-                },
-              },
-            },
-          },
-        },
-      },
+      plugins: createSearchSecretRefPlugins("env", "firecrawl-env", "FIRECRAWL_API_KEY"),
     } as OpenClawConfig;
 
     expect(resolveFirecrawlApiKey(cfg)).toBeUndefined();

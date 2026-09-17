@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 set -euo pipefail
 
-readonly swiftformat_version="0.62.1"
+readonly swiftformat_version="0.63.0"
 readonly swiftlint_version="0.65.1"
 
 usage() {

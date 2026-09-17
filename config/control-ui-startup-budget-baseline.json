@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 348457,
-  "reason": "sctg-claw fork carries additional Control UI surface (VNC / local-desktop-observe route) beyond upstream's tuned baseline; measured after the v2026.8.2 upstream merge",
-  "updatedAt": "2026-09-16"
+  "startupJsGzipBytes": 352531,
+  "reason": "Plugin discovery shell adds the canonical /plugins workspace route and navigation metadata; measured 352531 B startup gzip on Linux-equivalent local build. Fixed 358400 B cap retained.",
+  "updatedAt": "2026-09-09"
 }

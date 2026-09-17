@@ -18,6 +18,7 @@ export default defineSingleProviderPluginEntry({
     docsPath: "/providers/cohere",
     manifestAuth: { applyConfig: applyCohereConfig },
     catalog: {
+      discoveryMode: "strict",
       liveModelDiscovery: COHERE_LIVE_MODEL_DISCOVERY,
     },
     // Rotation wraps the raw transport first so it sees each attempt's own

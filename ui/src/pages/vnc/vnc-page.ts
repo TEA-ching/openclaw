@@ -76,6 +76,7 @@ class VncPage extends OpenClawLightDomElement {
         throw new Error("VNC render target is unavailable");
       }
       const connection = await this.desktopClient.connect({
+        isCurrent: () => operationId === this.operationId,
         wsUrl: observed.wsPath,
         gatewayUrl: client.gatewayUrl,
         credentials: observed.vncPassword ? { password: observed.vncPassword } : undefined,
@@ -132,7 +133,7 @@ class VncPage extends OpenClawLightDomElement {
 
   private handleClipboardInput(text: string) {
     this.clipboardText = text;
-    this.connection?.sendClipboardText?.(text);
+    this.connection?.sendClipboardText(text);
   }
 
   override render() {
