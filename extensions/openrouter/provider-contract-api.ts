@@ -6,7 +6,7 @@ export function createOpenrouterProvider(): ProviderPlugin {
     id: "openrouter",
     label: "OpenRouter",
     docsPath: "/providers/models",
-    envVars: ["OPENROUTER_API_KEY"],
+    envVars: ["OPENROUTER_API_KEY", "OPENROUTER_API_KEYS"],
     auth: [
       {
         id: "api-key",

@@ -1,6 +1,7 @@
 // Openrouter plugin module implements stream behavior.
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import type { ProviderWrapStreamFnContext } from "openclaw/plugin-sdk/plugin-entry";
+import { createStreamApiKeyRotationWrapper } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { buildProviderStreamFamilyHooks } from "openclaw/plugin-sdk/provider-stream-family";
 import {
   composeProviderStreamWrappers,
@@ -18,6 +19,7 @@ import {
 
 const log = createSubsystemLogger("openrouter-stream");
 const openRouterThinkingStreamHooks = buildProviderStreamFamilyHooks("openrouter-thinking");
+const OPENROUTER_PROVIDER_ID = "openrouter";
 
 function normalizeOpenRouterStringPreservingEmpty(value: unknown): string | undefined {
   return readStringValue(value)?.trim();
@@ -279,9 +281,18 @@ export function wrapOpenRouterProviderStream(
   const routedStreamFn = providerRouting
     ? injectOpenRouterRouting(ctx.streamFn, providerRouting)
     : ctx.streamFn;
+  // Rotation wraps the auth-header-merged transport directly so each rotation
+  // attempt re-derives the Authorization header from its own key instead of
+  // reusing the header built for the first key; the remaining payload-patch
+  // wrappers compose on top of whichever attempt rotation ultimately commits
+  // to (same pattern used for the bundled Poolside, Mistral, and Cohere
+  // providers).
+  const rotatedStreamFn = createStreamApiKeyRotationWrapper(OPENROUTER_PROVIDER_ID)(
+    createOpenRouterAuthHeaderWrapper(routedStreamFn),
+  );
   const wrapStreamFn = openRouterThinkingStreamHooks.wrapStreamFn ?? undefined;
   return composeProviderStreamWrappers(
-    routedStreamFn,
+    rotatedStreamFn,
     wrapStreamFn &&
       ((streamFn) =>
         wrapStreamFn({
@@ -292,7 +303,6 @@ export function wrapOpenRouterProviderStream(
             : ctx.thinkingLevel,
         }) ?? undefined),
     (streamFn) => createOpenRouterDeepSeekV4ReplayWrapper(streamFn, ctx.thinkingLevel),
-    createOpenRouterAuthHeaderWrapper,
     createOpenRouterAnthropicPrefillWrapper,
   );
 }

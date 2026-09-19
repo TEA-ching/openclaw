@@ -46,7 +46,7 @@
     "providers": [
       {
         "id": "openrouter",
-        "envVars": ["OPENROUTER_API_KEY"]
+        "envVars": ["OPENROUTER_API_KEY", "OPENROUTER_API_KEYS"]
       }
     ]
   },
