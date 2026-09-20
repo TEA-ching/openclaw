@@ -9,7 +9,7 @@ import { captureEnv } from "../test-utils/env.js";
 import type { GatewayClient } from "./client.js";
 import { GATEWAY_STARTUP_MUTATED_ENV_KEYS } from "./test-helpers.env.js";
 
-vi.mock("./client-start-readiness.js", () => ({
+vi.mock("../../packages/gateway-client/src/readiness.js", () => ({
   startGatewayClientWhenEventLoopReady: async (client: { start: () => void }) => {
     client.start();
     return { ready: true, aborted: false, elapsedMs: 0, maxDriftMs: 0, checks: 0 };

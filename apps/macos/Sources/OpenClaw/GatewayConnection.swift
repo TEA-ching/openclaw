@@ -25,9 +25,19 @@ actor GatewayConnection: Observable {
             currentEndpointRevision: { GatewayEndpointStore.shared.routeRevision })
     }()
 
+    @MainActor private weak var approvalQueueStore: ExecApprovalQueueStore?
+
+    @MainActor var approvalQueue: ExecApprovalQueueStore {
+        if let store = self.approvalQueueStore { return store }
+        let store = ExecApprovalQueueStore(gateway: self)
+        self.approvalQueueStore = store
+        return store
+    }
+
     nonisolated static let operatorClientCaps = [
         OpenClawGatewayClientCapability.agentKind,
         OpenClawGatewayClientCapability.inlineWidgets,
+        OpenClawGatewayClientCapability.modelSelectionPolicy,
         OpenClawGatewayClientCapability.usageRefreshing,
     ]
 
@@ -188,6 +198,8 @@ actor GatewayConnection: Observable {
     private let clientShutdown: @Sendable (GatewayChannelActor) async -> Void
     private let decoder = JSONDecoder()
     private var browserSessionExpiryTask: Task<Void, Never>?
+    var sourceResources: (lease: ServerLease, revision: UInt64, loader: OpenClawChatSourceResources)?
+    var sourceResourceRevision: UInt64 = 0
     var managedMediaTransfers: [UUID: Task<(Data, URLResponse), Error>] = [:]
 
     private struct ConfiguredConnection {
@@ -426,7 +438,7 @@ actor GatewayConnection: Observable {
             try requireCurrentShutdownGeneration(shutdownGeneration)
             switch mode {
             case .local:
-                await MainActor.run { GatewayProcessManager.shared.setActive(true) }
+                await MainActor.run { GatewayProcessManager.shared.setActive(true, source: .recovery) }
                 try requireCurrentShutdownGeneration(shutdownGeneration)
 
                 let lastError: Error
@@ -1253,6 +1265,13 @@ extension GatewayConnection {
 // MARK: - Snapshot cache and subscriptions
 
 extension GatewayConnection {
+    func sourceResourceBearer(ifCurrentServerLease lease: ServerLease) async throws -> String? {
+        guard await self.isCurrentServerLease(lease) else { throw CancellationError() }
+        let bearer = await lease.client.httpResourceBearer(ifCurrentConnectionGeneration: lease.socketGeneration)
+        guard await self.isCurrentServerLease(lease) else { throw CancellationError() }
+        return bearer
+    }
+
     func controlUiAutoAuthToken(config: Config) async -> String? {
         // Mobile-broker connections authenticate the WS upgrade out-of-band via
         // extraHeadersProvider, never negotiating one of the in-band
@@ -1387,6 +1406,7 @@ extension GatewayConnection {
     }
 
     private func retirePublication(disconnection: PushDelivery.Event?, retiresRoute: Bool) {
+        self.invalidateSourceResources()
         let lease = self.connectionPublication.withValue { publication -> ServerLease? in
             let lease: ServerLease? = switch publication {
             case let .connected(connection): connection.lease
@@ -1420,7 +1440,19 @@ extension GatewayConnection {
         }
     }
 
+    private func invalidateSourceResources() {
+        self.sourceResourceRevision &+= 1
+        let loader = self.sourceResources?.loader
+        self.sourceResources = nil
+        if let loader { Task { await loader.invalidate() } }
+    }
+
     private func broadcast(_ push: GatewayPush) {
+        if case let .event(event) = push,
+           event.event == "chat.metadata.changed" || event.event == "config.changed"
+        {
+            self.invalidateSourceResources()
+        }
         if case let .snapshot(snapshot) = push {
             self.lastSnapshot = snapshot
             if self.canvasPluginSurfaceURL == nil {
@@ -1500,6 +1532,22 @@ extension GatewayConnection {
             return cached
         }
         return await self.refreshMainSessionKey(timeoutMs: timeoutMs)
+    }
+
+    /// The resolved key belongs to this hello's physical socket. Callers must
+    /// recheck the lease synchronously when presenting it outside this actor.
+    func mainSessionKey(ifCurrentServerLease lease: ServerLease, timeoutMs: Double = 15000) async throws -> String {
+        guard await self.isCurrentServerLease(lease) else { throw CancellationError() }
+        if let cached = self.cachedMainSessionKey() { return cached }
+        do {
+            let data = try await self.request(
+                method: "config.get", params: nil, timeoutMs: timeoutMs, ifCurrentServerLease: lease)
+            return try Self.mainSessionKey(fromConfigGetData: data)
+        } catch {
+            try Task.checkCancellation()
+            guard await self.isCurrentServerLease(lease) else { throw CancellationError() }
+            return "main"
+        }
     }
 
     func refreshMainSessionKey(timeoutMs: Double = 15000) async -> String {

@@ -19,7 +19,7 @@ export {
   createStreamApiKeyRotationWrapper,
   executeWithApiKeyRotation,
 } from "../agents/api-key-rotation.js";
-export { NON_ENV_SECRETREF_MARKER } from "../agents/model-auth-markers.js";
+export { NON_ENV_SECRETREF_MARKER } from "../secrets/provider-credential-values.js";
 export {
   isProviderAuthError,
   requireApiKey,

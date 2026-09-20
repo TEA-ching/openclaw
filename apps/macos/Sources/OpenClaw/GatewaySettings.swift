@@ -137,7 +137,7 @@ struct GatewaySettings: View {
                     HStack(spacing: 8) {
                         Button("Open Window") {
                             guard !self.isRemoving else { return }
-                            WebChatManager.shared.openGatewayWindow(profile: profile)
+                            AppNavigationActions.openGateway(.profile(profile.id), newWindow: true)
                         }
                         .disabled(self.isRemoving)
                         Button("Reconnect") {
@@ -196,9 +196,8 @@ struct GatewayProfileEditor: View {
     @State private var password = ""
     @State private var isSaving = false
     @State private var errorMessage: String?
-    @State private var showsMobileBrokerSignIn = false
-    @State private var mobileBrokerSession: MobileBrokerSessionStore.Session?
     @State private var connectionTask: Task<Void, Never>?
+    @State private var signInProgress = GatewayBrowserSignInProgress()
 
     let onSaved: (MacGatewayProfile) -> Void
     let onCancel: (() -> Void)?
@@ -213,17 +212,6 @@ struct GatewayProfileEditor: View {
         _url = State(initialValue: address)
         self.onCancel = onCancel
         self.onSaved = onSaved
-    }
-
-    /// The URL typed so far, if it parses to a mobile-broker host. Heuristic
-    /// only, mirroring the iOS app: no persisted per-profile "auth mode" flag.
-    private var mobileBrokerCanonicalURL: URL? {
-        let rawURL = self.url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let typedURL = URL(string: rawURL),
-              let canonical = try? MacGatewayProfileStore.canonicalURL(typedURL),
-              canonical.isMobileBrokerHost
-        else { return nil }
-        return canonical
     }
 
     var body: some View {
@@ -247,15 +235,6 @@ struct GatewayProfileEditor: View {
                     Text("Address")
                     TextField("gateway.example.com", text: self.$url)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: self.url) { _, _ in
-                            self.mobileBrokerSession = nil
-                        }
-                }
-                if let brokerURL = self.mobileBrokerCanonicalURL {
-                    GridRow {
-                        Text("GitHub Sign-In")
-                        self.mobileBrokerSignInRow(brokerURL: brokerURL)
-                    }
                 }
             }
             .gridColumnAlignment(.leading)
@@ -283,11 +262,7 @@ struct GatewayProfileEditor: View {
                 .foregroundStyle(.secondary)
 
             if self.isSaving {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Connecting… Complete sign-in in your browser if it opens.")
-                        .font(.callout)
-                }
+                GatewayBrowserSignInProgressView(progress: self.signInProgress)
             }
 
             if let errorMessage {
@@ -311,51 +286,12 @@ struct GatewayProfileEditor: View {
                     self.connectionTask = Task { await self.save() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(self.isSaving || !self.canSave)
+                .disabled(self.isSaving || self.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(24)
         .frame(width: 540)
         .onDisappear { self.connectionTask?.cancel() }
-        .sheet(isPresented: self.$showsMobileBrokerSignIn) {
-            if let brokerURL = self.mobileBrokerCanonicalURL,
-               let brokerConfig = brokerURL.mobileBrokerConfigFromHost
-            {
-                MobileBrokerSignInSheet(viewModel: MobileBrokerSignInSheet.ViewModel(
-                    authClient: MobileBrokerAuthClient(config: brokerConfig),
-                    sessionStore: MobileBrokerSessionStore.shared,
-                    gatewayStableID: brokerURL.mobileBrokerGatewayStableID ?? brokerConfig.hostname,
-                    onComplete: { session in
-                        self.mobileBrokerSession = session
-                    },
-                    onDismiss: {
-                        self.showsMobileBrokerSignIn = false
-                    }))
-            }
-        }
-    }
-
-    private var canSave: Bool {
-        guard !self.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        guard self.mobileBrokerCanonicalURL != nil else { return true }
-        return self.mobileBrokerSession != nil
-    }
-
-    private func mobileBrokerSignInRow(brokerURL: URL) -> some View {
-        HStack(spacing: 8) {
-            if self.mobileBrokerSession != nil {
-                Label("Signed in", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Button("Sign In Again") {
-                    self.showsMobileBrokerSignIn = true
-                }
-            } else {
-                Button("Sign in with GitHub") {
-                    self.showsMobileBrokerSignIn = true
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
     }
 
     private func save() async {
@@ -363,23 +299,15 @@ struct GatewayProfileEditor: View {
         self.errorMessage = nil
         defer { self.isSaving = false }
         do {
-            let profile: MacGatewayProfile
-            if let url = self.mobileBrokerCanonicalURL {
-                profile = try await MacGatewayProfileStore.shared.upsert(
-                    name: self.name,
-                    url: url,
-                    token: nil,
-                    password: nil)
-            } else {
-                profile = try await GatewayBrowserSignInCoordinator.connect(
-                    name: self.name,
-                    address: self.url,
-                    token: self.token,
-                    password: self.password)
-            }
+            let profile = try await GatewayBrowserSignInCoordinator.connect(
+                name: self.name,
+                address: self.url,
+                token: self.token,
+                password: self.password,
+                progress: self.signInProgress)
             WebChatManager.shared.gatewayProfileDidSave(profileID: profile.id)
             self.onSaved(profile)
-            DashboardManager.shared.openOrFocusDashboard(for: .profile(profile.id))
+            AppNavigationActions.openGateway(.profile(profile.id))
             self.dismiss()
         } catch is CancellationError {
             return
