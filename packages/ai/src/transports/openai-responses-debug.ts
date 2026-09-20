@@ -124,7 +124,7 @@ function summarizeResponsesCompactionItems(input: unknown): string[] {
   ];
 }
 
-export function stringifyRedactedPayload(value: unknown): string {
+export function stringifyRedactedPayload(value: unknown, maxLen = 8000): string {
   try {
     const encoded = JSON.stringify(value, (key, child) =>
       key === "encrypted_content" ? "<opaque data omitted>" : child,
@@ -133,15 +133,16 @@ export function stringifyRedactedPayload(value: unknown): string {
       return "<empty>";
     }
     const redacted = redactSensitiveText(encoded, { mode: "tools" });
-    return redacted.length > 8000 ? `${truncateUtf16Safe(redacted, 8000)}…<truncated>` : redacted;
+    return redacted.length > maxLen
+      ? `${truncateUtf16Safe(redacted, maxLen)}…<truncated>`
+      : redacted;
   } catch {
     return "<unserializable>";
   }
 }
 
 export function stringifyRedactedEvent(value: unknown): string {
-  const redacted = stringifyRedactedPayload(value);
-  return redacted.length > 2000 ? `${truncateUtf16Safe(redacted, 2000)}…<truncated>` : redacted;
+  return stringifyRedactedPayload(value, 2000);
 }
 
 type ResponsesFailedNoDetailsObservation = {

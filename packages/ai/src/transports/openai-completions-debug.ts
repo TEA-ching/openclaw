@@ -26,6 +26,11 @@ export function summarizeCompletionsPayload(params: unknown): string {
     `toolChoice=${safeDebugValue(record.tool_choice)}`,
   ];
   if (resolveModelPayloadDebugMode() === "full-redacted") {
+    // Dump `tools` on its own, generously-sized budget first: the surrounding
+    // `messages` (system prompt, history) routinely dwarfs the shared 8000-char
+    // payload cap below, starving out the one field this mode exists to inspect
+    // -- the actual tool schemas sent on the wire.
+    parts.push(`toolsPayload=${stringifyRedactedPayload(record.tools, 60000)}`);
     parts.push(`payload=${stringifyRedactedPayload(record)}`);
   }
   return parts.join(" ");
