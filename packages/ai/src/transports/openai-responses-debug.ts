@@ -4,6 +4,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { resolveModelPayloadDebugMode } from "./model-transport-debug.js";
 import { RESPONSE_FAILED_NO_DETAILS_MESSAGE } from "./openai-responses-contracts.js";
+import { summarizeOpenAIToolsForDebug } from "./openai-tool-debug-summary.js";
 import { log } from "./openai-transport-shared.js";
 import { redactIdentifier, redactSensitiveText } from "./transport-utils.js";
 
@@ -123,47 +124,7 @@ function summarizeResponsesCompactionItems(input: unknown): string[] {
   ];
 }
 
-function readToolPayloadField(record: Record<string, unknown>, field: string): unknown {
-  try {
-    return record[field];
-  } catch {
-    return undefined;
-  }
-}
-
-function readResponsesToolDisplayName(tool: unknown): string {
-  if (!tool || typeof tool !== "object") {
-    return "";
-  }
-  const record = tool as Record<string, unknown>;
-  const name = readToolPayloadField(record, "name");
-  if (typeof name === "string") {
-    return name;
-  }
-  const fn = readToolPayloadField(record, "function");
-  if (fn && typeof fn === "object") {
-    const fnName = readToolPayloadField(fn as Record<string, unknown>, "name");
-    if (typeof fnName === "string") {
-      return fnName;
-    }
-  }
-  const type = readToolPayloadField(record, "type");
-  return typeof type === "string" && type !== "function" ? type : "";
-}
-
-function summarizeResponsesTools(tools: unknown): string {
-  if (!Array.isArray(tools)) {
-    return "count=0";
-  }
-  const names = tools.map(readResponsesToolDisplayName).filter(Boolean);
-  const mode = resolveModelPayloadDebugMode();
-  const maxNames = mode === "tools" || mode === "full-redacted" ? names.length : 12;
-  const label = maxNames >= names.length ? "names" : "sample";
-  const shown = names.slice(0, maxNames).join(",");
-  return `count=${tools.length}${shown ? ` ${label}=${shown}` : ""}`;
-}
-
-function stringifyRedactedPayload(value: unknown): string {
+export function stringifyRedactedPayload(value: unknown): string {
   try {
     const encoded = JSON.stringify(value, (key, child) =>
       key === "encrypted_content" ? "<opaque data omitted>" : child,
@@ -515,7 +476,7 @@ export function summarizeResponsesPayload(params: unknown): string {
     `inputItemShape=${responseInputItemShape(input)}`,
     `inputRoles=${responseInputRoles(input) || "none"}`,
     `inputTextChars=${responseInputTextChars(input)}`,
-    `tools=${summarizeResponsesTools(record.tools)}`,
+    `tools=${summarizeOpenAIToolsForDebug(record.tools)}`,
     `reasoningEffort=${safeDebugValue(reasoning?.effort)}`,
     `reasoningSummary=${safeDebugValue(reasoning?.summary)}`,
     `textVerbosity=${safeDebugValue(text?.verbosity)}`,

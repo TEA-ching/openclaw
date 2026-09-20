@@ -15,7 +15,9 @@ import {
   getFirstStreamEventTimeoutMs,
 } from "../utils/stream-first-event-timeout.js";
 import { buildGuardedModelFetch } from "./host-policy.js";
+import { emitModelTransportDebug } from "./model-transport-debug.js";
 import { hasOpenAICompatibleConversationTurn } from "./openai-compatible-conversation-turn.js";
+import { summarizeCompletionsPayload } from "./openai-completions-debug.js";
 import { isAzureOpenAICompatibleHost } from "./openai-completions-host.js";
 import { buildOpenAICompletionsParams } from "./openai-completions-params.js";
 import {
@@ -33,6 +35,7 @@ import {
 } from "./openai-transport-params.js";
 import {
   createOpenAIProviderAcceptanceHook,
+  log,
   resolveOpenAIClientBaseUrl,
   type MutableAssistantOutput,
   type OpenAIModeModel,
@@ -282,6 +285,11 @@ export function createOpenAICompletionsTransportStreamFn(): StreamFn {
         if (compat.requiresNonEmptyUserOrAssistantMessage) {
           assertOpenAICompletionsPayloadHasConversationTurn(params, model);
         }
+        emitModelTransportDebug(
+          log,
+          `[completions] start provider=${model.provider} api=${model.api} model=${model.id} ` +
+            `apiKey=${apiKey ? "present" : "missing"} ${summarizeCompletionsPayload(params)}`,
+        );
         const emitReasoning = shouldEmitOpenAICompletionsReasoning(
           model as OpenAIModeModel,
           options as OpenAICompletionsOptions | undefined,
