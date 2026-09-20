@@ -96,6 +96,7 @@ describe("buildProviderToolCompatFamilyHooks", () => {
 
   it("covers the tool compat family matrix", () => {
     const cases = [
+      ["cohere", normalizeDeepSeekToolSchemas, inspectDeepSeekToolSchemas],
       ["deepseek", normalizeDeepSeekToolSchemas, inspectDeepSeekToolSchemas],
       ["gemini", normalizeGeminiToolSchemas, inspectGeminiToolSchemas],
       ["llamacpp-gbnf", normalizeLlamacppGbnfToolSchemas, inspectLlamacppGbnfToolSchemas],

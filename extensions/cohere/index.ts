@@ -1,5 +1,6 @@
 import { createStreamApiKeyRotationWrapper } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { defineSingleProviderPluginEntry } from "openclaw/plugin-sdk/provider-entry";
+import { buildProviderToolCompatFamilyHooks } from "openclaw/plugin-sdk/provider-tools";
 import { isModernCohereModelId } from "./models.js";
 import { applyCohereConfig } from "./onboard.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
@@ -21,6 +22,7 @@ export default defineSingleProviderPluginEntry({
       discoveryMode: "strict",
       liveModelDiscovery: COHERE_LIVE_MODEL_DISCOVERY,
     },
+    ...buildProviderToolCompatFamilyHooks("cohere"),
     // Rotation wraps the raw transport first so it sees each attempt's own
     // opening error; Cohere's payload-patch wrapper composes on top of
     // whichever attempt rotation ultimately commits to.

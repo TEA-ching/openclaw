@@ -280,4 +280,50 @@ describe("Cohere provider plugin", () => {
       }),
     ).toBe(false);
   });
+
+  it("owns Cohere tool schema compatibility for union-shaped tool parameters", async () => {
+    const provider = await registerSingleProviderPlugin(plugin);
+    const model = requireCohereModel();
+    const unionTool = {
+      name: "automations",
+      description: "",
+      parameters: {
+        type: "object",
+        properties: {
+          agentId: {
+            anyOf: [{ type: "string" }, { type: "null" }],
+          },
+          mode: {
+            oneOf: [{ const: "announce" }, { const: "webhook" }],
+          },
+        },
+      },
+      execute: () => undefined,
+    } as never;
+
+    const normalized = provider.normalizeToolSchemas?.({
+      provider: "cohere",
+      modelId: model.id,
+      modelApi: "openai-completions",
+      model,
+      tools: [unionTool],
+    } as never);
+
+    expect(normalized?.[0]?.parameters).toEqual({
+      type: "object",
+      properties: {
+        agentId: { type: "string", nullable: true },
+        mode: { type: "string", enum: ["announce", "webhook"] },
+      },
+    });
+    expect(
+      provider.inspectToolSchemas?.({
+        provider: "cohere",
+        modelId: model.id,
+        modelApi: "openai-completions",
+        model,
+        tools: normalized ?? [],
+      } as never),
+    ).toStrictEqual([]);
+  });
 });

@@ -360,7 +360,12 @@ export function inspectDeepSeekToolSchemas(
 /**
  * Supported provider tool-schema compatibility families.
  */
-export type ProviderToolCompatFamily = "deepseek" | "gemini" | "llamacpp-gbnf" | "openai";
+export type ProviderToolCompatFamily =
+  | "cohere"
+  | "deepseek"
+  | "gemini"
+  | "llamacpp-gbnf"
+  | "openai";
 
 /**
  * Returns the normalizer and inspector pair for a provider tool-schema compatibility family.
@@ -375,6 +380,11 @@ export function buildProviderToolCompatFamilyHooks(
   inspectToolSchemas: (ctx: ProviderNormalizeToolSchemasContext) => ProviderToolSchemaDiagnostic[];
 } {
   switch (family) {
+    // Cohere's `openai-completions` compat endpoint shares DeepSeek's rejection
+    // of `anyOf`/`oneOf` union keywords in tool parameter schemas -- reuse the
+    // same rewrite rather than duplicate it for a second `openai-completions`
+    // family member.
+    case "cohere":
     case "deepseek":
       return {
         normalizeToolSchemas: normalizeDeepSeekToolSchemas,
