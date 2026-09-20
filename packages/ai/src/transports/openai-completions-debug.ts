@@ -11,6 +11,29 @@ import { resolveModelPayloadDebugMode } from "./model-transport-debug.js";
 import { safeDebugValue, stringifyRedactedPayload } from "./openai-responses-debug.js";
 import { summarizeOpenAIToolsForDebug } from "./openai-tool-debug-summary.js";
 
+const SYSTEM_PROMPT_ROLES = new Set(["system", "developer"]);
+
+/**
+ * Replaces large static system/developer prompt bodies with a short marker so
+ * a `messagesPayload` dump spends its budget on the turns that actually vary
+ * per request (user/assistant/tool messages), not the repeated boilerplate.
+ */
+function elideSystemPromptContent(messages: unknown): unknown {
+  if (!Array.isArray(messages)) {
+    return messages;
+  }
+  return messages.map((message) => {
+    if (!message || typeof message !== "object") {
+      return message;
+    }
+    const record = message as Record<string, unknown>;
+    if (!SYSTEM_PROMPT_ROLES.has(String(record.role)) || typeof record.content !== "string") {
+      return message;
+    }
+    return { ...record, content: `<${record.content.length} chars elided>` };
+  });
+}
+
 export function summarizeCompletionsPayload(params: unknown): string {
   if (!params || typeof params !== "object") {
     return `type=${typeof params}`;
@@ -26,12 +49,14 @@ export function summarizeCompletionsPayload(params: unknown): string {
     `toolChoice=${safeDebugValue(record.tool_choice)}`,
   ];
   if (resolveModelPayloadDebugMode() === "full-redacted") {
-    // Dump `tools` on its own, generously-sized budget first: the surrounding
-    // `messages` (system prompt, history) routinely dwarfs the shared 8000-char
-    // payload cap below, starving out the one field this mode exists to inspect
-    // -- the actual tool schemas sent on the wire.
-    parts.push(`toolsPayload=${stringifyRedactedPayload(record.tools, 60000)}`);
-    parts.push(`payload=${stringifyRedactedPayload(record)}`);
+    // Dump `tools` and `messages` on their own generous, independent budgets:
+    // the shared whole-payload cap gets starved out by the repeated system
+    // prompt boilerplate before reaching either field this mode exists to
+    // inspect -- the actual tool schemas and the turn structure sent on the wire.
+    parts.push(`toolsPayload=${stringifyRedactedPayload(record.tools, 200000)}`);
+    parts.push(
+      `messagesPayload=${stringifyRedactedPayload(elideSystemPromptContent(messages), 40000)}`,
+    );
   }
   return parts.join(" ");
 }
