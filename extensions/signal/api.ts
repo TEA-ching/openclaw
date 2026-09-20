@@ -28,13 +28,11 @@ export {
 } from "./src/identity.js";
 export { installSignalCli, type SignalInstallResult } from "./src/install-signal-cli.js";
 export { signalMessageActions } from "./src/message-actions.js";
-export { type MonitorSignalOpts, monitorSignalProvider } from "./src/monitor.js";
 export { looksLikeSignalTargetId, normalizeSignalMessagingTarget } from "./src/normalize.js";
 export {
   type ResolvedSignalOutboundTarget,
   resolveSignalOutboundTarget,
 } from "./src/outbound-session.js";
-export { probeSignal, type SignalProbe } from "./src/probe.js";
 export {
   type ResolvedSignalReactionLevel,
   resolveSignalReactionLevel,
