@@ -8,7 +8,12 @@ import { createAcpxRuntimeService } from "./register.runtime.js";
 import type { OpenClawPluginApi } from "./runtime-api.js";
 import { ACPX_NATIVE_AGENT_IDS } from "./src/config-schema.js";
 import { createAcpAgentHarness } from "./src/harness.js";
-import { isAcpxNativeAgentEnabled, listAcpxNativeAgents } from "./src/native-agents.js";
+import {
+  isAcpxNativeAgentEnabled,
+  listAcpxNativeAgents,
+  resolveAcpxNativeAgentName,
+  withAcpxDefaultAgentCommands,
+} from "./src/native-agents.js";
 import { registerPiSessionCatalog } from "./src/pi-session-catalog-plugin.js";
 
 const plugin = {
@@ -24,12 +29,13 @@ const plugin = {
     });
     api.registerService(service);
     const currentConfig = () => api.runtime.config.current().plugins?.entries?.acpx?.config;
-    const registry = createAgentRegistry();
+    const registry = createAgentRegistry({ overrides: withAcpxDefaultAgentCommands(undefined) });
     const nativeAgents = ACPX_NATIVE_AGENT_IDS.map((agentId) => {
-      const agent = registry.inspect(agentId);
-      if (!agent) {
+      const inspected = registry.inspect(agentId);
+      if (!inspected) {
         throw new Error(`Unknown ACP harness: ${agentId}`);
       }
+      const agent = { ...inspected, name: resolveAcpxNativeAgentName(agentId, inspected.name) };
       api.registerAgentHarness(
         createAcpAgentHarness({
           agent: agentId,

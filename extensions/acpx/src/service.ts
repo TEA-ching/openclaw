@@ -26,6 +26,7 @@ import {
   toAcpMcpServers,
   type ResolvedAcpxPluginConfig,
 } from "./config.js";
+import { withAcpxDefaultAgentCommands } from "./native-agents.js";
 import {
   ACPX_PROBE_LEASE_SESSION_KEY,
   createAcpxProcessLeaseStore,
@@ -131,7 +132,9 @@ async function createDefaultRuntime(params: AcpxRuntimeFactoryParams): Promise<A
     openclawProcessLeaseStore: params.processLeaseStore,
     openclawWrapperRoot: params.wrapperRoot,
     sessionStore: createFileSessionStore({ stateDir: params.pluginConfig.stateDir }),
-    agentRegistry: createAgentRegistry({ overrides: params.pluginConfig.agents }),
+    agentRegistry: createAgentRegistry({
+      overrides: withAcpxDefaultAgentCommands(params.pluginConfig.agents),
+    }),
     getProbeAgent: params.getProbeAgent,
     mcpServers: toAcpMcpServers(params.pluginConfig.mcpServers),
     pluginToolsMcpBridgeEnabled: params.pluginConfig.pluginToolsMcpBridge,

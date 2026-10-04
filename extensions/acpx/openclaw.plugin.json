@@ -135,7 +135,8 @@
           "qwen": { "type": "boolean" },
           "pi": { "type": "boolean" },
           "kilocode": { "type": "boolean" },
-          "copilot": { "type": "boolean" }
+          "copilot": { "type": "boolean" },
+          "vibe": { "type": "boolean" }
         }
       },
       "agents": {

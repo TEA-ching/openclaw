@@ -48,6 +48,9 @@ const NATIVE_TOOL_REQUIREMENTS = {
     "message",
     "image_generate",
   ],
+  // Mistral Vibe (`vibe-acp`) runs its own file/shell tools plus web and
+  // sub-agent tools, and exposes MCP servers passed in `session/new`.
+  vibe: [...LOCAL_TOOL_REQUIREMENTS, "apply_patch", "web_fetch", "web_search", "ask_user"],
   copilot: [
     ...LOCAL_TOOL_REQUIREMENTS,
     "apply_patch",

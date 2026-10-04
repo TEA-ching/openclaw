@@ -124,7 +124,7 @@ describe("acpx plugin", () => {
   });
 
   it("detects native programs and applies current enable settings without starting the runtime", async () => {
-    for (const command of ["npx", "opencode", "qwen", "pi-acp", "copilot"]) {
+    for (const command of ["npx", "opencode", "qwen", "pi-acp", "copilot", "vibe-acp"]) {
       nativePrograms.add(command);
     }
     const getRuntime = vi.fn(() => {
@@ -202,6 +202,13 @@ describe("acpx plugin", () => {
           installation: "installed",
           enabled: true,
         },
+        {
+          id: "vibe",
+          name: "Mistral Vibe",
+          runtimeId: "acp-vibe",
+          installation: "installed",
+          enabled: true,
+        },
       ],
     });
     const opencode = harnesses.get("acp-opencode");
@@ -227,6 +234,7 @@ describe("acpx plugin", () => {
                 pi: false,
                 kilocode: false,
                 copilot: false,
+                vibe: false,
               },
               agents: { qwen: { command: "npx qwen" } },
             },
@@ -271,6 +279,13 @@ describe("acpx plugin", () => {
           id: "copilot",
           name: "GitHub Copilot",
           runtimeId: "acp-copilot",
+          installation: "installed",
+          enabled: false,
+        },
+        {
+          id: "vibe",
+          name: "Mistral Vibe",
+          runtimeId: "acp-vibe",
           installation: "installed",
           enabled: false,
         },
