@@ -38,6 +38,13 @@ export type AgentHarnessHostCapabilities = Readonly<{
     | undefined;
   /** Reports one completed model call's output tokens to this admitted run's live total. */
   reportOutputTokens?: (outputTokens: number) => void;
+  /**
+   * Tells the stuck-session watchdog this admitted run is still making progress.
+   * Harnesses whose turns are long and mostly tool or reasoning activity (no
+   * assistant text) call it per native event; otherwise a healthy turn looks
+   * stalled and is aborted after the progress-stale threshold.
+   */
+  reportProgress?: (reason: string) => void;
   /** Adds native provenance only to this host's exact current admitted prompt. */
   annotateCurrentUserTurn?: (
     annotation: import("../../sessions/user-turn-transcript.types.js").UserTurnTranscriptAnnotation,

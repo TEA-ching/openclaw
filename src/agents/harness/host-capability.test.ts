@@ -14,6 +14,7 @@ import {
 } from "../../infra/agent-run-registry.js";
 import { withInstallationTarget } from "../../infra/installation-target-context.js";
 import { takeMcpToolApprovalBinding } from "../../infra/mcp-tool-approval-binding.js";
+import { getDiagnosticSessionActivitySnapshot } from "../../logging/diagnostic-run-activity.js";
 import {
   bindGatewayContextResolver,
   withPluginRuntimeGatewayRequestScope,
@@ -275,6 +276,22 @@ describe("agent harness host capability", () => {
       }
     },
   );
+
+  it("marks run progress for the stuck-session watchdog and rejects it once revoked", async () => {
+    const { attempt } = await admittedAttempt("run-progress");
+    const host = createAgentHarnessHostCapabilities({ attempt, pluginId: "acpx" });
+    try {
+      host.capabilities.reportProgress?.("acp:tool");
+      const activity = getDiagnosticSessionActivitySnapshot({
+        sessionKey: "agent:main:session-1",
+      });
+      expect(activity.lastProgressAgeMs).toBeLessThan(5_000);
+      host.close();
+      expect(() => host.capabilities.reportProgress?.("acp:tool")).toThrow("no longer active");
+    } finally {
+      host.close();
+    }
+  });
 
   it("overwrites plugin policy fields with the host snapshot and revokes lexically", async () => {
     const { attempt, admission } = await admittedAttempt();
@@ -1083,3 +1100,4 @@ describe("agent harness host capability", () => {
     expect(executePrepared).not.toHaveBeenCalled();
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
