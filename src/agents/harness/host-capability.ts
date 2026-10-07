@@ -10,6 +10,7 @@ import {
 } from "../../infra/installation-target-context.js";
 import { registerMcpToolApprovalBinding } from "../../infra/mcp-tool-approval-binding.js";
 import { prepareSystemRunMutableFileApproval } from "../../infra/system-run-approval-binding.js";
+import { markDiagnosticRunProgress } from "../../logging/diagnostic-run-activity.js";
 import { buildAgentHookContextChannelFields } from "../../plugins/hook-agent-context.js";
 import {
   getPluginRuntimeGatewayRequestScope,
@@ -488,6 +489,15 @@ export function createAgentHarnessHostCapabilities(params: {
         });
       }
     },
+    reportProgress: (reason) => {
+      assertActive();
+      markDiagnosticRunProgress({
+        runId,
+        sessionKey,
+        ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}),
+        reason: `harness:${reason}`,
+      });
+    },
     ...(annotateCurrentUserTurn ? { annotateCurrentUserTurn } : {}),
     ...(prepareContextMedia ? { prepareContextMedia } : {}),
     ...(prepareReplyMedia ? { prepareReplyMedia } : {}),
@@ -725,3 +735,4 @@ export function createAgentHarnessHostCapabilities(params: {
     },
   };
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

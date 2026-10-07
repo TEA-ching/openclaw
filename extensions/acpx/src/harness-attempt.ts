@@ -22,6 +22,8 @@ import { appendSessionTranscriptMessageByIdentityStrict } from "openclaw/plugin-
 import type { AcpRuntimeHandle, AcpRuntimeTurnInput } from "../runtime-api.js";
 import type { CompleteAcpRuntime } from "./runtime-proxy.js";
 
+const ACP_PROGRESS_MIN_INTERVAL_MS = 5_000;
+
 export async function runAcpHarnessAttempt(params: {
   input: AgentHarnessAttemptParamsV2;
   runtime: CompleteAcpRuntime;
@@ -244,6 +246,17 @@ export async function runAcpHarnessAttempt(params: {
         return { outcome: "cancel" };
       }
     };
+    // Native turns can run for minutes with only tool calls and reasoning, which
+    // the stuck-session watchdog does not otherwise count as progress.
+    let lastProgressAt = 0;
+    const reportProgress = (reason: string) => {
+      const now = Date.now();
+      if (now - lastProgressAt < ACP_PROGRESS_MIN_INTERVAL_MS) {
+        return;
+      }
+      lastProgressAt = now;
+      input.hostCapabilities.reportProgress?.(reason);
+    };
     const requestId = `${admission.entryId}:acp:${randomUUID()}`;
     // Prose labels keep file paths and literal user text out of native slash-command dispatch.
     const turn: AcpRuntimeTurnInput &
@@ -281,11 +294,13 @@ export async function runAcpHarnessAttempt(params: {
       onBeforePrompt: assertActive,
       onPromptStarted: () => {
         started = true;
+        reportProgress("acp:prompt_started");
         recorder.markSentToProvider?.();
         input.onExecutionStarted?.();
       },
       onOutputEvent: async (event) => {
         assertActive();
+        reportProgress(event.type === "text_delta" ? `acp:${event.stream ?? "text"}` : "acp:tool");
         if (event.type === "text_delta") {
           if (event.stream === "thought") {
             reasoning += event.text;
