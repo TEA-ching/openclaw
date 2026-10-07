@@ -13,6 +13,10 @@ type AcpxPackageManifest = {
 };
 
 type AcpxPluginManifest = {
+  activation?: { onAgentHarnesses?: string[] };
+  configSchema?: {
+    properties?: { nativeAgents?: { properties?: Record<string, unknown> } };
+  };
   backupResources?: Array<{
     disposition: string;
     scope: string;
@@ -70,5 +74,20 @@ describe("acpx package manifest", () => {
         relativePath: "acpx/codex-home/.tmp/plugins",
       },
     ]);
+  });
+});
+
+describe("acpx plugin activation", () => {
+  it("activates for every native agent's harness", () => {
+    // Without this, selecting `acp-<id>/<model>` on a new session is refused with
+    // "no enabled plugin provides it" even though the agent is installed.
+    const nativeAgentIds = Object.keys(
+      pluginJson.configSchema?.properties?.nativeAgents?.properties ?? {},
+    );
+
+    expect(nativeAgentIds).toContain("vibe");
+    expect([...(pluginJson.activation?.onAgentHarnesses ?? [])].toSorted()).toEqual(
+      nativeAgentIds.map((id) => `acp-${id}`).toSorted(),
+    );
   });
 });
