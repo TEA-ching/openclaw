@@ -26,8 +26,6 @@ import { compactCronJobFixture } from "../test-helpers/cron.ts";
 import { createStorageMock as createTestStorageMock } from "../test-helpers/storage.ts";
 import { waitForFast } from "../test-helpers/wait-for.ts";
 import { CUSTODIAN_PANEL_TOGGLE_EVENT } from "./panel-toggle-contract.ts";
-import { resolveUpdateAttentionDismissal } from "./sidebar-attention-dismissals.ts";
-import { buildUpdateInboxEntry } from "./sidebar-attention-entries.ts";
 import { buildSidebarAttentionEntries } from "./sidebar-attention-items.ts";
 import { SidebarAttentionStoreController } from "./sidebar-attention-store.ts";
 import { resolveSidebarUpdateAttention } from "./sidebar-attention-update.ts";
@@ -169,6 +167,7 @@ describe("sidebar attention refresh ownership", () => {
     }
     stores.clear();
     document.body.replaceChildren();
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -212,7 +211,6 @@ describe("sidebar attention refresh ownership", () => {
     await waitForFast(() =>
       expect(element.querySelector<HTMLButtonElement>(".sidebar-issues-button")).not.toBeNull(),
     );
-    await vi.dynamicImportSettled();
     const trigger = element.querySelector<HTMLButtonElement>(".sidebar-issues-button")!;
     return { element, provider, store, trigger };
   }
@@ -220,8 +218,9 @@ describe("sidebar attention refresh ownership", () => {
   it("keeps the plain attention panel inside its top-layer menu surface", async () => {
     const { element, trigger } = await mountAttention();
     trigger.click();
+    await vi.dynamicImportSettled();
+    await element.updateComplete;
 
-    await waitForFast(() => expect(element.querySelector(".sidebar-issues-panel")).not.toBeNull());
     const panel = element.querySelector(".sidebar-issues-panel");
     expect(panel).not.toBeNull();
     expect(panel?.closest("openclaw-menu-surface")).not.toBeNull();
@@ -229,6 +228,32 @@ describe("sidebar attention refresh ownership", () => {
     await element.updateComplete;
     expect(element.querySelector(".sidebar-issues-panel")).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("dismisses for a plain outside frame without restoring trigger focus", async () => {
+    const { element, trigger } = await mountAttention();
+    const frame = document.body.appendChild(document.createElement("iframe"));
+    trigger.click();
+    await waitForFast(() => expect(element.querySelector(".sidebar-issues-panel")).not.toBeNull());
+
+    // jsdom can focus the frame but does not emit the browsing-context blur.
+    frame.focus();
+    window.dispatchEvent(new Event("blur"));
+    await element.updateComplete;
+
+    expect(element.querySelector(".sidebar-issues-panel")).toBeNull();
+    expect(document.activeElement).toBe(frame);
+  });
+
+  it("keeps Inbox open when the window loses focus without entering an outside frame", async () => {
+    const { element, trigger } = await mountAttention();
+    trigger.click();
+    await waitForFast(() => expect(element.querySelector(".sidebar-issues-panel")).not.toBeNull());
+
+    window.dispatchEvent(new Event("blur"));
+    await element.updateComplete;
+
+    expect(element.querySelector(".sidebar-issues-panel")).not.toBeNull();
   });
 
   it("updates cross-agent mentions and opens them through shell navigation", async () => {
@@ -357,6 +382,50 @@ describe("sidebar attention refresh ownership", () => {
     await waitForFast(() => expect(request).toHaveBeenCalledWith("cron.status", {}));
     expect(element.querySelector(".sidebar-issues-button__count")).toBeNull();
   });
+
+  it.each(["visible", "hidden"] as const)(
+    "publishes a quiet automation's overdue warning after a %s deadline without polling",
+    async (presentation) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.UTC(2026, 8, 22));
+      let visibility: DocumentVisibilityState = "visible";
+      vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+      vi.stubGlobal("localStorage", createTestStorageMock());
+      const job = cronJob("quiet-deadline");
+      job.state = { lastRunStatus: "ok", nextRunAtMs: Date.now() };
+      const deadline = Date.now() + 300_000;
+      const request = vi.fn(async (method: string) => {
+        if (method === "cron.list") {
+          return cronListResponse([job]);
+        }
+        if (method === "cron.status") {
+          return { enabled: true, triggersEnabled: true, jobs: 1 };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      const harness = createGatewayHarness(mockClient(request));
+      const { element } = await mountAttention({ gateway: harness.gateway });
+      expect(request).toHaveBeenCalledTimes(2);
+      if (presentation === "hidden") {
+        visibility = "hidden";
+        document.dispatchEvent(new Event("visibilitychange"));
+      }
+      await vi.advanceTimersByTimeAsync(deadline - Date.now());
+      await element.updateComplete;
+      expect(element.querySelector(".sidebar-issues-button__count")).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      await element.updateComplete;
+      if (presentation === "hidden") {
+        expect(element.querySelector(".sidebar-issues-button__count")).toBeNull();
+        visibility = "visible";
+        document.dispatchEvent(new Event("visibilitychange"));
+        await element.updateComplete;
+      }
+      expect(element.querySelector(".sidebar-issues-button__count")?.textContent).toBe("1");
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("does not let an obsolete open render steal focus from a later interaction", async () => {
     const { element, trigger } = await mountAttention();
@@ -487,18 +556,16 @@ describe("sidebar attention refresh ownership", () => {
   it.each(["success", "failure"] as const)(
     "keeps writer auth ownership after a stale Main %s settles",
     async (outcome) => {
-      const staleCron = deferred<unknown>();
+      const pendingCron = deferred<unknown>();
       const staleAuth = deferred<ModelAuthStatusResult>();
       const switchedAuth = deferred<ModelAuthStatusResult>();
       const responses = {
         "cron.list": [
           Promise.resolve(cronListResponse([cronJob("current")])),
-          staleCron.promise,
-          Promise.resolve(cronListResponse([cronJob("current")])),
+          pendingCron.promise,
           Promise.resolve(cronListResponse([cronJob("current")])),
         ],
         "cron.status": [
-          Promise.resolve({ enabled: true, triggersEnabled: true, jobs: 1 }),
           Promise.resolve({ enabled: true, triggersEnabled: true, jobs: 1 }),
           Promise.resolve({ enabled: true, triggersEnabled: true, jobs: 1 }),
           Promise.resolve({ enabled: true, triggersEnabled: true, jobs: 1 }),
@@ -591,7 +658,7 @@ describe("sidebar attention refresh ownership", () => {
       );
 
       now = 200_000;
-      document.dispatchEvent(new Event("visibilitychange"));
+      eventListener?.({ type: "event", event: "cron", payload: {} });
       invalidateModelAuthStatusRequests(client);
       eventListener?.({ type: "event", event: "chat.metadata.changed", payload: {} });
       await waitForFast(() => expect(request).toHaveBeenCalledTimes(6));
@@ -607,9 +674,13 @@ describe("sidebar attention refresh ownership", () => {
       expect(element.querySelector('[data-attention-kind="updateAvailable"]')).not.toBeNull();
       expect(element.querySelector('[data-approval-id="approval-1"]')).not.toBeNull();
 
-      await waitForFast(() => expect(request).toHaveBeenCalledTimes(9));
+      await waitForFast(() =>
+        expect(
+          request.mock.calls.filter(([method]) => method === "models.authStatus"),
+        ).toHaveLength(3),
+      );
       eventListener?.({ type: "event", event: "cron", payload: {} });
-      await waitForFast(() => expect(request).toHaveBeenCalledTimes(11));
+      expect(request.mock.calls.filter(([method]) => method === "cron.list")).toHaveLength(2);
       switchedAuth.resolve(authStatus(2));
       await waitForFast(() =>
         expect(
@@ -621,16 +692,16 @@ describe("sidebar attention refresh ownership", () => {
       const storedDismissals = localStorage.getItem(ATTENTION_KEY);
 
       now = 300_000;
-      staleCron.resolve(cronListResponse([cronJob("stale")]));
+      pendingCron.resolve(cronListResponse([cronJob("refreshed")]));
       if (outcome === "success") {
         staleAuth.resolve(authStatus(3, "ok"));
       } else {
         staleAuth.reject(new Error("stale Main auth"));
       }
-      await Promise.allSettled([staleCron.promise, staleAuth.promise, switchedAuth.promise]);
-      await new Promise<void>((resolve) => {
-        globalThis.setTimeout(resolve, 0);
-      });
+      await Promise.allSettled([pendingCron.promise, staleAuth.promise, switchedAuth.promise]);
+      await waitForFast(() =>
+        expect(request.mock.calls.filter(([method]) => method === "cron.list")).toHaveLength(3),
+      );
       await element.updateComplete;
 
       expect(
@@ -819,14 +890,14 @@ describe("update attention", () => {
       overlays: { snapshot: overlaySnapshot },
     } as unknown as ApplicationContext;
 
-    expect(resolveSidebarUpdateAttention(element.context).present).toBe(false);
+    expect(resolveSidebarUpdateAttention(element.context)).toBeNull();
 
     gatewaySnapshot.hello.auth.scopes = ["operator.read"];
-    expect(resolveSidebarUpdateAttention(element.context).present).toBe(true);
+    expect(resolveSidebarUpdateAttention(element.context)).not.toBeNull();
 
     gatewaySnapshot.hello.auth.scopes = ["operator.admin"];
     overlaySnapshot.updateCampaignStatusHydrated = true;
-    expect(resolveSidebarUpdateAttention(element.context).present).toBe(true);
+    expect(resolveSidebarUpdateAttention(element.context)).not.toBeNull();
   });
 
   it("keeps restart reconciliation visible after update metadata clears", () => {
@@ -844,32 +915,6 @@ describe("update attention", () => {
       },
     } as unknown as ApplicationContext;
 
-    expect(resolveSidebarUpdateAttention(element.context).present).toBe(true);
-  });
-
-  it.each([
-    { name: "stable admin update", canDismiss: true, forced: false, dismissible: true },
-    { name: "read-only update", canDismiss: false, forced: false, dismissible: false },
-    { name: "forced update", canDismiss: true, forced: true, dismissible: false },
-  ])("projects $name with explicit dismissal policy", ({ canDismiss, forced, dismissible }) => {
-    const dismissal = resolveUpdateAttentionDismissal({
-      gatewayBootId: "boot-a",
-      updateAvailable: {
-        currentVersion: "2026.8.1",
-        latestVersion: "2026.8.2",
-        channel: "latest",
-      },
-    });
-
-    const entry = buildUpdateInboxEntry({
-      canDismiss,
-      dismissal,
-      forced,
-      requiresAction: true,
-      severity: "warning",
-      visible: true,
-    });
-
-    expect(Boolean(entry?.dismissal)).toBe(dismissible);
+    expect(resolveSidebarUpdateAttention(element.context)).not.toBeNull();
   });
 });

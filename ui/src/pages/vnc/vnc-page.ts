@@ -9,12 +9,12 @@ import {
   DesktopClient,
   type DesktopConnectionHandle,
 } from "../../components/desktop/desktop-client.ts";
-import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
 import { t } from "../../i18n/index.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { GatewayPageController } from "../../lit/gateway-page-controller.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { renderVnc } from "./view.ts";
+import { renderVncWorkspace } from "./vnc-layout.ts";
 
 class VncPage extends OpenClawLightDomElement {
   @consume({ context: applicationContext, subscribe: true })
@@ -151,7 +151,7 @@ class VncPage extends OpenClawLightDomElement {
           <div class="page-title">${titleForRoute("vnc")}</div>
         </div>
       </section>
-      ${renderSettingsWorkspace(vncView, { fillHeight: true })}
+      ${renderVncWorkspace(vncView, { fillHeight: true })}
     `;
   }
 }

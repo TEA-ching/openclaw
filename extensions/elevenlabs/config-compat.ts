@@ -3,7 +3,7 @@
 // enumeration cold-loads this module, and provider-auth-runtime statically
 // reaches execa (see api-key-fallback.ts for ELEVENLABS_API_KEY(S) resolution).
 import { mergeMissing } from "openclaw/plugin-sdk/runtime-doctor-migrations";
-import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { asNullableRecord, isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 const LEGACY_TALK_FIELD_KEYS = [
   "voiceId",
@@ -17,12 +17,8 @@ type JsonRecord = Record<string, unknown>;
 
 export const ELEVENLABS_TALK_PROVIDER_ID = "elevenlabs";
 
-function getRecord(value: unknown): JsonRecord | null {
-  return isRecord(value) ? value : null;
-}
-
 function ensureRecord(root: JsonRecord, key: string): JsonRecord {
-  const existing = getRecord(root[key]);
+  const existing = asNullableRecord(root[key]);
   if (existing) {
     return existing;
   }
@@ -35,8 +31,8 @@ function isBlockedObjectKey(key: string): boolean {
   return key === "__proto__" || key === "prototype" || key === "constructor";
 }
 
-function hasLegacyTalkFields(value: unknown): value is JsonRecord {
-  const talk = getRecord(value);
+export function hasLegacyTalkFields(value: unknown): value is JsonRecord {
+  const talk = asNullableRecord(value);
   if (!talk) {
     return false;
   }
@@ -46,7 +42,7 @@ function hasLegacyTalkFields(value: unknown): value is JsonRecord {
 function resolveTalkMigrationTargetProviderId(talk: JsonRecord): string | null {
   const explicitProvider =
     typeof talk.provider === "string" && talk.provider.trim() ? talk.provider.trim() : null;
-  const providers = getRecord(talk.providers);
+  const providers = asNullableRecord(talk.providers);
   if (explicitProvider) {
     if (isBlockedObjectKey(explicitProvider)) {
       return null;
@@ -71,7 +67,7 @@ export function migrateElevenLabsLegacyTalkConfig<T>(raw: T): { config: T; chang
     return { config: raw, changes: [] };
   }
 
-  const talk = getRecord(raw.talk);
+  const talk = asNullableRecord(raw.talk);
   if (!talk || !hasLegacyTalkFields(talk)) {
     return { config: raw, changes: [] };
   }
@@ -89,7 +85,7 @@ export function migrateElevenLabsLegacyTalkConfig<T>(raw: T): { config: T; chang
   const nextRoot = structuredClone(raw) as JsonRecord;
   const nextTalk = ensureRecord(nextRoot, "talk");
   const providers = ensureRecord(nextTalk, "providers");
-  const existingProvider = getRecord(providers[providerId]) ?? {};
+  const existingProvider = asNullableRecord(providers[providerId]) ?? {};
   const migratedProvider = structuredClone(existingProvider);
   const legacyFields: JsonRecord = {};
   const movedKeys: string[] = [];
@@ -101,10 +97,6 @@ export function migrateElevenLabsLegacyTalkConfig<T>(raw: T): { config: T; chang
     legacyFields[key] = nextTalk[key];
     delete nextTalk[key];
     movedKeys.push(key);
-  }
-
-  if (movedKeys.length === 0) {
-    return { config: raw, changes: [] };
   }
 
   mergeMissing(migratedProvider, legacyFields);

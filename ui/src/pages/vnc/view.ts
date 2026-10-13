@@ -1,6 +1,6 @@
 // Control UI view renders VNC screen content.
 import { html, nothing } from "lit";
-import { renderSettingsStatus } from "../../components/settings-ui.ts";
+import { renderVncStatus } from "./vnc-layout.ts";
 import { t } from "../../i18n/index.ts";
 
 type VncProps = {
@@ -16,13 +16,13 @@ export function renderVnc(props: VncProps) {
 
   switch (props.connectionStatus) {
     case "connecting":
-      statusContent = renderSettingsStatus({
+      statusContent = renderVncStatus({
         kind: "muted",
         label: t("vnc.connecting"),
       });
       break;
     case "connected":
-      statusContent = renderSettingsStatus({
+      statusContent = renderVncStatus({
         kind: "ok",
         label: t("common.connected"),
       });
@@ -31,7 +31,7 @@ export function renderVnc(props: VncProps) {
       statusContent = html`
         <div class="settings-row__text">
           <span class="settings-row__title">
-            ${renderSettingsStatus({ kind: "warn", label: t("vnc.disconnected") })}
+            ${renderVncStatus({ kind: "warn", label: t("vnc.disconnected") })}
           </span>
           ${props.errorMessage
             ? html`<span class="settings-row__desc">${props.errorMessage}</span>`
@@ -44,7 +44,7 @@ export function renderVnc(props: VncProps) {
       statusContent = html`
         <div class="settings-row__text">
           <span class="settings-row__title">
-            ${renderSettingsStatus({ kind: "danger", label: t("vnc.connectionFailed") })}
+            ${renderVncStatus({ kind: "danger", label: t("vnc.connectionFailed") })}
           </span>
           ${props.errorMessage
             ? html`<span class="settings-row__desc">${props.errorMessage}</span>`

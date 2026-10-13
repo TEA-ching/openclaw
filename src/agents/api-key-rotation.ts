@@ -69,10 +69,6 @@ export function collectProviderApiKeysForExecution(params: {
   ]);
 }
 
-/**
- * Execute a provider operation with key rotation and optional same-key transient
- * retries.
- */
 export async function executeWithApiKeyRotation<T>(
   params: ExecuteWithApiKeyRotationOptions<T>,
 ): Promise<T> {

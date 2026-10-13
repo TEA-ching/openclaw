@@ -151,11 +151,10 @@ export type OperatorApprovalReceiptSnapshotRow = Omit<
   presentation_json: string | null;
   reviewer_device_ids_json: string | null;
   audience_session_keys_json: string | null;
-  receipt_rowid: number;
   payload_bytes: number;
 };
 export type OperatorApprovalReceiptSnapshotQueryRow = OperatorApprovalReceiptSnapshotRow & {
-  cursor_boundary_rowid: number | null;
+  cursor_boundary_id: number | null;
   page_present: 0 | 1;
 };
 type OperatorApprovalReceiptPageEntry = {
@@ -173,4 +172,9 @@ export type ListTerminalOperatorApprovalsInput = {
   limit?: number;
   kind?: OperatorApprovalKind;
   nowMs?: number;
+};
+/** Legacy callback guards share the worker precommit boundary with host-owned guards. */
+export type OperatorApprovalStoreGuard = {
+  family: "worker" | "native-compatibility";
+  assertCurrent: () => void;
 };

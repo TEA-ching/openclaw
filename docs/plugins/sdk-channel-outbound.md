@@ -114,8 +114,8 @@ Optional settings include custom append delays, a `drain` option block for
 advanced drain ordering/concurrency/retry policy, an external `abortSignal`, a
 clock, pump error reporting, a stopped-error factory, and admission policy.
 The returned monitor exposes `admit`, `ensureQueueAvailable`, `start`, `pause`,
-`stop`, `waitForIdle`, `isRunning`, and `isStopped`. Use the idempotent
-`ensureQueueAvailable()` check when plugin-owned migration or preparation must
+`stop`, `waitForIdle`, `isRunning`, and `isStopped`. Use the
+`ensureQueueAvailable()` check (safe to repeat) when plugin-owned migration or preparation must
 run after the queue opens but before the drain starts. `stop` first settles
 accepted admissions, then aborts and disposes the drain, waits for the pump and
 active deliveries, and disposes again to close the lazy-creation race.
@@ -236,22 +236,29 @@ final sends do not trigger successful-final cleanup. An explicit supplemental
 suppression is not retried; the legacy boolean `false` supplemental result remains
 eligible for normal fallback.
 
-| Operation                 | Use                                                                                                                                                                                                                        |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `observeDelivery(result)` | Record provider-confirmed final delivery through another path, such as the source/message-tool reply owner, and retire owned temporary progress. An invisible result is ignored; a progress receipt is not final evidence. |
-| `observeFailure()`        | Record a final dispatcher failure that occurred before the sender ran. Never infer acceptance from the error's class. A previously accepted final is not revoked.                                                          |
-| `cleanup({ failed })`     | Quiesce updates and clean eligible temporary previews. Failed/partial finals and retained or promoted previews stay protected. Cleanup failure cannot authorize resending accepted content.                                |
-| `retainPreview()`         | Transfer the artifact out of automatic cleanup, for example after an accepted continuation handoff. This does not claim final delivery.                                                                                    |
-| `reset()`                 | Start the next explicitly admitted turn or block generation. The owner fences stale awaited completions from the new generation. The transport still owns its corresponding message-identity rotation.                     |
+| Operation                              | Use                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `beginFinalDelivery()`                 | Freeze progress before awaiting provider-owned finalization. This records pending delivery, not acceptance, and does not stop the native transport.                                                                                                                                                   |
+| `observeDelivery(result, { isError })` | Record provider-confirmed final delivery through a native or source/message-tool path and retire eligible temporary progress. An invisible result is ignored; a progress receipt is not final evidence. `isError` distinguishes an accepted error response from task success and defaults to `false`. |
+| `observeFailure(result?)`              | Record a final dispatcher failure. Pass a provider-confirmed accepted subset for partial delivery; never infer acceptance from the error's class. A previously completed final is not revoked.                                                                                                        |
+| `observeSuppression()`                 | Record an intentional final no-send decision, such as cancellation by an outbound modifier hook. It cannot hide an existing delivery failure or revoke accepted content.                                                                                                                              |
+| `cleanup({ failed })`                  | Quiesce updates and clean eligible temporary previews. Failed/partial finals and retained or promoted previews stay protected. Cleanup failure cannot authorize resending accepted content.                                                                                                           |
+| `retainPreview()`                      | Transfer the artifact out of automatic cleanup, for example after an accepted continuation handoff. This does not claim final delivery.                                                                                                                                                               |
+| `reset()`                              | Start the next admitted turn, assistant answer, or block generation. The owner fences stale awaited completions from the new generation. The transport still owns its corresponding message-identity rotation; advance both at the assistant boundary.                                                |
 
 The read-only `finalStarted`, `finalDelivered`, `finalSucceeded`, `finalFailed`,
-and `previewFinalized` properties are projections of that owner.
+`finalSuppressed`, and `previewFinalized` properties are projections of that owner.
 `finalDelivered` means some final content was accepted, including partial/error
 results; it does not imply completion. `finalSucceeded` requires a complete
 non-error final. `finalFailed` identifies failed or partial delivery, not a model
 error whose error-message delivery succeeded. Preserve the returned receipt.
 `previewFinalized` also covers retained artifacts and accepted replacements
 that cannot be promoted again.
+
+Use the observation operations when provider-owned pagination or deferred
+finalization cannot use the generic `deliver` algorithm. Begin before the first
+await, then report acceptance, failure, or intentional suppression at actual
+settlement. Buffered content and uncertain sends are not visible-final evidence.
 
 The published `defineFinalizableLivePreviewAdapter` and
 `deliverWithFinalizableLivePreviewAdapter` helpers retain their existing
@@ -281,6 +288,9 @@ const markdownText = sanitizeForPlainText(text, { style: "markdown" });
 The Markdown style uses `**bold**` and `~~strikethrough~~`; italic and inline
 code keep `_italic_` and backtick markers in both styles. Select the style at
 the channel boundary instead of rewriting marker text after sanitization.
+
+Comparison prose such as `🙂<limit and wait>5s` remains literal text, including
+when the left operand is a Unicode symbol or letter.
 
 ## Delivery Evidence
 
@@ -313,6 +323,11 @@ evidence and safely retry the queued intent. Only the adapter that owns the
 final dispatch boundary may make this assertion. Never use the marker after a
 finalization/send call begins or returns an ambiguous result; false marking can
 duplicate messages.
+
+For a permanent local preflight rejection, such as an unresolved account owner,
+pass `{ cause: error, retryable: false }`. The delivery failed without dispatch;
+it is not an ambiguous send and should not be retried until the configuration
+is corrected.
 
 ## Existing outbound adapters
 
@@ -408,19 +423,19 @@ the concrete transport branches the plugin can prove, such as `text` or
 Omitting the map means the callback claims every selected branch, so prefer an
 explicit map for new plugins.
 
-The callback must use provider-owned idempotency or authoritative readback to
+The callback must use provider-side duplicate prevention or authoritative readback to
 return `sent` with the actual provider receipt, `not_sent` only when a fresh
 send is provably safe, or `unresolved` when neither outcome can be proven.
 When reconciliation is explicitly required, unsupported prepared shapes fail
 before provider I/O. During recovery, missing, incomplete, or mismatched
-provider proof must fail closed rather than replaying content that could
+provider proof must stop recovery rather than replaying content that could
 already be visible.
 
 If reconciliation needs provider-owned persisted evidence, implement
 `afterUnknownSendTerminal(...)`. Core calls it after the ambiguous queue row
 has authoritatively moved to failed, including retry-budget exhaustion. Use it
 to remove provider-owned plans or payloads that are no longer needed. Cleanup
-is best effort and must be idempotent; a failure is logged without making the
+is best effort and must be safe to repeat; a failure is logged without making the
 terminal queue row replayable again.
 
 ## Deferred delivery admission
@@ -454,21 +469,19 @@ preview, and reply pipeline options.
 
 ### Migrating from channel-message
 
-`openclaw/plugin-sdk/channel-message` is a deprecated compatibility entrypoint.
-It retains its published outbound exports and three dispatch aliases. New outbound
-helpers are exported only from `openclaw/plugin-sdk/channel-outbound`.
+`openclaw/plugin-sdk/channel-message` has been removed. Import its former
+outbound exports from `openclaw/plugin-sdk/channel-outbound`.
 Migrate those aliases to `openclaw/plugin-sdk/channel-inbound`:
 
-| Deprecated alias                   | Replacement                         |
+| Removed alias                      | Replacement                         |
 | ---------------------------------- | ----------------------------------- |
 | `hasFinalChannelTurnDispatch`      | `hasFinalInboundReplyDispatch`      |
 | `hasVisibleChannelTurnDispatch`    | `hasVisibleInboundReplyDispatch`    |
 | `resolveChannelTurnDispatchCounts` | `resolveInboundReplyDispatchCounts` |
 
-Follow the dated removal-eligibility window in [Migration](/plugins/sdk-migration).
-This subpath is not tied to the next Plugin SDK major, and eligibility does not
-itself remove an export. External imports do not emit a runtime warning; update
-plugin imports rather than waiting for one.
+The SDK owner approved early retirement on September 30, 2026. See the
+[removal timeline](/plugins/sdk-migration/removal-timeline) and update plugin
+imports before upgrading to a host containing this removal.
 
 ## Related
 
