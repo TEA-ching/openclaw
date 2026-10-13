@@ -1026,12 +1026,6 @@ extension GatewayConnection {
                 allowsRedirects: false,
                 allowsStoredCredentials: false))
         }
-        let mobileBrokerStableID = config.url.mobileBrokerGatewayStableID ?? config.url.absoluteString
-        if config.url.isMobileBrokerHost {
-            await MobileBrokerSessionStore.shared.refreshIfNeeded(
-                forURL: config.url,
-                gatewayStableID: mobileBrokerStableID)
-        }
         let client = GatewayChannelActor(
             url: config.url,
             token: browserSession == nil ? config.token : nil,
@@ -1068,13 +1062,8 @@ extension GatewayConnection {
                     socketGeneration: socketGeneration,
                     reason: reason)
             },
-            extraHeadersProvider: { @Sendable in
-                if let browserSession {
-                    return (try? browserSession.headers(for: config.url)) ?? [:]
-                }
-                return MobileBrokerSessionStore.shared.authorizationHeaders(
-                    forURL: config.url,
-                    gatewayStableID: mobileBrokerStableID)
+            extraHeadersProvider: browserSession.map { session in
+                { @Sendable in (try? session.headers(for: config.url)) ?? [:] }
             },
             reconnectTLSFailureHandler: { [weak self] error in
                 await self?.renewLearnedPinAfterReconnectFailure(error, routeGeneration: configuredRouteGeneration)
@@ -1285,19 +1274,6 @@ extension GatewayConnection {
     }
 
     func controlUiAutoAuthToken(config: Config) async -> String? {
-        // Mobile-broker connections authenticate the WS upgrade out-of-band via
-        // extraHeadersProvider, never negotiating one of the in-band
-        // authBinding sources (.sharedToken/.deviceToken/etc.) the guard chain
-        // below requires -- so client.authBinding(...) is nil and every route
-        // through that logic returns nil for these connections. The Control
-        // UI page loaded into Dashboard/Canvas needs this same access token
-        // (passed via dashboardURL's #token= fragment) to authenticate its
-        // own in-page WebSocket reconnect, or it reports "gateway not
-        // reachable" forever despite the native connection being fine.
-        if config.url.isMobileBrokerHost {
-            return (try? MobileBrokerSessionStore.shared.retrieveSession(
-                forGatewayStableID: config.url.mobileBrokerGatewayStableID ?? ""))?.accessToken
-        }
         guard let endpoint = try? await currentEndpoint(),
               endpoint.browserSession == nil,
               endpoint.config.url == config.url,

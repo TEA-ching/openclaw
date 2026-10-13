@@ -43,8 +43,6 @@ struct OnboardingWizardView: View {
     @State private var pendingTargetSuppression = GatewayPendingTargetSuppression()
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var showGatewayProblemDetails: Bool = false
-    @State var showMobileBrokerSignIn: Bool = false
-    @State var mobileBrokerSignInViewModel: MobileBrokerSignInSheet.ViewModel?
     @State private var lastPairingAutoResumeAttemptAt: Date?
     @State private var stagedGatewaySetupLink: GatewayConnectDeepLink?
     @State private var qrCodeCompletion = OnboardingQRCodeCompletion()
@@ -218,11 +216,6 @@ struct OnboardingWizardView: View {
                     onPrimaryAction: {
                         Task { await self.handleGatewayProblemPrimaryAction(currentProblem) }
                     })
-            }
-        }
-        .sheet(isPresented: self.$showMobileBrokerSignIn) {
-            if let viewModel = self.mobileBrokerSignInViewModel {
-                MobileBrokerSignInSheet(viewModel: viewModel)
             }
         }
         .onAppear {
@@ -1398,7 +1391,7 @@ extension OnboardingWizardView {
             admissionCheckpoint: admissionCheckpoint)
     }
 
-    func connectCurrentManualGateway(
+    private func connectCurrentManualGateway(
         host: String, port: Int, forceReconnect: Bool, admissionCheckpoint: UInt64? = nil) async
     {
         let admissionCheckpoint = admissionCheckpoint ?? self.gatewayController.ingress.admissionCheckpoint()
@@ -1406,16 +1399,6 @@ extension OnboardingWizardView {
             host: host,
             port: port,
             contextPath: self.manualContextPath)
-        if let signInViewModel = self.mobileBrokerSignInViewModelIfNeeded(
-            host: host,
-            port: port,
-            stableID: stableID,
-            forceReconnect: forceReconnect)
-        {
-            self.mobileBrokerSignInViewModel = signInViewModel
-            self.showMobileBrokerSignIn = true
-            return
-        }
         self.gatewayAuthFields.selectTarget(
             stableID,
             instanceId: GatewaySettingsStore.currentInstanceID(),

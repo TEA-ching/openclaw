@@ -135,10 +135,8 @@ final class ControlUIDocumentHost {
         self.isShowingFailurePage = false
         let urlDescription = GatewayEndpointStore.diagnosticURLString(for: url)
         dashboardWindowLogger.debug("dashboard load \(urlDescription, privacy: .public)")
-        var request = URLRequest(url: url)
-        request.attachMobileBrokerAuthorizationIfNeeded()
         guard let browserSessionLease else {
-            self.webView.load(request)
+            self.webView.load(URLRequest(url: url))
             return
         }
         let generation = self.loadGeneration
@@ -150,7 +148,7 @@ final class ControlUIDocumentHost {
                     in: controller)
                 guard let self, self.loadGeneration == generation, self.isAvailable() else { return }
                 self.pendingLoad = nil
-                self.webView.load(request)
+                self.webView.load(URLRequest(url: url))
             } catch {
                 guard !Task.isCancelled, let self, self.loadGeneration == generation else { return }
                 self.pendingLoad = nil

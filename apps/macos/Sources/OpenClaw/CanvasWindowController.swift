@@ -125,9 +125,7 @@ final class CanvasWindowController: NSWindowController, WKNavigationDelegate, WK
             if scheme == "https" || scheme == "http" {
                 canvasWindowLogger.debug(
                     "canvas load web scheme=\(scheme, privacy: .public) host=\(url.host ?? "-", privacy: .public)")
-                var request = URLRequest(url: url)
-                request.attachMobileBrokerAuthorizationIfNeeded()
-                self.webView.load(request)
+                self.webView.load(URLRequest(url: url))
                 return
             }
         }

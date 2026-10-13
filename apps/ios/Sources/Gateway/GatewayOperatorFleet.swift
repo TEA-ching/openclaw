@@ -124,10 +124,6 @@ final class GatewayOperatorFleet {
         let runtimeID = runtime.id
         var attempt = 0
         while !Task.isCancelled, self.runtimes[key]?.id == runtime.id {
-            if config.url.isMobileBrokerHost {
-                await KeychainAccessGroupConfig.createSessionStore()
-                    .refreshIfNeeded(forURL: config.url, gatewayStableID: config.effectiveStableID)
-            }
             do {
                 try await runtime.session.connect(
                     url: config.url,
@@ -141,8 +137,7 @@ final class GatewayOperatorFleet {
                         if let ingress = config.ingressAuthorization {
                             return try await ingress.headers(config.url)
                         }
-                        return GatewaySettingsStore.loadConnectionHeaders(
-                            url: config.url,
+                        return GatewaySettingsStore.loadGatewayCustomHeaders(
                             gatewayStableID: config.effectiveStableID)
                     },
                     onConnected: { [weak self] in

@@ -605,25 +605,13 @@ final class MacNodeModeCoordinator: NSObject {
     }
 
     private func connect(_ attempt: ConnectionAttempt) async throws {
-        let url = attempt.endpoint.config.url
-        let mobileBrokerStableID = url.mobileBrokerGatewayStableID ?? url.absoluteString
-        if url.isMobileBrokerHost {
-            await MobileBrokerSessionStore.shared.refreshIfNeeded(
-                forURL: url,
-                gatewayStableID: mobileBrokerStableID)
-        }
         try await self.session.connect(
-            url: url,
+            url: attempt.endpoint.config.url,
             credentials: GatewayNodeSessionCredentials(
                 token: attempt.endpoint.config.token,
                 password: attempt.endpoint.config.password),
             connectOptions: attempt.options,
             sessionBox: attempt.sessionBox,
-            extraHeadersProvider: {
-                MobileBrokerSessionStore.shared.authorizationHeaders(
-                    forURL: url,
-                    gatewayStableID: mobileBrokerStableID)
-            },
             onConnected: { [weak self] in
                 guard let self else { return }
                 guard await self.routeAuthorityAllowsInvoke(attempt.routeAuthorityGeneration) else { return }
