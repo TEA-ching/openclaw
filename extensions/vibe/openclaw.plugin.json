@@ -1,0 +1,105 @@
+{
+  "id": "vibe",
+  "categories": [
+    "models"
+  ],
+  "activation": {
+    "onStartup": false
+  },
+  "enabledByDefault": true,
+  "providers": [
+    "vibe"
+  ],
+  "providerEndpoints": [
+    {
+      "endpointClass": "mistral-public",
+      "hosts": [
+        "api.mistral.ai"
+      ]
+    }
+  ],
+  "providerRequest": {
+    "providers": {
+      "vibe": {
+        "family": "mistral"
+      }
+    }
+  },
+  "modelCatalog": {
+    "providers": {
+      "vibe": {
+        "baseUrl": "https://api.mistral.ai/v1",
+        "api": "openai-completions",
+        "defaultModel": "mistral-vibe-cli-latest",
+        "models": [
+          {
+            "id": "mistral-vibe-cli-latest",
+            "name": "Mistral Vibe (Medium 3.5)",
+            "input": [
+              "text",
+              "image"
+            ],
+            "reasoning": true,
+            "contextWindow": 262144,
+            "maxTokens": 8192,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          },
+          {
+            "id": "mistral-vibe-cli-fast",
+            "name": "Mistral Vibe Fast (Small 4)",
+            "input": [
+              "text",
+              "image"
+            ],
+            "reasoning": true,
+            "contextWindow": 262144,
+            "maxTokens": 16384,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          }
+        ]
+      }
+    }
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "vibe",
+        "envVars": [
+          "VIBE_API_KEY",
+          "VIBE_API_KEYS"
+        ]
+      }
+    ]
+  },
+  "providerAuthChoices": [
+    {
+      "provider": "vibe",
+      "method": "api-key",
+      "choiceId": "vibe-api-key",
+      "appGuidedSecret": true,
+      "choiceLabel": "Mistral Vibe API key",
+      "groupId": "vibe",
+      "groupLabel": "Mistral Vibe",
+      "groupHint": "API key",
+      "optionKey": "vibeApiKey",
+      "cliFlag": "--vibe-api-key",
+      "cliOption": "--vibe-api-key <key>",
+      "cliDescription": "Mistral Vibe API key"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

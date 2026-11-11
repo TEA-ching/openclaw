@@ -1,0 +1,22 @@
+{
+  "name": "@sctg/vibe-provider",
+  "version": "2026.11.3",
+  "description": "Mistral Vibe provider for OpenClaw: Vibe API keys against api.mistral.ai with per-key rotation (fork-only).",
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.11.3"
+    },
+    "build": {
+      "openclawVersion": "2026.11.3",
+      "bundledDist": false
+    }
+  }
+}

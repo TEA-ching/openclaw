@@ -45,7 +45,11 @@ export function collectProviderApiKeys(
       .filter(([name]) => name.startsWith(`${base}_API_KEY_`))
       .map(([, value]) => value),
     ...(normalized === "google" || normalized === "google-vertex" ? [env.GOOGLE_API_KEY] : []),
-    ...manifestEnvVars.map((envVar) => env[envVar]),
+    // Manifests may declare pool vars (PROVIDER_API_KEYS) next to single-value ones. A pool must be
+    // split like `listVar` above, never handed back whole as if it were one key.
+    ...manifestEnvVars.flatMap((envVar) =>
+      /_API_KEYS$/.test(envVar) ? (env[envVar]?.split(KEY_SPLIT_RE) ?? []) : [env[envVar]],
+    ),
   ]);
 }
 

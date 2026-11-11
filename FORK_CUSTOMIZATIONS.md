@@ -115,6 +115,23 @@ Keys are populated at container start by `scripts/resolve-keypool-vault.mjs` (pa
 Tests that pin this: `extensions/*/` rotation tests, `src/agents/api-key-rotation.test.ts`,
 `src/agents/model-auth-env.provider-aliases.test.ts`.
 
+### Mistral Vibe provider (`vibe`)
+
+`extensions/vibe/*`: a provider for Mistral Vibe API keys against `https://api.mistral.ai/v1`, reusing
+the Mistral wire behaviour (strict 9-char tool call ids, `max_tokens`, reasoning effort) under its own id so
+`VIBE_API_KEYS` rotates independently of `MISTRAL_API_KEYS`. Models: `vibe/mistral-vibe-cli-latest` (API
+alias of mistral-medium-3.5) and `vibe/mistral-vibe-cli-fast` (alias of mistral-small), 262k context, free
+plan (zero cost). It exists because scheduled jobs routed through the ACP harness (`acp-vibe/...`) fail
+model resolution in 2026.11. Keep `extensions/vibe/openclaw.plugin.json` in step with
+`extensions/mistral/openclaw.plugin.json` (`providerRequest`, `providerEndpoints`) and add `vibe` to the
+`OPENCLAW_EXTENSIONS` default in the parent `Dockerfile`. Tests: `extensions/vibe/vibe.test.ts`.
+
+### Pool env vars are split, not passed whole
+
+`src/agents/live-auth-keys.ts` (`collectProviderApiKeys`): a manifest-declared `*_API_KEYS` variable is split
+like the pool variable instead of being appended as one raw "key" (which sent an invalid bearer token whenever
+rotation reached that entry, for every pooled provider: mistral, cohere, vibe, ...).
+
 ### Debug payload summaries (openai-completions / responses)
 
 `packages/ai/src/transports/openai-completions-debug.ts`, `openai-tool-debug-summary.ts`,
