@@ -67,7 +67,6 @@ import { pages as skillsPages } from "./pages/skills/route.ts";
 import { page as systemsPage } from "./pages/systems/route.ts";
 import { page as terminalPage } from "./pages/terminal/route.ts";
 import { page as usagePage } from "./pages/usage/route.ts";
-import { page as vncPage } from "./pages/vnc/route.ts";
 import { resolveWorkboardRouteLocation } from "./pages/workboard/route-location.ts";
 import { page as workboardPage } from "./pages/workboard/route.ts";
 import { page as worktreesPage } from "./pages/worktrees/route.ts";
@@ -135,7 +134,6 @@ const APP_ROUTE_TREE = [
   devicePage,
   devicePermissionsPage,
   devicesPage,
-  vncPage,
   pluginPage,
 ] as const;
 

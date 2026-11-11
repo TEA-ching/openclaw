@@ -41,15 +41,6 @@ describe("listGatewayMethods", () => {
     );
   });
 
-  it("advertises the local desktop observe method under admin scope", () => {
-    expect(listGatewayMethods()).toContain("desktop.observeLocal");
-    expect(coreGatewayHandlers["desktop.observeLocal"]).toBeTypeOf("function");
-    const descriptors = createCoreGatewayMethodDescriptors(coreGatewayHandlers);
-    expect(descriptors.find((d) => d.name === "desktop.observeLocal")).toMatchObject({
-      scope: "operator.admin",
-    });
-  });
-
   const sessionEnvironmentMethods = [
     ["environments.session.status", "operator.read", undefined],
     ["environments.session.create", "operator.admin", true],

@@ -66,7 +66,6 @@ const CORE_GATEWAY_HANDLER_MODULES = {
   fs: () => import("./fs.js").then((module) => module.fsHandlers),
   health: () => import("./health.js").then((module) => module.healthHandlers),
   logs: () => import("./logs.js").then((module) => module.logsHandlers),
-  "local-desktop": () => import("./local-desktop.js").then((module) => module.localDesktopHandlers),
   "memory-search": () => import("./memory-search.js").then((module) => module.memorySearchHandlers),
   mentions: () => import("./mentions.js").then((module) => module.mentionHandlers),
   terminal: () => import("./terminal.js").then((module) => module.terminalHandlers),

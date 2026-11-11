@@ -341,7 +341,6 @@ const NAVIGATION_PRESENTATION: Record<NavigationRouteId, NavigationPresentation>
   secrets: ["key", "tabs.secrets", "secretsStore.hint"],
   advanced: ["fileCode", "routeTitles.advanced", "subtitles.advanced"],
   debug: navigationPresentation("bug", "debug"),
-  vnc: ["monitor", "vnc.title", "subtitles.vnc"],
   logs: navigationPresentation("scrollText", "logs"),
   plugin: navigationPresentation("plug", "plugin"),
   "new-session": ["plus", "newSession.title", "newSession.hint"],

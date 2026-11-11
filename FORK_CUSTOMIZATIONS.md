@@ -2,7 +2,7 @@
 
 What this fork changes on top of upstream `openclaw/openclaw`, plus the
 procedure to sync with upstream without losing it. Last sync: upstream
-`050881cd69f` (2026.10.2), merge commit `c986efe71a4`.
+`v2026.11.3`, branch `sync/2026.11.3` (previous: `050881cd69f`, 2026.10.2).
 
 Source of truth for "what do we carry": `git diff upstream/main HEAD --stat`
 (ignore `ui/src/i18n/.i18n/*`, generated). If the real diff and this file
@@ -43,6 +43,7 @@ done
 ```
 
 Then, without hand work:
+
 - `ui/src/i18n/.i18n/*`, `*/package.json` version bumps, `CHANGELOG*`: take upstream.
 - `pnpm-lock.yaml`: take upstream, then `pnpm install --lockfile-only --ignore-scripts`
   (re-adds our `extensions/poolside` importer).
@@ -93,65 +94,62 @@ under cirond, so that step is run explicitly in the `CMD`, before cirond.
 ## What we carry
 
 ### API-key pool rotation (`*_API_KEYS`)
+
 Several keys per provider, rotated on rate limit / quota. Env vars `XXX_API_KEYS`
 (comma/semicolon/whitespace separated); helpers `collectProviderApiKeysForExecution`
 and `executeWithApiKeyRotation` from `openclaw/plugin-sdk/provider-auth-runtime`.
 Keys are populated at container start by `scripts/resolve-keypool-vault.mjs` (parent repo).
 
-| Area | Files |
-|---|---|
-| Core | `src/agents/api-key-rotation.ts` (aggressive mode), `src/agents/model-auth-env.ts` (a `*_API_KEYS` pool resolves to its first key; never hand back a raw pool), `src/plugin-sdk/provider-auth-runtime.ts` |
-| Mistral | `extensions/mistral/index.ts` (`wrapStreamFn` + `wrapSimpleCompletionStreamFn` rotation), `realtime-transcription-provider-factory.ts` |
-| Cohere | `extensions/cohere/*` (rotation, `COHERE_API_KEYS`, tool-schema compat for union-shaped params, `north-mini-code-1-0` model) |
-| Exa | `extensions/exa/src/exa-web-search-provider.runtime.ts` (`runExaSearch` + rotation), `exa-web-search-provider.ts` (`EXA_API_KEYS` in `envVars`), `openclaw.plugin.json` |
-| Firecrawl | `extensions/firecrawl/src/*` (`FIRECRAWL_API_KEYS`) |
-| ElevenLabs | `extensions/elevenlabs/api-key-fallback.ts`, `tts.ts` (`*WithRotation`), `media-understanding-provider.ts`, `speech-provider-factory.ts`. The profile-file key fallback is deliberately out of `config-compat.ts` (keeps the doctor-contract closure free of `provider-auth-runtime`, which pulls in execa). |
-| OpenRouter | `extensions/openrouter/stream.ts` (rotation wrapper), manifest |
-| Poolside | `extensions/poolside/*` (vendored, MIT, patched for rotation; its npm package ships only a built `dist`) |
-| Shared transport | `packages/ai/src/transports/openai-completions-transport.ts` (rotation on the openai-completions transport) |
+| Area             | Files                                                                                                                                                                                                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Core             | `src/agents/api-key-rotation.ts` (aggressive mode), `src/agents/model-auth-env.ts` (a `*_API_KEYS` pool resolves to its first key; never hand back a raw pool), `src/plugin-sdk/provider-auth-runtime.ts`                                                                                                    |
+| Mistral          | `extensions/mistral/index.ts` (`wrapStreamFn` + `wrapSimpleCompletionStreamFn` rotation), `realtime-transcription-provider-factory.ts`                                                                                                                                                                       |
+| Cohere           | `extensions/cohere/*` (rotation, `COHERE_API_KEYS`, tool-schema compat for union-shaped params, `north-mini-code-1-0` model)                                                                                                                                                                                 |
+| Exa              | `extensions/exa/src/exa-web-search-provider.runtime.ts` (`runExaSearch` + rotation), `exa-web-search-provider.ts` (`EXA_API_KEYS` in `envVars`), `openclaw.plugin.json`                                                                                                                                      |
+| Firecrawl        | `extensions/firecrawl/src/*` (`FIRECRAWL_API_KEYS`)                                                                                                                                                                                                                                                          |
+| ElevenLabs       | `extensions/elevenlabs/api-key-fallback.ts`, `tts.ts` (`*WithRotation`), `media-understanding-provider.ts`, `speech-provider-factory.ts`. The profile-file key fallback is deliberately out of `config-compat.ts` (keeps the doctor-contract closure free of `provider-auth-runtime`, which pulls in execa). |
+| OpenRouter       | `extensions/openrouter/stream.ts` (rotation wrapper), manifest                                                                                                                                                                                                                                               |
+| Poolside         | `extensions/poolside/*` (vendored, MIT, patched for rotation; its npm package ships only a built `dist`)                                                                                                                                                                                                     |
+| Shared transport | `packages/ai/src/transports/openai-completions-transport.ts` (rotation on the openai-completions transport)                                                                                                                                                                                                  |
 
 Tests that pin this: `extensions/*/` rotation tests, `src/agents/api-key-rotation.test.ts`,
 `src/agents/model-auth-env.provider-aliases.test.ts`.
 
 ### Debug payload summaries (openai-completions / responses)
+
 `packages/ai/src/transports/openai-completions-debug.ts`, `openai-tool-debug-summary.ts`,
 `openai-responses-debug.ts` (`stringifyRedactedPayload`, system-prompt elision, wider
 inspection budgets). Hooked into `openai-completions-transport.ts` just before the
 context-output-budget resolution.
 
 ### Mistral Vibe harness (`acp-vibe`)
+
 `extensions/acpx/*` (native agent, harness attempt, config schema, manifest),
 `src/agents/harness/host-capability*`, `ui/src/components/provider-icon-data.ts`
 (`"acp-vibe": "Mistral Vibe"`). Tests with hard-coded harness lists (e.g.
 `extensions/acpx/harness-reset.test.ts`) must include `acp-vibe`.
 
-### Remote desktop (VNC) page
-`ui/src/pages/vnc/*` (Lit page; `vnc-layout.ts` holds the two small Lit helpers
-upstream removed when it moved settings pages to Solid), `ui/src/styles/vnc.css`,
-nav entries in `ui/src/app-navigation.ts` / `app-route-paths.ts` / `app-routes.ts`,
-the identity-menu entry in `ui/src/components/app-sidebar-identity-menu.ts`,
-`src/gateway/desktop/local-desktop-bridge.ts`, `src/gateway/server-methods/local-desktop.ts`,
-`core-handlers.ts`, the `desktop.observeLocal` descriptor in
-`src/gateway/methods/core-descriptors.ts` (admin scope), `server-http-upgrades.ts`,
-and `packages/gateway-protocol` environment schemas.
-
-### Gateway health probes behind a proxy
-`src/gateway/server-http-request.ts`: an unattributable-proxy caller on
-`/healthz`, `/ready`, `/startup` gets the minimal probe answer instead of 403
-(test: `server-http.probe.test.ts`). Upstream moved the request handler out of
-`server-http.ts` into `server-http-request.ts`.
-
 ### Other
+
 - `skills/garmin/SKILL.md`: Garmin CLI skill (CLI built in the parent repo's Docker image).
 - `extensions/signal/api.ts`: redundant static monitor/probe exports removed.
 
 ## Dropped
+
+- **Custom VNC page / `desktop.observeLocal` bridge** (dropped at the 2026.11.3 sync):
+  upstream's Desktop lab (`desktop.host.enabled=true`, `src/gateway/desktop/host-source.ts`)
+  connects to the same loopback `x11vnc` on port 5900 that `scripts/ciron.toml` starts.
+  Enable it in the chart config instead of carrying a page.
+- **Probe bypass for unattributable proxies** (dropped at the 2026.11.3 sync): upstream now
+  answers probes for configured trusted proxies and 403s untrusted ones, pinned by its own test.
+  Kubelet probes arrive direct, and the chart already injects `10.0.0.0/8` into `trustedProxies`.
 - **Mobile Broker sign-in in the iOS/macOS apps** (`apps/ios`, `apps/macos`,
   `MobileBroker*.swift`): removed. Mobile access goes through upstream's tailnet
   support with the parent repo's `mobile-auth-broker`. `apps/ios` and `apps/macos` are
   plain upstream; keep them that way.
 
 ## Divergences that are probably stale (verify, then reset to upstream)
+
 Left over from merging release branches, not deliberate customizations:
 `.build/swift-tools/*`, `apps/android/*` version files, `qa/scenarios/plugins/kitchen-sink-live-openai.yaml`,
 `extensions/qa-lab/src/scenario-catalog-kitchen-sink-proof.test.ts`,
@@ -162,8 +160,7 @@ Left over from merging release branches, not deliberate customizations:
 Check each with `git log upstream/main..HEAD -- <path>` before resetting.
 
 ## Things that broke last time (check first)
+
 - Upstream folded `exa-web-search-provider.shared.ts` into `exa-web-search-provider.ts`; our `EXA_API_KEYS` envVars entry had to move with it, and the local `ExaSearchType`/`ExaSearchResult` types needed redefining in the runtime file.
 - `extensions/elevenlabs/speech-provider-factory.ts` typed `normalizeVoiceSettings` via `typeof elevenLabsTTS`; ours uses `ElevenLabsTtsRequestParams`.
 - Mistral realtime factory now takes `{ createRealtimeTranscriptionWebSocketSession }`; tests that call it must pass it.
-- Upstream's `server-methods-list.test.ts` compares against a frozen prefix fixture; adding `desktop.observeLocal` must stay after that prefix.
-- Upstream moved UI settings helpers to Solid (`ui/src/components/solid/*`); our Lit VNC page cannot import the old `settings-ui.ts`/`settings-workspace.ts` helpers.

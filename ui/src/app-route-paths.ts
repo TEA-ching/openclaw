@@ -95,7 +95,6 @@ const APP_ROUTE_DEFINITIONS = {
   // pre-rename bookmarks and deep links.
   cron: { path: "/automations", aliases: ["/cron"] },
   devices: { path: "/settings/devices", aliases: ["/nodes"] },
-  vnc: { path: "/vnc" },
   "cloud-workers": { path: "/settings/cloud-workers" },
   plugin: { path: "/plugin" },
 } as const;

@@ -435,37 +435,6 @@ describe("gateway probe endpoints", () => {
     });
   });
 
-  it("still answers unattributable proxied readiness with the safe minimal probe body", async () => {
-    // Kubelet-style HTTP probes reach the pod directly and can never present a parseable
-    // forwarded-client chain, so an unattributable-proxy-shaped caller must not 403 on a
-    // probe endpoint the same way it would on an ordinary authenticated route -- it falls
-    // through to the same minimal response an untrusted direct caller already gets,
-    // matching the unconditional bypass /healthz (liveness) has always had.
-    const getReadiness: ReadinessChecker = () => ({
-      ready: true,
-      failing: [],
-      uptimeMs: 45_000,
-    });
-
-    await withGatewayServer({
-      prefix: "probe-unattributable-proxy",
-      resolvedAuth: AUTH_TOKEN,
-      overrides: { getReadiness },
-      run: async (server) => {
-        const { res, getBody } = await sendRequest(server, {
-          path: "/ready",
-          remoteAddress: "127.0.0.1",
-          host: "gateway.test",
-          authorization: "Bearer test-token",
-          headers: { forwarded: "for=203.0.113.10" },
-        });
-
-        expect(res.statusCode).toBe(200);
-        expect(JSON.parse(getBody())).toEqual({ ready: true });
-      },
-    });
-  });
-
   it("rejects untrusted proxy ingress before probes, hooks, and watch-node handlers", async () => {
     const handleHooksRequest = vi.fn(async () => true);
     const handleWatchNodeRequest = vi.fn(async () => true);

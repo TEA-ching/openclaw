@@ -134,7 +134,6 @@ describe("AppSidebar footer identity menu", () => {
       "command:pair-mobile",
       "command:apps",
       "command:debug-overlay",
-      "command:vnc",
       "command:help",
     ]);
     const footerName = identity?.querySelector(".sidebar-identity-card__name");

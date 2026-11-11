@@ -1311,17 +1311,6 @@ export const en: TranslationMap & {
       delayP99: "Delay p99",
     },
   },
-  vnc: {
-    title: "Remote Desktop",
-    connecting: "Connecting to remote desktop…",
-    connected: "Connected",
-    disconnected: "Disconnected from remote desktop",
-    connectionFailed: "Failed to connect to remote desktop",
-    clipboardLabel: "Clipboard",
-    clipboardHint:
-      "Paste here (Cmd/Ctrl+V) to send text to the remote session. Text the remote copies appears here too.",
-    clipboardPlaceholder: "Paste to send to the remote desktop…",
-  },
   configForm: {
     redactedPlaceholder: "[redacted - click reveal to view]",
     sectionHelp: "Help for {section}",
@@ -1872,7 +1861,6 @@ export const en: TranslationMap & {
     security: "Gateway auth, exec policy, tool profile, and approvals.",
     advanced: "Every remaining config section, plus the raw file editor.",
     debug: "Snapshots, events, RPC.",
-    vnc: "Remote desktop access to the pod's graphical interface.",
     logs: "Live gateway logs.",
     plugin: "Plugin-provided panel.",
   },

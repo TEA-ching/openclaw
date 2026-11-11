@@ -203,7 +203,6 @@ export function renderSidebarIdentityMenu(params: SidebarIdentityMenuParams): JS
         title: params.canPairDevice ? undefined : t("devices.pairing.adminRequired"),
       }),
       renderSidebarMenuAction("command:apps", t("agentChip.getApps"), "layoutGrid"),
-      renderSidebarMenuAction("command:vnc", titleForRoute("vnc"), "monitor"),
       renderSidebarMenuAction("command:debug-overlay", t("debug.overlay.title"), "activity", {
         details: (
           <KeyboardShortcut
@@ -336,9 +335,6 @@ export function renderSidebarIdentityMenu(params: SidebarIdentityMenuParams): JS
             break;
           case `${COMMAND_VALUE_PREFIX}debug-overlay`:
             requestDebugOverlayToggle();
-            break;
-          case `${COMMAND_VALUE_PREFIX}vnc`:
-            params.onNavigate("vnc");
             break;
           case `${COMMAND_VALUE_PREFIX}retry-connect`:
             params.onRetryConnect?.();

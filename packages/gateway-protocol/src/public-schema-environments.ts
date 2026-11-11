@@ -33,8 +33,6 @@ export {
   DesktopObserveParamsSchema,
   DesktopObserveResultSchema,
   DesktopLaunchParamsSchema,
-  LocalDesktopObserveParamsSchema,
-  LocalDesktopObserveResultSchema,
   DesktopReleaseParamsSchema,
   DesktopReleaseResultSchema,
 } from "./schema-modules.js";

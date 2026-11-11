@@ -633,10 +633,6 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["plugins.catalog.categories", "plugins", "operator.read", "2026.9"],
   ["plugins.catalog.get", "plugins", "operator.read", "2026.9"],
   ["environments.prepare", "environments", "operator.admin", "2026.9", SIDECAR_CONTROL_PLANE_WRITE],
-  // Observes this Gateway process's own local desktop (e.g. a pod-local x11vnc), independent
-  // of the cloud-workers subsystem that worker.desktop.observe depends on. Appends here
-  // (not next to worker.desktop.launch above) so every older advertised index stays stable.
-  ["desktop.observeLocal", "local-desktop", "operator.admin", "2026.8"],
   ["models.authRefresh", "models-auth-status", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
   ["models.authLogin", "models-auth-login", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],
   ["models.authSetApiKey", "models-auth-status", "operator.admin", "2026.9", CONTROL_PLANE_WRITE],

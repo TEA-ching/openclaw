@@ -413,18 +413,6 @@ export function attachGatewayUpgradeHandler(opts: {
         });
         return;
       }
-      if (requestPath === "/desktop/observe-local") {
-        // Pod-local desktop observe: independent of the cloud-workers session registry above,
-        // so it stays reachable even when the worker-environments subsystem is not running.
-        if (isGatewayWorkAdmissionClosed()) {
-          rejectGatewayUpgradeServiceUnavailable(socket, "Gateway websocket admission closed");
-          return;
-        }
-        const { handleLocalDesktopObserveUpgrade } =
-          await import("./desktop/local-desktop-bridge.js");
-        handleLocalDesktopObserveUpgrade(req, socket, head);
-        return;
-      }
       if (requestPath === NODE_DESKTOP_ATTACH_PATH || requestPath === NODE_PORTAL_ATTACH_PATH) {
         const context = opts.getGatewayRequestContext?.();
         if (!opts.nodeDesktopStreamBroker || !context) {

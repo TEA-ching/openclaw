@@ -133,7 +133,6 @@ const TRAIN_2026_8_METHODS = [
   "users.unlinkAuthProfile",
   "desktop.observe",
   "desktop.launch",
-  "desktop.observeLocal",
   "device.scopes.requestUpgrade",
   "device.scopes.waitUpgrade",
   "node.runnerInventory.update",
