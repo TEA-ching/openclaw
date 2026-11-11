@@ -22,6 +22,16 @@ By default, delivery depends on requester depth:
 - Nested requester subagent sessions receive an internal follow-up injection (`deliver=false`) so the orchestrator can synthesize child results in-session.
 - If a nested requester subagent session is gone, OpenClaw falls back to that session's requester when available.
 
+Model fallback and other model-routing updates do not invalidate prepared
+completion or child follow-up authority. Changes to session identity, lifecycle,
+spawn lineage, tool policy, sandbox, or execution host still reject stale work.
+
+New-turn capability preparation refreshes stale inherited session metadata once
+per affected lookup before evaluating current policy again. This lets ordinary
+metadata updates coexist with child follow-ups and completion turns. It does not
+renew an active turn's retained authority: session replacement, policy revocation,
+and closed owners still fail their existing checks.
+
 The requester turn's captured origin owns completion routing, including after
 `sessions_yield` and for child pause notices. A WebChat origin does not inherit a
 previous external destination from the session. Without a captured origin, the
@@ -49,6 +59,16 @@ Completion inputs retain their own turn identity across compaction and runtime
 context messages. If transcript persistence rejects a completion because its
 keyed input belongs to a closed turn, delivery records a permanent failure with
 the error. It does not retry other models or keep scheduling the same completion.
+
+Blocked completion warnings identify the child run and retain the concrete delivery
+error across retries. A confirmed handoff remains delivered even if its receipt
+callback fails; cleanup must not replay an already consumed result. Failures before
+a delivery result is reported follow the same retryability policy as direct sends.
+
+Transcript writer-claim changes remain retryable when no send is confirmed. If
+local retries are exhausted, the completion stays eligible for bounded requester
+recovery. Permanent delivery rejections still stop recovery, including when they
+are wrapped by a writer-claim error.
 
 If a chunk in a direct-message text fallback fails or is aborted after earlier
 chunks were sent, OpenClaw records an incomplete delivery. It stops automatic
@@ -121,9 +141,17 @@ the newer producer end time owns the reply. Equal end times retain the first
 accepted reply; a correction with a newer end time can replace it.
 
 OpenClaw preserves prompt-data escaping and stable order when it delivers several
-results together. It does not shorten an answer to fit the former announce
-projection limits. The bounded lifecycle snapshot remains separate from the
-complete answer sent to the parent.
+results together. Completion findings have a strict shared 160,000-character cap,
+including escaping and framing. Small answers stay intact; larger answers keep
+their beginning and an explicit truncation marker pointing to `sessions_history`
+with the child session key. `sessions_history` truncates text fields to 4,000
+characters; this pointer does not provide lossless retrieval of an omitted tail.
+Each shown child keeps its task and status, with result heads sharing the remaining
+space above a small floor. If even floor-sized blocks would exceed the cap, the
+remaining children become one bounded summary line with their count, the first few
+session keys, and guidance to inspect them with the session tools. Ordering stays
+deterministic. The bounded lifecycle snapshot and retained complete transcript
+stay separate from these prompt limits.
 
 A successful child with an empty final reply remains in the batch with its task
 identity, `ok` status, and `(no output)` result. Its successful execution status

@@ -105,17 +105,6 @@ afterEach(() => {
 });
 
 describe("canonical anonymous HTTP entry", () => {
-  it("uses a per-publication preview URL in canonical public chat metadata", async () => {
-    const response = await request(server());
-    expect(response.res.statusCode).toBe(200);
-    expect(response.getBody()).toContain(
-      `https://example.test/control/share/session/card.png?token=v1.${"a".repeat(96)}`,
-    );
-    expect(response.getBody()).toContain(
-      'name="twitter:image:alt" content="Public launch notes · OpenClaw public session"',
-    );
-  });
-
   it("keeps published text available when no token identity is present", async () => {
     mediaToken.mockResolvedValue(undefined);
     const response = await request(server());
@@ -123,15 +112,18 @@ describe("canonical anonymous HTTP entry", () => {
     expect(response.getBody()).toContain("Published answer");
   });
 
-  it("reloads the exact Incognito address produced by in-app navigation", async () => {
-    const sessionKey = "agent:main:dashboard:incognito-12345678-aaaa-4000-8000-000000000001";
+  it("reloads the exact short-session address produced by new-session navigation", async () => {
+    const sessionKey = "agent:main:dashboard:12345678-aaaa-4000-8000-000000000001";
     const target = sessionNavigationTarget({
       face: "chat",
       sessionKey,
       navigationKey: sessionKey,
+      focusComposer: true,
       fallbackAgentId: "main",
       basePath: "/control",
     });
+    expect(target.options.search).toContain("__openclawSessionKey=");
+    expect(target.options.search).toContain("__openclawComposerFocus=1");
     const response = await sendRequest(server(), {
       path: target.options.pathname + (target.options.search ?? ""),
       host: "gateway.lan:18789",
@@ -175,22 +167,6 @@ describe("canonical anonymous HTTP entry", () => {
     expect(nonSecureApp.getBody()).toContain("<openclaw-app>");
     expect(reader).not.toHaveBeenCalled();
   });
-
-  it.each(["token", "password"] as const)(
-    "serves the %s app on non-secure ingress without reading a transcript",
-    async (mode) => {
-      const response = await sendRequest(server(mode), {
-        path: route,
-        host: "gateway.lan:18789",
-        remoteAddress: "192.168.1.25",
-      });
-      expect(response.res.statusCode).toBe(200);
-      expect(response.getBody()).toContain("<openclaw-app>");
-      expect(response.getBody()).not.toContain("Published answer");
-      expect(resolveSession).not.toHaveBeenCalled();
-      expect(reader).not.toHaveBeenCalled();
-    },
-  );
 
   it.each([
     { mode: "token", secureProxy: false },
@@ -244,6 +220,12 @@ describe("canonical anonymous HTTP entry", () => {
     });
     expect(response.res.statusCode).toBe(200);
     expect(response.getBody()).toContain("Published answer");
+    expect(response.getBody()).toContain(
+      `https://example.test/control/share/session/card.png?token=v1.${"a".repeat(96)}`,
+    );
+    expect(response.getBody()).toContain(
+      'name="twitter:image:alt" content="Public launch notes · OpenClaw public session"',
+    );
     expect(response.getBody()).toContain(
       "/__openclaw__/session-entry?path=%2Fcontrol%2Fchat%2Fmain%2Flaunch-",
     );

@@ -2,7 +2,10 @@ import type { SessionGitHubPublicationResult } from "../../packages/gateway-prot
 import { makeZeroUsageSnapshot } from "../agents/usage.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { appendSessionTranscriptReport } from "../config/sessions/session-accessor.js";
-import { captureIncognitoSessionOperation } from "../config/sessions/session-incognito-binding.js";
+import {
+  captureSessionActorStorageOwner,
+  readCapturedSessionActorEntry,
+} from "../config/sessions/session-actor-storage-binding.js";
 import type { GitHubPublicationCoordinator } from "./github-publication.js";
 
 const GITHUB_PUBLICATION_RESPONSE_PREFIX = "github-publication:";
@@ -34,7 +37,7 @@ export async function reportGitHubPublicationTranscript(
     resolveCanonicalSessionEntryFromStoreKeys: typeof import("./session-utils.js").resolveCanonicalSessionEntryFromStoreKeys;
     resolveGatewaySessionStoreTargetInWorker: typeof import("./session-utils-store-worker.js").resolveGatewaySessionStoreTargetInWorker;
   }>,
-  coordinator: Pick<GitHubPublicationCoordinator, "markReportedAsync">,
+  coordinator: Pick<GitHubPublicationCoordinator, "markReportedAsync" | "readReportLifecycleAsync">,
   params: {
     sessionId: string;
     sessionKey: string;
@@ -42,16 +45,19 @@ export async function reportGitHubPublicationTranscript(
     result: SessionGitHubPublicationResult;
   },
 ): Promise<void> {
-  const incognito = captureIncognitoSessionOperation(params);
-  const claim = incognito?.actor.sessions.captureCurrent(params.sessionKey);
-  const selected = incognito
+  const lifecycleRevision = await coordinator.readReportLifecycleAsync(params);
+  const memory = captureSessionActorStorageOwner(params, {
+    assertCurrent() {},
+    authorize() {},
+  });
+  const selected = memory
     ? {
         target: {
-          agentId: incognito.actor.agentId,
+          agentId: memory.agentId,
           canonicalKey: params.sessionKey,
-          storePath: incognito.actor.path,
+          storePath: memory.path,
         },
-        entry: incognito.actor.sessions.readSharing(params.sessionKey)?.entry,
+        entry: readCapturedSessionActorEntry(memory, params.sessionKey),
       }
     : await (async () => {
         const runtime = await loadSessionRuntime();
@@ -66,6 +72,16 @@ export async function reportGitHubPublicationTranscript(
         };
       })();
   const { target, entry } = selected;
+  // A reset or rotation ended that transcript; its receipt stays readable by request ID.
+  if (
+    entry &&
+    target.canonicalKey === params.sessionKey &&
+    (entry.sessionId !== params.sessionId ||
+      (entry.lifecycleRevision ?? null) !== lifecycleRevision)
+  ) {
+    await coordinator.markReportedAsync(params.result.requestId);
+    return;
+  }
   if (entry?.sessionId !== params.sessionId || target.canonicalKey !== params.sessionKey) {
     throw new Error("GitHub publication transcript owner changed");
   }
@@ -75,7 +91,7 @@ export async function reportGitHubPublicationTranscript(
       sessionId: params.sessionId,
       sessionKey: target.canonicalKey,
       storePath: target.storePath,
-      ...(incognito && { expectedLifecycleRevision: entry.lifecycleRevision }),
+      expectedLifecycleRevision: lifecycleRevision ?? undefined,
     },
     {
       kind: "assistant",
@@ -91,21 +107,9 @@ export async function reportGitHubPublicationTranscript(
         timestamp: Date.now(),
       },
     },
-    incognito && {
-      incognito: {
-        actor: incognito.actor,
-        authority: {
-          assertCurrent() {
-            incognito.authority.assertCurrent();
-            claim!.assertCurrent();
-          },
-        },
-      },
-    },
   );
   if (!appended.ok) {
     throw new Error("GitHub publication transcript owner changed", { cause: appended.error });
   }
-  claim?.assertCurrent();
   await coordinator.markReportedAsync(params.result.requestId);
 }

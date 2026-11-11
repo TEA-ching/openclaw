@@ -9,6 +9,7 @@ import { cloneCronJobForMutation, finalizeUpdatedJob } from "../service/jobs-mut
 import { recomputeSingleJobForMaintenance } from "../service/jobs-scheduling.js";
 import {
   reconcileCronChannelRequesterAuthority,
+  reconcileCronOperatorSource,
   reconcileRuntimeAuthority,
 } from "../service/jobs-tool-policy.js";
 import { applyDeclarativeJobSpec, applyJobPatch, createJob } from "../service/jobs.js";
@@ -156,6 +157,10 @@ export function planCronJobMutation(
         isJobActive: () => previousJob?.state.runningAtMs !== undefined,
       });
     }
+    // Declarative re-registration is not a fresh authorization of an existing account.
+    if (options.inferenceBinding && (!previousJob || mutation.kind === "update")) {
+      nextJob.inferenceBinding = options.inferenceBinding;
+    }
     const explicitlyMutatesToolsAllow =
       mutation.kind === "add"
         ? mutation.input.payload.toolsAllow !== undefined
@@ -167,6 +172,10 @@ export function planCronJobMutation(
       runtimeAuthority: options.runtimeAuthority,
       explicitlyMutatesToolsAllow,
     });
+    if (nextJob.runtimeAuthority) {
+      // Native inference authority replaces, rather than supplements, host credentials.
+      delete nextJob.inferenceBinding;
+    }
     reconcileCronChannelRequesterAuthority({
       job: nextJob,
       previousJob,
@@ -175,6 +184,7 @@ export function planCronJobMutation(
       reauthorizeCallerOrigin: mutation.kind === "update" && explicitlyMutatesToolsAllow,
     });
     resolveCronJobEffectiveAgentId(nextJob, defaultAgentId);
+    reconcileCronOperatorSource({ job: nextJob, previousJob, captured: options.operatorSource });
     plan.created = !previousJob;
     plan.updated =
       previousJob !== undefined &&

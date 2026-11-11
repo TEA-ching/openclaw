@@ -160,12 +160,14 @@ export async function guardUpdateDoctorSchemaUpgrade(options: {
   schemas?: DoctorDatabasePreflight;
   runtime?: RuntimeEnv;
   json?: boolean;
+  signal?: AbortSignal;
   /** These entry points run before a shipped parent can delegate Doctor. */
   entry?: "cli-bootstrap" | "package-lifecycle";
   postCoreSchemaRepair?: UpdateDoctorWriteAuthority["postCoreSchemaRepair"];
   onVerifiedBackup?: (snapshots: readonly BackupSqliteSnapshotFact[]) => void;
   /** Read-only pre-capture publication check; never authorizes an agent repair. */
   statePublicationOnly?: boolean;
+  preserveSourceArtifacts?: true;
 }): Promise<DoctorDatabasePreflight | undefined> {
   if (process.env.OPENCLAW_UPDATE_IN_PROGRESS !== "1") {
     return undefined;
@@ -177,9 +179,10 @@ export async function guardUpdateDoctorSchemaUpgrade(options: {
     : createDoctorRehearsalDatabaseCoverage(process.env);
   const schemas =
     options.schemas ??
-    (await prepareDoctorDatabasePreflight(
-      options.statePublicationOnly ? { scope: "state" } : undefined,
-    ));
+    (await prepareDoctorDatabasePreflight({
+      scope: options.statePublicationOnly ? "state" : undefined,
+      preserveSourceArtifacts: options.preserveSourceArtifacts,
+    }));
   rehearsal?.assertCurrent();
   if (!schemas.pendingMigrations?.length) {
     return schemas;
@@ -291,6 +294,7 @@ export async function guardUpdateDoctorSchemaUpgrade(options: {
       assertCurrent();
       let snapshotFacts: readonly BackupSqliteSnapshotFact[] = [];
       const backup = await createBackupArchive({
+        signal: options.signal,
         output: path.join(
           resolveUpdateCaptureRoot(resolveStateDir()),
           `agent-schema-${updater.runId}-${randomUUID()}.tar.gz`,
@@ -567,6 +571,8 @@ async function rehearseDeferredUpdateDoctorSchemaForParent(
   let resourceWarnings: import("../plugins/doctor-contract-module.js").PluginDoctorMigrationBackupWarning[] =
     [];
   try {
+    // Schema-only legacy admission retains its shipped isolated layout.
+    await rehearsal.prepareRuntime(assertParent);
     const env = { ...rehearsal.env, OPENCLAW_UPDATE_IN_PROGRESS: "0" };
     const { inspectPreparedDoctorRehearsal } =
       await import("./doctor-update-rehearsal-inventory.js");

@@ -16,7 +16,28 @@ enum GatewayLaunchAgentManager {
         var isInferredLegacyInstall = false
         var sourcePrefix: [String]?
         var serviceAuthority: ServiceAuthority?
+
+        /// Flags remain exact invocation custody; bundle identity uses its concrete packaged files.
+        func matchesBundledRuntime(_ runtime: BundledRuntime) -> Bool {
+            let concrete = GatewayLaunchAgentManager.concreteServicePrefix(self.prefix)
+            // Services installed before the stable service path still name the per-build Bun.
+            guard concrete.first == runtime.bun.resolvingSymlinksInPath().path ||
+                (concrete.first == runtime.serviceBun.resolvingSymlinksInPath().path &&
+                    FileManager.default.contentsEqual(atPath: runtime.serviceBun.path, andPath: runtime.bun.path)),
+                let entry = GatewayLaunchAgentManager.serviceCLIEntrypoint(concrete),
+                let sqliteLibrary,
+                URL(fileURLWithPath: sqliteLibrary).resolvingSymlinksInPath() ==
+                runtime.sqliteLibrary.resolvingSymlinksInPath()
+            else { return false }
+            return GatewayLaunchAgentManager.serviceCLIEntrypoints.contains {
+                runtime.packageRoot.appendingPathComponent($0).resolvingSymlinksInPath() == entry
+            }
+        }
     }
+
+    private static let serviceCLIEntrypoints = [
+        "openclaw.mjs", "dist/index.js", "dist/index.mjs", "dist/entry.js", "dist/entry.mjs",
+    ]
 
     private static let logger = Logger(subsystem: "ai.openclaw", category: "gateway.launchd")
     private static let disableLaunchAgentMarker = "disable-launchagent"
@@ -246,6 +267,7 @@ enum GatewayLaunchAgentManager {
                 allowUnconfigured: allowUnconfigured,
                 runtime: runtime,
                 launchAgentExists: existed)
+            var resumedRuntime: BundledRuntime?
             if !existed, let preserved = whenMissingCLI {
                 guard let executable = preserved.prefix.first, executable.hasPrefix("/"),
                       ["node", "bun"].contains(URL(fileURLWithPath: executable).lastPathComponent)
@@ -255,12 +277,17 @@ enum GatewayLaunchAgentManager {
                 if preserved.hadRuntimePin ||
                     !self.isManagedNode(executable, stateDirectory: AppProfile.current.stateDirectoryURL())
                 {
-                    arguments += ["--runtime-path", preserved.sourcePrefix?.first ?? executable]
+                    let runtimePath = preserved.sourcePrefix?.first ?? executable
+                    arguments += ["--runtime-path", runtimePath]
+                    // A resume onto the stable service Bun needs its build staged there first.
+                    resumedRuntime = preserved.prefix.last.flatMap(BundledRuntime.init(serviceEntrypoint:))
+                        .flatMap { $0.serviceBun.path == runtimePath ? $0 : nil }
                 }
             }
             return await self.runDaemonCommand(
                 arguments,
                 runtime: runtime,
+                serviceRuntime: runtime ?? resumedRuntime,
                 installedCLI: installedCLI,
                 expectedServiceAuthority: custody,
                 checkCurrent: checkCurrent)
@@ -270,12 +297,6 @@ enum GatewayLaunchAgentManager {
         if let error = custody.currentError() { return error }
         guard !self.isLaunchAgentWriteDisabled() else { return "Gateway service changes are disabled" }
         let label = custody.plist.deletingPathExtension().lastPathComponent
-        // Stop runs on every remote/unconfigured launch. Without this profile's plist there is
-        // nothing to boot out, but the CLI would still take shared service-update locks.
-        guard custody.definition.plist != nil else {
-            self.logger.info("launchd disable skipped: no LaunchAgent installed for \(label)")
-            return nil
-        }
         self.logger.info("launchd disable requested via CLI for \(label)")
         return await self.runDaemonCommand(
             ["uninstall"], expectedServiceAuthority: custody, checkCurrent: checkCurrent)
@@ -320,7 +341,7 @@ enum GatewayLaunchAgentManager {
         if allowUnconfigured { arguments.append("--allow-unconfigured") }
         // Existing services retain core's saved runtime intent unless the app update or migration owns replacement.
         if let runtime, !launchAgentExists || replaceRuntime {
-            arguments += ["--runtime", "bun", "--runtime-path", runtime.bun.path]
+            arguments += ["--runtime", "bun", "--runtime-path", runtime.serviceBun.path]
         }
         return arguments
     }
@@ -431,6 +452,7 @@ enum GatewayLaunchAgentManager {
                 launchAgentExists: exists,
                 replaceRuntime: true),
             runtime: runtime,
+            serviceRuntime: runtime,
             installedCLI: environment.map {
                 InstalledServiceCLI(
                     prefix: runtime.cliCommand,
@@ -478,22 +500,10 @@ enum GatewayLaunchAgentManager {
             programArguments: snapshot.programArguments,
             environmentFile: environmentFile,
             environmentWrapper: environmentWrapper),
-            let service = command.firstIndex(of: subcommand), service >= 2,
-            let executable = command.first,
-            ["node", "bun"].contains(URL(fileURLWithPath: executable).lastPathComponent)
+            let service = command.firstIndex(of: subcommand), service >= 2
         else { return nil }
         let prefix = Array(command[..<service])
-        let entry = prefix.dropFirst().drop(while: {
-            ($0 == "--no-install" && URL(fileURLWithPath: executable).lastPathComponent == "bun") ||
-                $0.hasPrefix("--max-old-space-size=") ||
-                $0.hasPrefix("--max-old-space-size-percentage=") || $0.hasPrefix("--max-heap-size=")
-        })
-        guard entry.count == 1, let script = entry.first, script.hasPrefix("/") else { return nil }
-        let url = URL(fileURLWithPath: script)
-        guard url.lastPathComponent == "openclaw.mjs" ||
-            (url.deletingLastPathComponent().lastPathComponent == "dist" &&
-                ["index.js", "index.mjs", "entry.js", "entry.mjs"].contains(url.lastPathComponent))
-        else { return nil }
+        guard self.serviceCLIEntrypoint(prefix) != nil else { return nil }
         return InstalledServiceCLI(
             prefix: self.concreteServicePrefix(prefix),
             sqliteLibrary: snapshot.environment["OPENCLAW_SQLITE_LIBRARY"],
@@ -501,6 +511,20 @@ enum GatewayLaunchAgentManager {
             usesGeneratedEnvironment: snapshot.programArguments.first == "/bin/sh" ||
                 snapshot.programArguments.first == environmentWrapper.path,
             sourcePrefix: prefix)
+    }
+
+    private static func serviceCLIEntrypoint(_ prefix: [String]) -> URL? {
+        guard let executable = prefix.first,
+              ["node", "bun"].contains(URL(fileURLWithPath: executable).lastPathComponent)
+        else { return nil }
+        let entry = prefix.dropFirst().drop(while: {
+            ($0 == "--no-install" && URL(fileURLWithPath: executable).lastPathComponent == "bun") ||
+                $0.hasPrefix("--max-old-space-size=") ||
+                $0.hasPrefix("--max-old-space-size-percentage=") || $0.hasPrefix("--max-heap-size=")
+        })
+        guard entry.count == 1, let script = entry.first, script.hasPrefix("/") else { return nil }
+        let url = URL(fileURLWithPath: script)
+        return self.serviceCLIEntrypoints.contains { url.path.hasSuffix("/" + $0) } ? url : nil
     }
 
     static func kickstart() async -> String? {
@@ -637,12 +661,21 @@ extension GatewayLaunchAgentManager {
         timeout: Double = Self.startupMigrationTolerance,
         quiet: Bool = false,
         runtime: BundledRuntime? = nil,
+        serviceRuntime: BundledRuntime? = nil,
         installedCLI: InstalledServiceCLI? = nil,
         restoring: InstalledServiceCLI? = nil,
         legacyAuthority: InstalledServiceCLI? = nil,
         expectedServiceAuthority: ServiceAuthority? = nil,
         checkCurrent: (@MainActor @Sendable () async throws -> Void)? = nil) async -> String?
     {
+        // An install that pins `serviceRuntime` runs its Bun from the stable service path.
+        var finishStaging: (@Sendable (Bool) -> Void)?
+        if let serviceRuntime, args.first == "install" {
+            do { finishStaging = try await serviceRuntime.stageServiceBun() } catch {
+                return "The Gateway service runtime could not be prepared (\(error.localizedDescription)). " +
+                    "Retry, or reinstall OpenClaw.app if it keeps failing."
+            }
+        }
         let result = await self.runDaemonCommandResult(
             args,
             timeout: timeout,
@@ -653,7 +686,14 @@ extension GatewayLaunchAgentManager {
             legacyAuthority: legacyAuthority,
             expectedServiceAuthority: expectedServiceAuthority,
             checkCurrent: checkCurrent)
-        if case let .failure(message) = result { return message ?? "Gateway daemon command failed" }
+        if case let .failure(message) = result {
+            // The installer can publish the service and then fail, so settle on what is installed.
+            let installedRoot = self.installedServiceCLI()?.prefix.last
+                .flatMap(BundledRuntime.init(serviceEntrypoint:))?.root.resolvingSymlinksInPath()
+            finishStaging?(installedRoot != nil && installedRoot == serviceRuntime?.root.resolvingSymlinksInPath())
+            return message ?? "Gateway daemon command failed"
+        }
+        finishStaging?(true)
         return nil
     }
 
@@ -819,8 +859,9 @@ extension GatewayLaunchAgentManager {
                 runtime: runtime,
                 installedCLI: installedCLI),
             // Only an explicitly selected bundled CLI carries this interop contract.
-            supportsExpectedRuntimePin: runtime != nil &&
-                (installedCLI == nil || installedCLI?.prefix == runtime?.cliCommand))
+            supportsExpectedRuntimePin: runtime.map {
+                installedCLI == nil || installedCLI?.matchesBundledRuntime($0) == true
+            } ?? false)
     }
 
     static func daemonEnvironment(

@@ -91,6 +91,7 @@ const log = createSubsystemLogger("memory");
 const reindexDatabase = new AsyncLocalStorage<{
   manager: MemoryManagerSyncBase;
   database: MemoryIndexDatabase;
+  cacheState: { writesPendingPrune: boolean };
 }>();
 
 export abstract class MemoryManagerSyncBase {
@@ -98,7 +99,7 @@ export abstract class MemoryManagerSyncBase {
   protected closed = false;
 
   protected assertDatabaseMutationCurrent(database: MemoryIndexDatabase): void {
-    if (this.closed || database.closed || !database.db.isOpen || this.database !== database) {
+    if (this.closed || !database.isOpen || this.database !== database) {
       throw new Error("Memory database owner closed or changed before write admission");
     }
     if (database.readOnly) {
@@ -113,6 +114,11 @@ export abstract class MemoryManagerSyncBase {
       throw new Error("Memory reindex database context is closed");
     }
     return shadow ?? this.publishedDatabase;
+  }
+
+  protected get reindexCacheState() {
+    const context = reindexDatabase.getStore();
+    return context?.manager === this ? context.cacheState : undefined;
   }
 
   protected get db(): DatabaseSync {
@@ -136,9 +142,10 @@ export abstract class MemoryManagerSyncBase {
   protected async withReindexDatabase<T>(
     database: MemoryIndexDatabase,
     run: () => Promise<T>,
+    cacheState: { writesPendingPrune: boolean },
   ): Promise<T> {
     try {
-      const result = await reindexDatabase.run({ manager: this, database }, run);
+      const result = await reindexDatabase.run({ manager: this, database, cacheState }, run);
       // Publication attaches the finished file only after its writer closes.
       await database.closeShadow();
       return result;
@@ -228,7 +235,10 @@ export abstract class MemoryManagerSyncBase {
     message: string,
   ): Promise<T>;
   protected abstract getIndexConcurrency(): number;
-  protected abstract pruneEmbeddingCacheIfNeeded(): Promise<void>;
+  protected abstract pruneEmbeddingCacheIfNeeded(
+    recount?: boolean,
+    assertGeneration?: () => void,
+  ): Promise<void>;
   protected abstract resetProviderInitializationForRetry(): void;
   protected abstract assertRequiredProviderAvailable(operation: "search" | "sync"): void;
   protected abstract indexFile(entry: MemoryIndexEntry, source: MemorySource): Promise<void>;
@@ -241,7 +251,6 @@ export abstract class MemoryManagerSyncBase {
     needsFullReindex: boolean;
     targetArchiveFiles?: string[];
     progress?: MemorySyncProgressState;
-    deferIndex?: boolean;
     prefixIndexItems?: MemoryIndexWorkItem[];
   }): Promise<void>;
 
@@ -412,7 +421,7 @@ export abstract class MemoryManagerSyncBase {
         needsFullReindex: params.needsFullSessionReindex ?? params.needsFullReindex,
         targetArchiveFiles: params.targetArchiveFiles,
         progress: params.progress,
-        ...(deferIndex ? { deferIndex: true, prefixIndexItems: memoryPlan?.indexItems } : {}),
+        ...(deferIndex ? { prefixIndexItems: memoryPlan?.indexItems } : {}),
       });
     } else if (deferIndex) {
       await this.indexQueuedFiles(memoryPlan?.indexItems ?? [], params.progress);
@@ -601,7 +610,7 @@ export abstract class MemoryManagerSyncBase {
         : undefined;
       const database = this.database;
       const loaded = await database.prepareVector(resolvedPath, () => {
-        if (this.closed || database.closed || !database.db.isOpen) {
+        if (this.closed || !database.isOpen) {
           throw new Error("Memory database owner closed before vector preparation");
         }
       });

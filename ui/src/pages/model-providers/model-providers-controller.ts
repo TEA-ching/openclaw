@@ -120,10 +120,8 @@ export class ModelProvidersController extends ModelPageController {
   private routeDataObserved = false;
   // Global config writes survive agent switches; their card state does not.
   private agentEpoch = 0;
-  private coreCatalogGeneration = 0;
   private readonly core = new ModelProviderCoreLoader(this, {
     onStart: (reason) => {
-      this.coreCatalogGeneration = this.core.catalogGeneration;
       this.supplemental.beginCoreRefresh(reason === "forced");
       if (reason === "forced") {
         this.querySelectorAll<ModelAccountUsageElement>("openclaw-model-account-usage").forEach(
@@ -132,12 +130,9 @@ export class ModelProvidersController extends ModelPageController {
       }
     },
     onComplete: ({ client, data }) => {
-      const preserveCatalogDiagnostics =
-        this.state.data !== null && this.core.catalogGeneration !== this.coreCatalogGeneration;
-      if (!preserveCatalogDiagnostics) {
-        this.core.resetCatalog();
-      }
-      this.supplemental.adoptCoreData(client, data, { preserveCatalogDiagnostics });
+      // A page refresh settles its feedback; an overlapping picker Retry is best effort.
+      this.core.resetCatalog();
+      this.supplemental.adoptCoreData(client, data);
     },
     onCatalogComplete: (result) => {
       if (this.state.data) {
@@ -148,7 +143,6 @@ export class ModelProvidersController extends ModelPageController {
         });
       }
     },
-    refreshPublication: () => void this.refresh("publication"),
   });
   private readonly refreshPolicy = new UsageRefreshPolicy({
     isLoading: () =>
@@ -467,6 +461,20 @@ export class ModelProvidersController extends ModelPageController {
     this.setState("keyDraft", "");
   }
 
+  // A save warns about its own provider listing, not another provider failure.
+  private providerCatalogWarning(provider: string): string | null {
+    const id = canonicalModelAuthProviderId(provider);
+    const own = (this.state.data?.providerOutcomes ?? []).filter(
+      (outcome) => canonicalModelAuthProviderId(outcome.provider) === id,
+    );
+    if (own.length === 0) {
+      return this.state.data?.catalogError ?? null;
+    }
+    return own.some((outcome) => outcome.status !== "ready")
+      ? t("modelProviders.defaults.discoverFailed")
+      : null;
+  }
+
   private async mutateApiKey(
     provider: string,
     configKey: string,
@@ -497,7 +505,7 @@ export class ModelProvidersController extends ModelPageController {
             this.setState("data", previous);
             return warning;
           }
-          return this.state.data?.error ?? this.state.data?.catalogError ?? null;
+          return this.state.data?.error ?? this.providerCatalogWarning(provider) ?? null;
         },
         setBusy: (busy) => this.setBusy(key, busy),
         setMessage: (message) => {
@@ -639,7 +647,7 @@ export class ModelProvidersController extends ModelPageController {
       installedAgents: undefined,
       providerQuery: this.state.providerQuery,
       onProviderQueryChange: (value) => this.setState("providerQuery", value),
-      onConnectProvider: () => void this.login.open(),
+      onConnectProvider: () => void this.login.open(undefined, undefined, { allowSetup: true }),
       usageClient: !this.mutationBlockedReason() && usageAvailable ? gatewaySnapshot.client : null,
       usageAgentId: this.state.selectedAgentId,
       connected: gatewaySnapshot.phase === "connected",

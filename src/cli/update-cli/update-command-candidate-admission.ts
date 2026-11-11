@@ -1,10 +1,12 @@
 import os from "node:os";
 import path from "node:path";
+import { resolveStateDir } from "../../config/paths.js";
 import { tryReadJson } from "../../infra/json-files.js";
 import {
   runUpdateCandidateAdmission,
   type UpdateCandidateAdmissionResult,
 } from "../../infra/update-candidate-admission.js";
+import { resolveUpdateCandidateAdmissionTimeoutMs } from "../../infra/update-candidate-snapshot.js";
 import { canResolveRegistryVersionForPackageTarget } from "../../infra/update-global.js";
 import { resolveUpdateInstallRoot } from "../../infra/update-install-root.js";
 import { recordUpdateRunPhase, recordUpdateRunStep } from "../../infra/update-run-ledger.js";
@@ -75,6 +77,7 @@ export async function inspectStagedUpdateCandidateAdmission(
     if (!installTarget) {
       throw new Error("Candidate admission requires the resolved package installation.");
     }
+    await target.assertPackageRuntimeCurrent?.();
     // The child cannot attest the installed supervisor's ancestry or handoff exception.
     await inspectUpdateManagedServices({
       ...target,
@@ -111,7 +114,14 @@ export async function inspectStagedUpdateCandidateAdmission(
       candidateRoot: params.candidateRoot,
       nodeRunner,
       env: process.env,
-      timeoutMs: prepared.timeoutMs,
+      timeoutMs:
+        prepared.timeoutMs ??
+        (await resolveUpdateCandidateAdmissionTimeoutMs({
+          config: target.configSnapshot.config,
+          stateDir: resolveStateDir(process.env),
+          env: process.env,
+          stepTimeoutMs: params.timeoutMs,
+        })),
       admission: opts.admission,
       context: {
         protocol: 1,
@@ -241,6 +251,7 @@ export async function withUpdateCandidateAdmission<T>(
   const run = opts.run!;
   try {
     const inspect = async (stage: StagedPackageInstallUpdate): Promise<T> => {
+      await target.assertPackageRuntimeCurrent?.();
       const result = await inspectStagedUpdateCandidateAdmission({
         ...params,
         candidateRoot: stage.root,
@@ -273,6 +284,7 @@ export async function withUpdateCandidateAdmission<T>(
     if (params.stagedPackage) {
       return await inspect(params.stagedPackage);
     }
+    await target.assertPackageRuntimeCurrent?.();
     return await withPrivateStagedPackageInstall(
       {
         root: target.root,

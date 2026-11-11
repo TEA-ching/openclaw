@@ -8,6 +8,10 @@ import {
   readTranscriptEventId,
   readTranscriptEventMessage,
 } from "../../config/sessions/session-accessor.sqlite-read.js";
+import {
+  MANAGED_OUTGOING_IMAGE_ARTIFACT_ID_PREFIX,
+  resolveManagedOutgoingMediaArtifactDownload,
+} from "../../gateway/managed-image-attachments.js";
 import * as operationAdmission from "../../infra/sqlite-worker-operation-admission.js";
 import { sqliteWorkerOwnerProbe as probe } from "../../infra/sqlite-worker-owner-probe.test-support.js";
 import {
@@ -16,10 +20,11 @@ import {
   setActivePluginRegistry,
 } from "../../plugins/runtime.js";
 import {
-  beginSessionWorkAdmission,
+  runExclusiveSessionLifecycleMutation,
   getActiveSessionLifecycleMutationCount,
 } from "../../sessions/session-lifecycle-admission.js";
 import { readAssistantDisplayContent } from "../../shared/assistant-display-content.js";
+import { createDeferredCore } from "../../shared/deferred.js";
 import {
   createChannelTestPluginBase,
   createTestRegistry,
@@ -131,6 +136,7 @@ describe("current-session completion media", () => {
         );
         let available = true;
         let revoked = false;
+        let deliveryWarning = "";
         const revokeOccurrence = () => {
           revoked = true;
           if (revoke === "cancel") {
@@ -175,6 +181,8 @@ describe("current-session completion media", () => {
               { ...job, ...fixture.params.deliveryPlan },
             );
             const result = await dispatchCronDelivery(fixture.params);
+            deliveryWarning =
+              result.diagnostics?.entries.map(({ message }) => message).join("\n") ?? "";
             expect(result.delivered).toBe(stage === "commit");
             if (stage === "commit") {
               expect(result).toMatchObject({
@@ -230,10 +238,32 @@ describe("current-session completion media", () => {
           expect(sendMedia).toHaveBeenCalledTimes(stage === "commit" ? 1 : 0);
           expect(await fixture.messages()).toHaveLength(0);
           if (stage === "commit") {
-            expect(await fixture.records()).toEqual([]);
+            // File deletion is best effort; a durable cleanup claim must stay unservable.
+            const entries = await fixture.records();
+            expect(entries.length, deliveryWarning).toBeLessThanOrEqual(1);
+            for (const entry of entries) {
+              expect(entry).toMatchObject({
+                cleanupPending: true,
+                record: {
+                  sessionKey: fixture.scope.sessionKey,
+                  retentionClass: "transient",
+                  messageId: null,
+                  alt: "report.png",
+                },
+              });
+              expect(
+                await resolveManagedOutgoingMediaArtifactDownload({
+                  sessionKey: fixture.scope.sessionKey,
+                  agentId: "main",
+                  stateDir: state.stateDir,
+                  artifactId: `${MANAGED_OUTGOING_IMAGE_ARTIFACT_ID_PREFIX}${entry.record.attachmentId}`,
+                }),
+              ).toBeNull();
+            }
           }
         } finally {
           cron.stop();
+          await Promise.allSettled(runIsolatedAgentJob.mock.results.map(({ value }) => value));
           admission.mockRestore();
           tts.mockRestore();
           restoreActivePluginRegistrySnapshot(registry);
@@ -364,28 +394,35 @@ describe("current-session completion media", () => {
   it("does not prepare media when the source generation changes while waiting", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
       const fixture = await createCompletionFixture(state);
-      const admission = await beginSessionWorkAdmission({
+      const entered = createDeferredCore();
+      const finish = createDeferredCore();
+      const mutation = runExclusiveSessionLifecycleMutation("background-result", {
         scope: fixture.scope.storePath,
         identities: [fixture.scope.sessionKey, fixture.scope.sessionId],
-        assertAllowed: () => {},
+        run: async () => {
+          entered.resolve();
+          await finish.promise;
+          await replaceSessionEntry(fixture.scope, {
+            sessionId: "replacement-session",
+            lifecycleRevision: "replacement-generation",
+            updatedAt: 3000,
+          });
+        },
       });
+      await entered.promise;
       const commit = fixture.commit();
       try {
         await vi.waitFor(() => expect(getActiveSessionLifecycleMutationCount()).toBe(1));
         expect(await fixture.records()).toEqual([]);
-        await replaceSessionEntry(fixture.scope, {
-          sessionId: "replacement-session",
-          lifecycleRevision: "replacement-generation",
-          updatedAt: 3000,
-        });
-        admission.release();
+        finish.resolve();
+        await mutation;
         await expect(commit).resolves.toMatchObject({ ok: false });
         expect(await fixture.records()).toEqual([]);
         expect(await fixture.messages()).toEqual([]);
         expect(fixture.updates()).toBe(0);
       } finally {
-        admission.release();
-        await commit;
+        finish.resolve();
+        await Promise.all([mutation, commit]);
         await fixture.dispose();
       }
     });

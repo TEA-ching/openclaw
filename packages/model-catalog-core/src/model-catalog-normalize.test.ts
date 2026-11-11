@@ -12,7 +12,7 @@ describe("model catalog normalization", () => {
       api: "openai-completions",
       baseUrl: "https://proxy.example/v1",
       headers: { "x-model": "gpt-5.4" },
-      input: ["text", "image", "document"],
+      input: ["text", "image", "video", "document"],
       reasoning: true,
       contextWindow: 256000,
       contextWindows: [
@@ -312,6 +312,28 @@ describe("model catalog normalization", () => {
     );
 
     expect(catalog?.providers?.openai?.models).toEqual([model]);
+  });
+
+  it("retains a catalog-owned default thinking level", () => {
+    const catalog = normalizeModelCatalog(
+      {
+        providers: {
+          particle: {
+            models: [
+              {
+                id: "particle-ai/particle-1",
+                compat: { defaultThinkingLevel: "high" },
+              },
+            ],
+          },
+        },
+      },
+      { ownedProviders: new Set(["particle"]) },
+    );
+
+    expect(catalog?.providers?.particle?.models[0]?.compat).toEqual({
+      defaultThinkingLevel: "high",
+    });
   });
 
   it("retains an explicitly empty supported reasoning effort list", () => {

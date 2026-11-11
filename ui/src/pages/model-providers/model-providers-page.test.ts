@@ -6,6 +6,7 @@ import type { ModelsProbeResult } from "../../api/types.ts";
 import { createAgentSelectionCapability } from "../../app/agent-selection.ts";
 import type { SelectPicker } from "../../components/select-picker.ts";
 import { currentConfigObject } from "../../lib/config/config-state-model.ts";
+import "../../lib/toast-host.ts";
 import { choosePickerValue, updatePickers } from "../../test-helpers/select-picker.ts";
 import { waitForSolid } from "../../test-helpers/solid-settle.ts";
 import type { DefaultsDraft } from "./data.ts";
@@ -385,6 +386,41 @@ describe("ModelProvidersPage agent scope", () => {
     expect(
       [...form!.querySelectorAll('[role="status"]')].map((message) => message.textContent?.trim()),
     ).toEqual(["Provider anthropic added.", "config.get failed after provider add"]);
+  });
+
+  it.each([
+    ["another provider fails", "ready", undefined],
+    ["the added provider fails", "unavailable", "More models could not be discovered."],
+  ] as const)("provider-add feedback warns only when %s", async (_case, ownStatus, warning) => {
+    const { context, runtimeConfig, request } = createHarness("main");
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (method) =>
+      method === "models.list"
+        ? {
+            models: [],
+            refreshFailed: true,
+            providerOutcomes: [
+              { provider: "anthropic", status: ownStatus },
+              { provider: "ollama", status: "unavailable" },
+            ],
+          }
+        : originalRequest(method),
+    );
+    const page = appendPage(context);
+    await waitForProviders(page);
+    page.setState("addProviderOpen", true);
+    page.setState("addProviderId", "anthropic");
+    page.setState("addProviderKey", "new-provider-key");
+    await page.updateComplete;
+    page.querySelector<HTMLButtonElement>("[data-models-key-dialog] button.primary")!.click();
+    await runtimeConfig.runExternalMutation.mock.results[0]!.value;
+    await drainPageUpdates(page);
+
+    expect(page.state.messages.add).toEqual({
+      kind: "success",
+      text: "Provider anthropic added.",
+      ...(warning ? { warning } : {}),
+    });
   });
 
   it("keeps a newer global-model draft after an agent switch and earlier save", async () => {

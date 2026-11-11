@@ -67,6 +67,73 @@ describe("isSafeBuiltinSegment", () => {
     ).toBe(false);
   });
 
+  it("rejects case-variant builtin tokens (builtin lookup is case-sensitive)", () => {
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["TEST", "-d", "/tmp"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["Cd", "/tmp"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects test/-v predicates: bash evaluates the -v operand subscript (command-injection vector)", () => {
+    // `test -v 'a[$(cmd)]'` runs cmd under bash >= 4.2 because the -v operand's array
+    // subscript is evaluated even inside single quotes.
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["test", "-v", "a[$(touch /tmp/m)]"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["test", "-v", "a[`touch /tmp/m`]"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["[", "-v", "a[$(touch /tmp/m)]", "]"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects test -v operands regardless of position and negation", () => {
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["test", "!", "-v", "a"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["test", "x", "-a", "-v"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+    // Plain variable existence checks now route through approval too (conservative fail-safe).
+    expect(
+      isSafeBuiltinSegment({
+        segment: builtinSegment(["test", "-v", "a"]),
+        platform: "linux",
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["test", String.raw`$'\0\''?v`, "benign"],
+    ["[", "-e", "*.txt", "]"],
+  ])("rejects dynamic predicate source %j", (...argv) => {
+    expect(isSafeBuiltinSegment({ segment: builtinSegment(argv), platform: "linux" })).toBe(false);
+  });
+
   it("returns false on Windows hosts (PowerShell semantics differ)", () => {
     expect(
       isSafeBuiltinSegment({
@@ -146,6 +213,30 @@ describe.skipIf(process.platform === "win32")(
       });
       expect(result.analysisOk).toBe(true);
       expect(result.allowlistSatisfied).toBe(false);
+    });
+
+    it.each([String.raw`test $'\0\''?v benign`, "[ -e *.txt ]"])(
+      "does not auto-allow dynamic predicate source: %s",
+      async (command) => {
+        const result = await evaluateShellAllowlistWithAuthorization({
+          command,
+          allowlist: gitAllowlist,
+          safeBins: new Set(),
+          cwd: "/tmp",
+        });
+        expect(result.analysisOk).toBe(true);
+        expect(result.allowlistSatisfied).toBe(false);
+      },
+    );
+
+    it("allows a static quoted predicate operand", async () => {
+      const result = await evaluateShellAllowlistWithAuthorization({
+        command: "test -d '/tmp/space path' && git status",
+        allowlist: gitAllowlist,
+        safeBins: new Set(),
+        cwd: "/tmp",
+      });
+      expect(result.allowlistSatisfied).toBe(true);
     });
 
     it("environment-mutating builtins still gate", async () => {

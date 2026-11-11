@@ -1,9 +1,9 @@
-/** Tests session-scoped MCP runtime catalog, transport, validation, and lifecycle behavior. */
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+/** Tests session-scoped MCP runtime catalog, transport, validation, and lifecycle behavior. */
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { expectDefined } from "@openclaw/normalization-core";
 import { materializeRequesterScopedMcpToolsForHarnessRun } from "openclaw/plugin-sdk/agent-harness-runtime";
@@ -25,8 +25,11 @@ import {
   createGatewaySchedulerClock,
   createTestGatewayScheduler,
 } from "../test-utils/gateway-scheduler-clock.js";
+import { reserveTestPortListener } from "../test-utils/port-claims.js";
 import { startCatalogRecoveryMcpServer } from "./agent-bundle-mcp-catalog-recovery.test-support.js";
 import { createCombinedSessionMcpRuntime } from "./agent-bundle-mcp-combined.js";
+import { registerMcpDisposalTimeoutCase } from "./agent-bundle-mcp-disposal.test-harness.js";
+import { createConnectionInvalidationMcpFixture } from "./agent-bundle-mcp-invalidation.test-support.js";
 import { completeDeferredSessionMcpRuntimeRetirement } from "./agent-bundle-mcp-manager-cleanup.js";
 import {
   bindSessionMcpRuntimeTestScheduler,
@@ -56,6 +59,7 @@ import { getMcpAppModelContext, updateMcpAppModelContext } from "./mcp-app-model
 import { createMcpProofPluginRegistry } from "./mcp-connection-resolver.test-fixtures.js";
 import { fetchMcpAppView, getMcpAppViewLease } from "./mcp-ui-resource.js";
 import { testing as mcpUiResourceTesting } from "./mcp-ui-resource.test-support.js";
+import { isRecordedModelFallbackStop } from "./model-fallback-stop.js";
 import { createAgentCleanupScope } from "./run-cleanup-timeout.js";
 
 vi.mock("./embedded-agent-mcp.js", async (importOriginal) => {
@@ -565,6 +569,56 @@ describe("session MCP runtime", () => {
     }
   });
 
+  it("reports initialize authentication refusal with the server name without response secrets", async () => {
+    const server = await reserveTestPortListener({
+      offsets: [0],
+      createListener: () =>
+        http.createServer((_req, res) => {
+          res.writeHead(401, {
+            "content-type": "application/json",
+            "www-authenticate": 'Bearer realm="test-header-secret"',
+          });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32001, message: "expired token: test-body-secret" },
+            }),
+          );
+        }),
+    });
+    const runtime = createSessionMcpRuntime({
+      sessionId: "session-auth-refusal",
+      workspaceDir: "/workspace",
+      cfg: {
+        mcp: {
+          servers: {
+            lab: {
+              transport: "streamable-http",
+              url: `http://127.0.0.1:${server.claim.port}/mcp`,
+              headers: { Authorization: "Bearer test-request-secret" },
+            },
+          },
+        },
+      },
+    });
+    try {
+      const catalog = await runtime.getCatalog();
+      expect(catalog.diagnostics).toEqual([
+        expect.objectContaining({
+          serverName: "lab",
+          message: expect.stringContaining("authentication refused (401)"),
+        }),
+      ]);
+      expect(catalog.tools).toEqual([]);
+      expect(JSON.stringify(catalog)).not.toMatch(/test-(?:body|header|request)-secret/);
+    } finally {
+      await runtime.dispose();
+      await server.releaseListener();
+      await server.claim.release();
+    }
+  });
+
   it("redacts credentials from MCP catalog diagnostics", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "bundle-mcp-diagnostic-redaction-"));
     const serverPath = path.join(tempDir, "diagnostic-redaction.mjs");
@@ -746,9 +800,8 @@ describe("session MCP runtime", () => {
       expect(result.content).toEqual([
         {
           type: "text",
-          text: `structuredContent:\n${JSON.stringify(structuredContent, null, 2)}`,
+          text: `structuredContent:\n${JSON.stringify(structuredContent)}`,
         },
-        { type: "text", text: "captured screenshot" },
         { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
         { type: "text", text: "[Report] https://example.com/report" },
         { type: "text", text: "memo body" },
@@ -2768,39 +2821,7 @@ describe("requester-scoped MCP connection resolution", () => {
 });
 
 describe("disposeSession timeout", () => {
-  it(
-    "completes disposal even when the MCP server process ignores shutdown",
-    { timeout: 15_000 },
-    async () => {
-      testing.setBundleMcpDisposeTimeoutMsForTest(50);
-      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "bundle-mcp-dispose-timeout-"));
-      const serverPath = path.join(tempDir, "hanging-close.mjs");
-      const logPath = path.join(tempDir, "server.log");
-
-      await writeListToolsMcpServer({
-        filePath: serverPath,
-        logPath,
-        ignoreShutdown: true,
-      });
-
-      const runtime = await makeStdioRuntime("session-dispose-timeout", "hangingClose", serverPath);
-
-      const catalog = await runtime.getCatalog();
-      expect(catalog.tools).toHaveLength(1);
-
-      const start = Date.now();
-      await runtime.dispose();
-      const elapsed = Date.now() - start;
-
-      expect(elapsed).toBeLessThan(1_000);
-
-      await retireSessionMcpRuntime({
-        sessionId: "session-dispose-timeout",
-        reason: "test cleanup",
-      });
-      await fs.rm(tempDir, { recursive: true, force: true });
-    },
-  );
+  registerMcpDisposalTimeoutCase({ writeListToolsMcpServer, makeStdioRuntime });
 
   it(
     "does not recycle a stateless streamable-http server on HTTP 404",
@@ -3220,7 +3241,9 @@ describe("disposeSession timeout", () => {
         expect(manager.listRuntimeKeys()).toEqual([]);
         const cleanupScope = createAgentCleanupScope();
         await cleanupScope.run(async () => {
-          await expect(materialized.dispose()).rejects.toThrow("could not confirm closure");
+          const failure: unknown = await materialized.dispose().catch((error: unknown) => error);
+          expect(failure).toBeInstanceOf(Error);
+          expect(isRecordedModelFallbackStop(failure)).toBe(true);
           await expect(materialized.dispose()).rejects.toThrow("could not confirm closure");
         });
         expect(cleanupScope.outcome).toBe("uncertain");
@@ -3308,53 +3331,34 @@ describe("disposeSession timeout", () => {
     { timeout: LIST_TOOLS_TEST_DEADLINE_MS },
     async ({ signal }) => {
       const tempDir = makeTempDir(tempDirs, "bundle-mcp-inflight-connect-");
-      const invalidatingServer = {
-        serverName: "invalidatingServer",
-        serverPath: path.join(tempDir, "invalidating-server.mjs"),
-        logPath: path.join(tempDir, "invalidating-server.log"),
-      };
-      const slowConnectServer = {
-        serverName: "slowConnectServer",
-        serverPath: path.join(tempDir, "slow-connect-server.mjs"),
-        logPath: path.join(tempDir, "slow-connect-server.log"),
-      };
-
-      await writeListToolsMcpServer({
-        filePath: invalidatingServer.serverPath,
-        logPath: invalidatingServer.logPath,
-        capabilities: { tools: { listChanged: true } },
-        notifyListChangedOnInitialized: true,
-      });
-      await writeListToolsMcpServer({
-        filePath: slowConnectServer.serverPath,
-        logPath: slowConnectServer.logPath,
-        initializeDelayMs: 200,
-      });
-
       testing.setBundleMcpCatalogListTimeoutMsForTest(4_000);
-
-      const runtime = await getOrCreateSessionMcpRuntime({
-        sessionId: "session-inflight-connect-test",
-        sessionKey: "agent:test:session-inflight-connect-test",
-        workspaceDir: "/workspace",
-        cfg: {
-          mcp: {
-            servers: Object.fromEntries(
-              [invalidatingServer, slowConnectServer].map(({ serverName, serverPath }) => [
-                serverName,
-                {
-                  command: process.execPath,
-                  args: [serverPath],
-                  connectionTimeoutMs: 2_000,
-                },
-              ]),
-            ),
-          },
-        },
-      });
+      const { invalidatingServer, slowConnectServer, invalidatingRuntime, runtime } =
+        await createConnectionInvalidationMcpFixture(tempDir, receipts.endpoint);
 
       try {
         const firstCatalog = runtime.getCatalog();
+        // Hold the sibling handshake, not a startup-dependent delay, across invalidation.
+        await withinTest(
+          Promise.all([
+            fixtureEventBeforeSettlement(
+              invalidatingServer.logPath,
+              "recv notifications/initialized",
+              firstCatalog,
+            ),
+            fixtureEventBeforeSettlement(
+              slowConnectServer.logPath,
+              "recv initialize",
+              firstCatalog,
+            ),
+          ]),
+          signal,
+        );
+        await waitForRuntimeState(
+          () => invalidatingRuntime.peekCatalog() !== null,
+          "invalidating server's initial catalog published",
+          signal,
+        );
+        receipts.release(invalidatingServer.logPath, "invalidate-while-connecting");
         await withinTest(
           fixtureEventBeforeSettlement(
             invalidatingServer.logPath,
@@ -3363,8 +3367,15 @@ describe("disposeSession timeout", () => {
           ),
           signal,
         );
+        await waitForRuntimeState(
+          () => invalidatingRuntime.peekCatalog() === null,
+          "client processed catalog invalidation while sibling initialization is held",
+          signal,
+        );
 
-        const secondCatalog = await runtime.getCatalog();
+        const secondCatalogPromise = runtime.getCatalog();
+        receipts.release(slowConnectServer.logPath, "finish-connecting");
+        const secondCatalog = await secondCatalogPromise;
         await firstCatalog;
 
         expect(Object.keys(secondCatalog.servers).toSorted()).toEqual([
@@ -3373,6 +3384,8 @@ describe("disposeSession timeout", () => {
         ]);
         expect(secondCatalog.diagnostics ?? []).toEqual([]);
       } finally {
+        receipts.release(invalidatingServer.logPath, "invalidate-while-connecting");
+        receipts.release(slowConnectServer.logPath, "finish-connecting");
         await runtime.dispose();
       }
     },

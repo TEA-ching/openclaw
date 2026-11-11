@@ -61,6 +61,7 @@ import {
   type SetupTurnSuccess,
 } from "./setup-inference-probe-work.js";
 import { resolveSetupInferenceProfileError } from "./setup-inference-profile.js";
+import { createSystemAgentUserTurnRecorder } from "./user-turn-transcript.js";
 import {
   captureSystemAgentOwnerPluginArtifacts,
   createSystemAgentVerifiedInferenceBinding,
@@ -122,6 +123,7 @@ export async function runSetupInferenceTurn(params: {
     "system-agent.setup-inference",
   );
   let successfulAuth: AgentExecutionAuthBinding | undefined;
+  const prompt = params.prompt ?? SETUP_INFERENCE_TEST_PROMPT;
   const shared = {
     preparedRunAdmission,
     sessionId: runId,
@@ -133,7 +135,8 @@ export async function runSetupInferenceTurn(params: {
     workspaceDir,
     agentDir: route.agentDir,
     config: route.runConfig,
-    prompt: params.prompt ?? SETUP_INFERENCE_TEST_PROMPT,
+    prompt,
+    userTurnTranscriptRecorder: createSystemAgentUserTurnRecorder(prompt),
     provider: route.provider,
     model: route.model,
     timeoutMs,
@@ -156,7 +159,7 @@ export async function runSetupInferenceTurn(params: {
     if (cliError) {
       return failed("unavailable", cliError);
     }
-    const profileError = resolveSetupInferenceProfileError(route, workspaceDir, deps);
+    const profileError = await resolveSetupInferenceProfileError(route, workspaceDir, deps);
     if (profileError) {
       return failed("auth", profileError);
     }
@@ -581,7 +584,7 @@ export async function verifySetupInferenceConfig(
     params.config,
     params.agentId,
     {
-      loadAuthProfileStoreForRuntime: deps.loadAuthProfileStoreForRuntime,
+      loadAuthProfileStoreForRuntimeAsync: deps.loadAuthProfileStoreForRuntimeAsync,
       modelTarget: params.modelTarget,
     },
     params.configSnapshot,
@@ -639,7 +642,7 @@ export async function verifySetupInferenceConfig(
         currentConfig,
         route.agentId,
         {
-          loadAuthProfileStoreForRuntime: deps.loadAuthProfileStoreForRuntime,
+          loadAuthProfileStoreForRuntimeAsync: deps.loadAuthProfileStoreForRuntimeAsync,
           modelTarget: params.modelTarget,
         },
         currentSnapshot,
@@ -712,7 +715,7 @@ export async function completeSetupInferenceConfig(
   const route = await resolveSystemAgentConfiguredRouteFromConfig(
     params.config,
     params.agentId,
-    { loadAuthProfileStoreForRuntime: deps.loadAuthProfileStoreForRuntime },
+    { loadAuthProfileStoreForRuntimeAsync: deps.loadAuthProfileStoreForRuntimeAsync },
     params.configSnapshot,
   );
   if (!route) {

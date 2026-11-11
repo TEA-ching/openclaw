@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectProviderError } from "../../../../packages/ai/src/utils/provider-error.js";
+import { buildKnownAgentRunFailureReplyPayload } from "../../../auto-reply/reply/agent-runner-failure-reply.js";
 import { buildRealtimeVoiceAgentErrorProviderResult } from "../../../talk/agent-run-control.js";
 import type { AgentRunAttemptTerminal } from "../../agent-run-terminal-outcome.js";
 import { formatBillingErrorMessage } from "../../embedded-agent-helpers.js";
@@ -109,12 +110,63 @@ async function expectFailure(input: Input): Promise<FailoverError> {
 }
 
 describe("assistant failure recovery", () => {
+  it("stops unchanged retries and model fallback after prompt projection loses its user turn", async () => {
+    let attempts = 0;
+    const run = vi.fn(async () => {
+      const input = makeInput("Model prompt projection lost its canonical user turn");
+      input.normalizedAttempt.attemptAssistant!.content = [];
+      for (;;) {
+        attempts += 1;
+        const outcome = await handleEmbeddedAssistantFailure(input);
+        if (outcome.action !== "retry") {
+          throw new Error("failure was not surfaced");
+        }
+        input.emptyErrorRetries = outcome.emptyErrorRetries;
+      }
+    });
+    await expect(
+      runWithModelFallback({
+        cfg: undefined,
+        provider: "anthropic",
+        model: "test-model",
+        manifestPlugins: [],
+        fallbacksOverride: ["openai/fixture-next", "groq/fixture-last"],
+        skipAuthProfileRuntime: true,
+        run,
+      }),
+    ).rejects.toThrow("Model prompt projection lost its canonical user turn");
+    expect(run).toHaveBeenCalledOnce();
+    expect(attempts).toBe(1);
+  });
+
   beforeEach(() => {
     vi.spyOn(log, "warn").mockImplementation(() => {});
   });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it("explains retry exhaustion without replacing the raw provider failure", async () => {
+    const providerError = "429 rate limit exceeded. Please try again in 221ms.";
+    const input = makeInput(providerError);
+    input.rateLimitRetriesExhausted = 9;
+    const failure = await expectFailure(input);
+    expect(failure).toMatchObject({
+      message: expect.stringContaining("9 automatic retries"),
+      rateLimitRetriesExhausted: 9,
+      reason: "rate_limit",
+      status: 429,
+      rawError: providerError,
+    });
+    expect(input.normalizedAttempt.attemptAssistant?.errorMessage).toBe(providerError);
+    expect(
+      buildKnownAgentRunFailureReplyPayload({
+        err: failure,
+        sessionCtx: {},
+        resolvedVerboseLevel: "off",
+      })?.text,
+    ).toContain("9 automatic retries");
   });
 
   it.each([
@@ -334,7 +386,10 @@ describe("assistant failure recovery", () => {
 
   it.each([
     [{ kind: "timeout", phase: "compaction", source: "observation" }, {}],
-    [{ kind: "timeout", phase: "tool_execution", source: "runtime" }, { stopReason: "timeout" }],
+    [
+      { kind: "timeout", phase: "tool_execution", source: "runtime" },
+      { stopReason: "timeout", timeoutPhase: "tool_execution" },
+    ],
     [
       { kind: "timeout", phase: "prompt", source: "idle" },
       { stopReason: "timeout", timeoutPhase: "provider", providerStarted: true },

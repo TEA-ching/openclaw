@@ -1,10 +1,9 @@
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ModelCatalogResult } from "../../api/types.ts";
-import { t } from "../../i18n/index.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { invalidateModelCatalogCache } from "../../lib/model-catalog-cache.ts";
-import { loadModelCatalog, modelCatalogRefreshError } from "../../lib/model-catalog-store.ts";
-import { loadModelProvidersData, type ModelProvidersData } from "./load.ts";
+import { loadModelCatalog } from "../../lib/model-catalog-store.ts";
+import { catalogDiscoveryError, loadModelProvidersData, type ModelProvidersData } from "./load.ts";
 import type { ControllerHost } from "./page-controller.ts";
 
 export type ModelProviderRefreshReason = "publication" | "replacement" | "forced";
@@ -19,17 +18,14 @@ type CoreLoadOptions = {
   onStart: (reason: ModelProviderRefreshReason) => void;
   onComplete: (result: CoreRequest & { data: ModelProvidersData }) => void;
   onCatalogComplete: (result: ModelCatalogResult) => void;
-  refreshPublication: () => void;
 };
 
 export class ModelProviderCoreLoader {
   private active = false;
-  private publicationPending = false;
   private catalogRequest: AbortController | null = null;
   catalogError: string | null = null;
-  // The latest explicit Retry includes one that has already settled.
-  catalogGeneration = 0;
   private request: AbortController | null = null;
+  private publicationPending = false;
 
   constructor(
     private readonly host: ControllerHost,
@@ -63,7 +59,6 @@ export class ModelProviderCoreLoader {
     const request = new AbortController();
     const ownsResult = () => this.catalogRequest === request && isCurrent();
     this.catalogRequest = request;
-    this.catalogGeneration += 1;
     this.catalogError = null;
     this.host.requestUpdate();
     try {
@@ -73,10 +68,7 @@ export class ModelProviderCoreLoader {
         signal: request.signal,
       });
       if (ownsResult()) {
-        this.catalogError = modelCatalogRefreshError(
-          result,
-          t("modelProviders.defaults.discoverFailed"),
-        );
+        this.catalogError = catalogDiscoveryError(result);
         this.options.onCatalogComplete(result);
       }
     } catch (failure) {
@@ -86,8 +78,8 @@ export class ModelProviderCoreLoader {
     } finally {
       if (this.catalogRequest === request) {
         this.catalogRequest = null;
+        this.refreshPendingPublication(client, agentId);
         this.host.requestUpdate();
-        this.flushPublication();
       }
     }
   }
@@ -101,13 +93,7 @@ export class ModelProviderCoreLoader {
       this.publicationPending = true;
       return;
     }
-    if (reason === "publication") {
-      if (this.publicationPending) {
-        // Auth refresh can create a display copy after this publication was queued.
-        invalidateModelCatalogCache(client, { agentId });
-      }
-      this.publicationPending = false;
-    }
+    this.publicationPending = false;
     this.request?.abort();
     const request = new AbortController();
     this.request = request;
@@ -133,27 +119,26 @@ export class ModelProviderCoreLoader {
       if (this.request === request) {
         this.request = null;
         this.active = false;
+        this.refreshPendingPublication(client, agentId);
         this.host.requestUpdate();
-        this.flushPublication();
       }
     }
   }
 
+  private refreshPendingPublication(client: GatewayBrowserClient, agentId: string): void {
+    if (this.publicationPending && !this.active && !this.catalogLoading) {
+      // A completed read may have republished facts captured before the notification.
+      invalidateModelCatalogCache(client, { agentId });
+      void this.refresh(client, agentId, "publication");
+    }
+  }
+
   invalidate(): void {
-    this.resetCatalog();
     this.publicationPending = false;
+    this.resetCatalog();
     this.active = false;
     this.request?.abort();
     this.request = null;
     this.host.requestUpdate();
-  }
-
-  private flushPublication(): void {
-    // Publish after the current completion has applied its data.
-    queueMicrotask(() => {
-      if (this.publicationPending && !this.active && !this.catalogLoading) {
-        this.options.refreshPublication();
-      }
-    });
   }
 }

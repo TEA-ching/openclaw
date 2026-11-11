@@ -10,6 +10,7 @@ import {
   prepareAgentRunAdmission,
 } from "./admitted-run-context.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
+import { createProcessTool } from "./bash-tools.process.js";
 import * as worker from "./code-mode-executor.js";
 import * as codeModeState from "./code-mode-state.js";
 import { waitForPendingBridgeSettlement } from "./code-mode-state.js";
@@ -19,12 +20,14 @@ import {
   createCodeModeHarness,
   pluginTool,
   pluginToolWithExecute,
+  mcpTool,
   resetCodeModeTestState,
   resultDetails,
   testing,
   runUntilCompleted,
   waitUntilCompleted,
 } from "./code-mode.test-support.js";
+import { addClientToolsToToolCatalog } from "./tool-search-catalog.js";
 import { clearToolSearchCatalog } from "./tool-search.js";
 import { jsonResult, type AnyAgentTool } from "./tools/common.js";
 import {
@@ -47,6 +50,94 @@ afterEach(async () => {
 });
 
 describe("Code Mode wait, scope, and suspended runs", () => {
+  it.each([-60_000, 60_000])(
+    "expires a parked run after its TTL despite a %d ms wall-clock step",
+    async (wallStep) => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+      const { exec } = harness([], { codeMode: { snapshotTtlSeconds: 60 } });
+      const first = resultDetails(
+        await exec.execute("clock-step", { code: 'await yield_control(); return "done";' }),
+      );
+      const state = testing.activeRuns.get(String(first.runId))!;
+      expect(state).toBeDefined();
+      vi.setSystemTime(Date.now() + wallStep);
+      await exec.execute("clock-step-2", { code: 'await yield_control(); return "done";' });
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(state.owner.signal.aborted).toBe(false);
+      expect(testing.activeRuns.has(String(first.runId))).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.owner.signal.aborted).toBe(true);
+      expect(testing.activeRuns.has(String(first.runId))).toBe(false);
+    },
+  );
+
+  it.each(["native", "client-shadow", "mcp", "cleared", "denied"] as const)(
+    "offers only executable native process guidance for a %s catalog",
+    async (kind) => {
+      const target =
+        kind === "mcp"
+          ? mcpTool({ name: "process", serverName: "remote", toolName: "process" })
+          : createProcessTool({ scopeKey: "wait-guidance" });
+      const fixture = harness([target]);
+      if (kind === "client-shadow") {
+        addClientToolsToToolCatalog({
+          catalogRef: fixture.catalogRef,
+          enabled: true,
+          tools: [pluginTool("process", "Client process")],
+        });
+      }
+      if (kind === "cleared") {
+        clearToolSearchCatalog(fixture.ctx);
+      }
+      const wait =
+        kind === "denied"
+          ? createCodeModeTools({ ...fixture.ctx, toolExecutionAllow: ["read"] })[1]!
+          : fixture.wait;
+      const failure = await wait.execute("wrong-id", { runId: "shell-session-id" }).catch(String);
+      expect(failure).toContain("Only the top-level runId");
+      expect(failure).toContain("This error does not mean earlier actions had no effect");
+      if (kind === "native") {
+        expect(failure).toContain(
+          'poll that same session with process using action: "poll" in a new exec',
+        );
+      } else {
+        expect(failure).not.toContain('action: "poll"');
+      }
+    },
+  );
+
+  it("uses the current catalog after replacement for missing-run guidance", async () => {
+    const fixture = harness([createProcessTool({ scopeKey: "wait-replacement" })]);
+    await expect(fixture.wait.execute("before", { runId: "missing" })).rejects.toThrow(
+      'action: "poll"',
+    );
+    applyCodeModeCatalog({
+      ...fixture.ctx,
+      tools: [...fixture.tools, pluginTool("replacement", "Replacement")],
+    });
+    const failure = await fixture.wait.execute("after", { runId: "missing" }).catch(String);
+    expect(failure).toContain("review earlier exec/wait results");
+    expect(failure).not.toContain('action: "poll"');
+  });
+
+  it("rejects a completed run without replaying its action", async () => {
+    const target = pluginTool("one_action", "One action");
+    const { exec, wait } = harness([target]);
+    const first = resultDetails(
+      await exec.execute("once", {
+        code: 'await one_action({}); await yield_control(); return "done";',
+      }),
+    );
+    expect(first.status).toBe("waiting");
+    expect(resultDetails(await wait.execute("resume", { runId: first.runId }))).toMatchObject({
+      status: "completed",
+      value: "done",
+    });
+    await expect(wait.execute("stale", { runId: first.runId })).rejects.toThrow(
+      "This ID is unknown or no longer resumable",
+    );
+    expect(target.execute).toHaveBeenCalledOnce();
+  });
   it("keeps one execution allowance across event-driven required waits", async () => {
     vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     const releases = [createDeferred(), createDeferred()];
@@ -451,46 +542,13 @@ describe("Code Mode wait, scope, and suspended runs", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(signal.aborted).toBe(true);
       await expect(wait.execute("expired-wait", { runId: parked.runId })).rejects.toThrow(
-        "code mode run is unavailable or expired",
+        "This error does not mean earlier actions had no effect",
       );
       expect(target.execute).toHaveBeenCalledOnce();
       expect(testing.activeRuns.size).toBe(0);
     } finally {
       completion.resolve();
     }
-  });
-
-  it("preserves accepted output when wait expiry exceeds the Date range", async () => {
-    const target = pluginTool("expiry_fixture", "Expiry fixture");
-    const { exec, wait } = harness([target], { codeMode: { snapshotTtlSeconds: 1 } });
-    const limit = 8_640_000_000_000_000;
-    const now = vi.spyOn(Date, "now").mockReturnValue(limit - 1_000);
-    let details: Record<string, unknown>;
-    try {
-      const input = {
-        code: `text("delivered"); await yield_control();
-        text("accepted first"); await expiry_fixture({}); text("accepted inline"); await yield_control("pause"); return "done";`,
-      };
-      const first = resultDetails(await exec.execute("park", input));
-      expect(first).toMatchObject({
-        status: "waiting",
-        output: [{ type: "text", text: "delivered" }],
-      });
-      now.mockReturnValue(limit - 1);
-      details = resultDetails(await wait.execute("resume", { runId: first.runId }));
-    } finally {
-      now.mockRestore();
-    }
-    expect(details).toMatchObject({
-      status: "failed",
-      error: "code mode run expiry is unavailable.",
-      output: [
-        { type: "text", text: "accepted first" },
-        { type: "text", text: "accepted inline" },
-      ],
-    });
-    expect(target.execute).toHaveBeenCalledOnce();
-    expect(testing.activeRuns.size).toBe(0);
   });
 
   describe("suspended-run owner scope", () => {
@@ -533,7 +591,7 @@ describe("Code Mode wait, scope, and suspended runs", () => {
     expect(first.status).toBe("waiting");
     const pending = wait.execute("wait-a", { runId: first.runId });
     await expect(wait.execute("wait-b", { runId: first.runId })).rejects.toThrow(
-      "already being resumed",
+      "Use that wait’s result before deciding the next step",
     );
     expect(resultDetails(await pending)).toMatchObject({ status: "completed", value: "done" });
   });

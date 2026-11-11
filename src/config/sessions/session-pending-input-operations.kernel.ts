@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { MAX_PAYLOAD_BYTES } from "../../gateway/payload-limits.js";
 import {
   executeSqliteQuerySync,
@@ -27,7 +26,7 @@ import {
   type SessionPendingInputRow,
 } from "./session-accessor.sqlite-pending-inputs.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
-import { readTranscriptMessageByScopedIdempotencyKey } from "./session-accessor.sqlite-transcript-store.js";
+import { readTranscriptMessageByScopedIdempotencyKey } from "./session-accessor.sqlite-transcript-identity.js";
 import {
   readSessionActorTransactionState,
   writableSessionActorMap,
@@ -99,7 +98,6 @@ export function readPendingInput(database: OpenClawAgentDatabase, input: Pending
   );
 }
 
-/** Incognito uses this same kernel in its process-held owner until the actor cutover. */
 export function mutatePendingInput(
   input: PendingInputMutation,
   { writeTransaction, admit }: Pick<AgentWorkerOperationContext, "writeTransaction" | "admit">,
@@ -150,9 +148,9 @@ export function mutatePendingInput(
             );
           }
         }
+        // Native SDK completion uses only "complete"; stage and finish execute in workers.
         if (input.kind === "stage") {
-          const snapshot = readPendingInputStage(current, input, row);
-          if (!isDeepStrictEqual(snapshot, input.expected)) {
+          if (row?.input_id !== input.expected.existing?.input_id) {
             throw new SessionPendingInputCustodyError(
               "Pending input changed before staging committed",
             );
@@ -211,7 +209,7 @@ export function mutatePendingInput(
               "Pending input staging omitted its postimage",
             );
           }
-          if (actor) {
+          if (actor && receipt.stagedInput.consumed_event_id === null) {
             actor.pendingInputs = writableSessionActorMap(actor.pendingInputs);
             actor.pendingInputs.set(input.idempotencyKey, receipt.stagedInput);
           }

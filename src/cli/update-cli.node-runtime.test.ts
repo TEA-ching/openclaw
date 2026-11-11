@@ -180,7 +180,8 @@ describe("update-cli", () => {
 
       await updateCommand({ dryRun: true });
       if (command !== "gateway") {
-        expect(getLogOutput()).toContain("Restart the Gateway you launched manually");
+        expect(getLogOutput()).toContain("Gateway service inspection is unavailable");
+        expect(getLogOutput()).toContain("openclaw gateway status --deep");
       }
 
       expect(serviceReadCommand).toHaveBeenCalledTimes(2);
@@ -226,7 +227,7 @@ describe("update-cli", () => {
       });
       primeNpmChannelTag("latest", VERSION);
       vi.mocked(fetchNpmPackageTargetStatus).mockResolvedValue(
-        packageTargetStatus({ version: VERSION, nodeEngine: ">=24.16.0 <25 || >=26.1.0" }),
+        packageTargetStatus({ version: VERSION, nodeEngine: ">=24.22.1 <25 || >=26.12.1" }),
       );
       nodeVersionSatisfiesEngine.mockImplementation(
         (version) => fallback && version === process.versions.node,
@@ -320,10 +321,10 @@ describe("update-cli", () => {
           .join("");
         expect(getErrorOutput()).toContain(captureWarnings);
         expect(getErrorOutput()).toContain(
-          `Required: openclaw@${VERSION} Node >=24.16.0 <25 || >=26.1.0; detected: Node 22.23.1 at ${serviceNode}`,
+          `Required: openclaw@${VERSION} Node >=24.22.1 <25 || >=26.12.1; detected: Node 22.23.1 at ${serviceNode}`,
         );
         expect(getErrorOutput()).toContain(
-          `broken TEXT decoder\n${runtimeRecovery.expectedPlainRecovery(VERSION, "24.16.0", writable ? "refresh" : "owner", "unset OPENCLAW_HOME OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH OPENCLAW_PROFILE OPENCLAW_GATEWAY_PORT OPENCLAW_LAUNCHD_LABEL OPENCLAW_SYSTEMD_UNIT OPENCLAW_WINDOWS_TASK_NAME OPENCLAW_WORKSPACE_DIR", root, writable ? undefined : serviceNode)}`,
+          `broken TEXT decoder\n${runtimeRecovery.expectedPlainRecovery(VERSION, "24.22.1", writable ? "refresh" : "owner", "unset OPENCLAW_HOME OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH OPENCLAW_PROFILE OPENCLAW_GATEWAY_PORT OPENCLAW_LAUNCHD_LABEL OPENCLAW_SYSTEMD_UNIT OPENCLAW_WINDOWS_TASK_NAME OPENCLAW_WORKSPACE_DIR", root, writable ? undefined : serviceNode)}`,
         );
         expectNoSideEffects(
           updateNpmInstalledPlugins,
@@ -339,9 +340,11 @@ describe("update-cli", () => {
           run: { status: "failed" },
         });
         expect(inferenceRepair).not.toHaveBeenCalled();
-        expect(freshRestartCalls()).toHaveLength(0);
+        expect(freshRestartCalls()).toHaveLength(1);
         expect(serviceRestart).not.toHaveBeenCalled();
         expect((await serviceReadCommand(process.env))?.programArguments[0]).toBe(serviceNode);
+        expect(getErrorOutput()).toContain("openclaw update repair");
+        expect(getLogOutput() + getErrorOutput()).not.toMatch(/keep the gateway stopped/i);
       }
       expect(packageInstallCommandCall()).toBeUndefined();
     },
@@ -417,7 +420,7 @@ describe("update-cli", () => {
     );
 
     expect(lastWriteJsonCall()).toMatchObject({
-      reason: "node-runtime-preflight",
+      reason: "preflight-node-runtime-incompatible",
       failedStep: {
         recoverySteps: runtimeRecovery.expectedManagedRuntimeRecoverySteps("nvm", root),
       },
@@ -425,7 +428,7 @@ describe("update-cli", () => {
     expect(packageInstallCommandCall()?.[0]).toBeUndefined();
     expect(serviceStop).not.toHaveBeenCalled();
     expect(defaultRuntime.exit).not.toHaveBeenCalled();
-    expect(listUpdateRuns({ limit: 1 })[0]?.reason).toBe("node-runtime-preflight");
+    expect(listUpdateRuns({ limit: 1 })[0]?.reason).toBe("preflight-node-runtime-incompatible");
     expect(defaultRuntime.error).toHaveBeenCalledWith(
       expect.stringContaining(
         `Node 22.18.0: node:sqlite truncates TEXT at embedded NUL (nodejs/node#61954)\n${runtimeRecovery.expectedPlainRecovery("2026.5.20", "24.16.0", "refresh", undefined, root).replace("3. Install and select Node 24.16.0 using your system package manager or https://nodejs.org/en/download.", `3. Run \`${runtimeRecovery.expectedRuntimeSelectionCommand("nvm", "24.16.0")}\`.`)}`,

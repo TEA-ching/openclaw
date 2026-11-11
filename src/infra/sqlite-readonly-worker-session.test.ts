@@ -18,6 +18,8 @@ import { createSqliteWorkerTransferOwner } from "./sqlite-worker-transfer.js";
 
 type Send = (message: unknown, callback: (error: Error | null) => void) => boolean;
 class MockChild extends EventEmitter {
+  ref = vi.fn();
+  unref = vi.fn();
   stdout = new EventEmitter();
   stderr = new EventEmitter();
   send = vi.fn<Send>((_message, callback) => {
@@ -355,14 +357,20 @@ it.each([
       emitChildProcessSpawnSample();
       setDiagnosticsEnabledForProcess(true);
       const { child } = createSession("/usr/bin/node");
-      expect(mock.spawn).toHaveBeenCalledWith(execPath, expect.any(Array), expect.any(Object));
+      expect(mock.spawn).toHaveBeenCalledWith(
+        execPath,
+        expect.any(Array),
+        expect.objectContaining({ windowsHide: true }),
+      );
       now = 60_000;
       emitChildProcessSpawnSample();
       expect(events).toEqual([]);
       child.emit("spawn");
       now = 120_000;
       emitChildProcessSpawnSample();
-      expect(events).toEqual([expect.objectContaining({ family, count: 1 })]);
+      expect(events).toEqual([
+        expect.objectContaining({ family, operation: "sqlite.session.native", count: 1 }),
+      ]);
     } finally {
       process.execPath = originalExecPath;
       stop();

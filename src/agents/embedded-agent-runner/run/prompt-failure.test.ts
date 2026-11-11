@@ -92,6 +92,46 @@ function makeParams(overrides: FixtureOptions = {}): Params {
 }
 
 describe("handleEmbeddedPromptFailure", () => {
+  it("explains retry exhaustion without changing structured provider facts", async () => {
+    const providerError = "429 rate limit exceeded. Please try again in 221ms.";
+    const original = new FailoverError(providerError, {
+      reason: "rate_limit",
+      status: 429,
+      code: "rate_limit_exceeded",
+      rawError: providerError,
+      provider: "mock",
+      model: "model",
+      suspend: true,
+    });
+    const params = makeParams({
+      promptError: original,
+      failover: { advanceAuthProfile: vi.fn(async () => false) },
+    });
+    params.rateLimitRetriesExhausted = 9;
+    const failure: unknown = await handleEmbeddedPromptFailure(params).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      message: expect.stringContaining("9 automatic retries"),
+      rateLimitRetriesExhausted: 9,
+      reason: "rate_limit",
+      status: 429,
+      code: "rate_limit_exceeded",
+      rawError: providerError,
+      provider: "mock",
+      model: "model",
+      suspend: true,
+    });
+    expect(original.message).toBe(providerError);
+    expect(
+      buildKnownAgentRunFailureReplyPayload({
+        err: failure,
+        sessionCtx: {},
+        resolvedVerboseLevel: "off",
+      })?.text,
+    ).toContain("9 automatic retries");
+  });
+
   it("preserves terminal preflight identity and public copy despite a retryable diagnostic", async () => {
     const diagnostic = new Error("404 No managed agent resource found: session-fixture");
     const userMessage =
@@ -207,11 +247,15 @@ describe("handleEmbeddedPromptFailure", () => {
       const fields = resolveAgentRunErrorLifecycleFields(error, undefined);
       expect(fields).toEqual({
         stopReason: "timeout",
-        ...(phase === "prompt" ? { timeoutPhase: "provider", providerStarted: true } : {}),
+        ...(phase === "prompt"
+          ? { timeoutPhase: "provider", providerStarted: true }
+          : phase === "tool_execution"
+            ? { timeoutPhase: "tool_execution" }
+            : {}),
       });
       expect(
         buildAgentRunTerminalOutcomeFromLifecycleEvent({ phase: "error", data: fields }).reason,
-      ).toBe(phase === "prompt" ? "hard_timeout" : "timed_out");
+      ).toBe(phase === "compaction" ? "timed_out" : "hard_timeout");
     },
   );
 
@@ -231,7 +275,11 @@ describe("handleEmbeddedPromptFailure", () => {
     params.normalizedAttempt.attempt.promptTimeoutOutcome = { providerStarted: true };
     const error = await handleEmbeddedPromptFailure(params).catch((failure: unknown) => failure);
     const fields = resolveAgentRunErrorLifecycleFields(error, undefined);
-    expect(fields).toEqual({ stopReason: "timeout", providerStarted: true });
+    expect(fields).toEqual({
+      stopReason: "timeout",
+      timeoutPhase: "tool_execution",
+      providerStarted: true,
+    });
     expect(
       buildAgentRunTerminalOutcomeFromLifecycleEvent({ phase: "error", data: fields }).reason,
     ).toBe("hard_timeout");
@@ -250,7 +298,11 @@ describe("handleEmbeddedPromptFailure", () => {
 
       expect(resolveAgentRunErrorLifecycleFields(error, undefined)).toEqual({
         stopReason: "timeout",
-        ...(phase === "prompt" ? { timeoutPhase: "provider", providerStarted: true } : {}),
+        ...(phase === "prompt"
+          ? { timeoutPhase: "provider", providerStarted: true }
+          : phase === "tool_execution"
+            ? { timeoutPhase: "tool_execution" }
+            : {}),
       });
       expect(params.failover.advanceAuthProfile).not.toHaveBeenCalled();
       expect(error).toHaveProperty("cause", params.terminal.promptError);

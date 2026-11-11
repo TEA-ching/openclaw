@@ -13,6 +13,7 @@ const {
   definitelyDead,
   container,
   darwinCommand,
+  nativeDarwinCensus,
   rosetta,
   windows,
   fixturePath,
@@ -26,6 +27,7 @@ const {
   definitelyDead: vi.fn(),
   container: vi.fn(),
   darwinCommand: vi.fn(),
+  nativeDarwinCensus: vi.fn(),
   rosetta: vi.fn(),
   windows: vi.fn(),
   fixturePath: (file: string) => file.replaceAll("\\", "/").replace(/^[A-Za-z]:/, ""),
@@ -46,6 +48,10 @@ vi.mock("../shared/pid-alive.js", () => ({ isPidDefinitelyDead: definitelyDead }
 vi.mock("./container-environment.js", () => ({ isContainerEnvironment: container }));
 // mock-isolation: the real detector reads and caches the test host's CPU brand.
 vi.mock("../shared/rosetta-translation.js", () => ({ isRosettaTranslatedProcess: rosetta }));
+// mock-isolation: Enumerate only the synthetic process table.
+vi.mock("../process/darwin-process-inspection.js", () => ({
+  readDarwinProcessCensus: nativeDarwinCensus,
+}));
 vi.mock("../process/supervisor/darwin-process-command.js", () => ({
   readDarwinProcessCommand: darwinCommand,
 }));
@@ -56,6 +62,7 @@ const self = process.pid;
 const launcher = self + 1;
 const peer = self + 2;
 const getuidDescriptor = Object.getOwnPropertyDescriptor(process, "getuid");
+const bunDescriptor = Object.getOwnPropertyDescriptor(process.versions, "bun");
 type Process = {
   ppid: number;
   argv: string[];
@@ -69,6 +76,8 @@ type Process = {
 let rows: Map<number, Process>;
 
 beforeEach(() => {
+  // This synthetic kernel exercises the Node ps contract, including on Bun hosts.
+  Object.defineProperty(process.versions, "bun", { configurable: true, value: undefined });
   Object.defineProperty(process, "getuid", { configurable: true, value: () => 1000 });
   mockProcessPlatform("linux");
   rows = new Map([
@@ -80,6 +89,15 @@ beforeEach(() => {
   container.mockReset().mockReturnValue(false);
   census.mockReset();
   darwinCommand.mockReset();
+  nativeDarwinCensus.mockReset().mockImplementation(() =>
+    [...rows].map(([pid, row]) => ({
+      pid,
+      ppid: row.ppid,
+      pgid: self,
+      state: row.state ?? "S",
+      owner: row.uid === undefined || row.uid === 1000 ? "same" : "different",
+    })),
+  );
   rosetta.mockReset().mockReturnValue(false);
   windows.mockReset();
   realpath.mockReset().mockImplementation((file: string) => file);
@@ -323,6 +341,11 @@ it.each([
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (bunDescriptor) {
+    Object.defineProperty(process.versions, "bun", bunDescriptor);
+  } else {
+    Reflect.deleteProperty(process.versions, "bun");
+  }
   if (getuidDescriptor) {
     Object.defineProperty(process, "getuid", getuidDescriptor);
   } else {
@@ -514,6 +537,68 @@ it.each([
 const references = { runId: "update-run-123", artifactPaths: ["/tmp/retained runtime"] };
 const denied = () => Object.assign(new Error("denied"), { code: "EACCES" });
 
+it.each(["/usr/lib/systemd/systemd", "/lib/systemd/systemd"])(
+  "does not let the user manager pin abandoned runtimes when cwd is denied (%s)",
+  (executable) => {
+    rows.set(peer, { ppid: 1, argv: [executable, "--user"], uid: 1000, cwd: denied() });
+    expect(inspectOtherOpenClawProcesses()).toEqual({ pids: [] });
+    rows.get(peer)!.cwd = "/tmp/openclaw-update-runtime-Ab1234";
+    expect(inspectOtherOpenClawProcesses()).toEqual({ pids: [peer] });
+    rows.get(peer)!.cwd = denied();
+    rows.get(peer)!.argv.push("/tmp/openclaw-update-runtime-Ab1234");
+    expect(inspectOtherOpenClawProcesses()).toEqual({ pids: [peer] });
+  },
+);
+
+it("excludes only the same-account PAM helper of a standard user manager", () => {
+  rows.set(peer, {
+    ppid: 1,
+    argv: ["/usr/lib/systemd/systemd", "--user"],
+    uid: 1000,
+    cwd: denied(),
+  });
+  rows.set(peer + 1, { ppid: peer, argv: ["(sd-pam)"], uid: 1000, cwd: denied() });
+  expect(inspectOtherOpenClawProcesses()).toEqual({ pids: [] });
+  rows.get(peer + 1)!.cwd = "/tmp/openclaw-update-runtime-Ab1234";
+  expect(inspectOtherOpenClawProcesses()).toEqual({ pids: [peer + 1] });
+  rows.get(peer + 1)!.cwd = denied();
+  rows.get(peer + 1)!.ppid = 1;
+  expect(inspectOtherOpenClawProcesses()).toEqual({
+    error: expect.stringContaining(
+      `Could not classify PID ${peer + 1}: working directory is unavailable`,
+    ),
+  });
+});
+
+it("does not let protected systemd login processes block update-repair evidence", () => {
+  rows.set(peer, {
+    ppid: 1,
+    argv: ["/usr/lib/systemd/systemd", "--user"],
+    uid: 1000,
+    cwd: denied(),
+  });
+  rows.set(peer + 1, { ppid: peer, argv: ["(sd-pam)"], uid: 1000, cwd: denied() });
+  const handoffRefs = {
+    runId: "systemd-update-run",
+    artifactPaths: ["/tmp/openclaw-update-runtime-Ab1234"],
+  };
+  expect(inspectOtherOpenClawProcesses(handoffRefs)).toEqual({
+    matchingPids: [],
+    unverifiedPids: [],
+  });
+  rows.get(peer + 1)!.cwd = handoffRefs.artifactPaths[0];
+  expect(inspectOtherOpenClawProcesses(handoffRefs)).toEqual({
+    matchingPids: [peer + 1],
+    unverifiedPids: [],
+  });
+  rows.get(peer + 1)!.cwd = denied();
+  rows.get(peer + 1)!.ppid = 1;
+  expect(inspectOtherOpenClawProcesses(handoffRefs)).toEqual({
+    matchingPids: [],
+    unverifiedPids: [peer + 1],
+  });
+});
+
 it.each(["foreign", "same", "unknown process", "unknown inspector"])(
   "requires a positively foreign UID to exclude systemd with denied cwd (%s)",
   (owner) => {
@@ -635,9 +720,9 @@ it.each(["linux", "darwin"] as const)(
           .join("");
         return { status: 1, stdout };
       });
-      darwinCommand.mockImplementation((pid: number, uid: number) =>
+      darwinCommand.mockImplementation((pid: number, owner: "different") =>
         rows.get(pid)?.commandError
-          ? { argvUnavailable: true, uid }
+          ? { argvUnavailable: true, owner }
           : { argv: rows.get(pid)!.argv },
       );
     }

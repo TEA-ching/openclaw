@@ -1,4 +1,5 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildCliSessionDriftNote } from "../cli-session.js";
 import * as mediaTaskStatus from "../media-generation-task-status.js";
 import { createCliCurrentPromptRenderer, prepareCliTurnPromptContext } from "./prompt-context.js";
 
@@ -42,12 +43,49 @@ it.each([false, true])(
 it("keeps a transient session notice at the top of the native user prompt", () => {
   const session = { mode: "reuse", sessionId: "native-session" } as const;
   const note = "[OpenClaw: Messages occurred outside this Claude session.]";
-  const render = createCliCurrentPromptRenderer({}, session, note);
+  const render = createCliCurrentPromptRenderer({}, session, { sessionGapContext: note });
   expect(render("Read the latest token.")).toBe(`${note}\n\nRead the latest token.`);
   expect(render("Read the latest token.", true)).toBe(`${note}\n\nRead the latest token.`);
   expect(createCliCurrentPromptRenderer({}, session)("Read the latest token.")).toBe(
     "Read the latest token.",
   );
+});
+
+const currentInboundContext = { text: "Conversation info" };
+
+describe("CLI resume user context", () => {
+  it("puts the drift note before the resumed prompt", () => {
+    const render = createCliCurrentPromptRenderer(
+      { currentInboundContext },
+      {
+        mode: "reuse-with-drift",
+        sessionId: "native-bound",
+        drift: { reasons: ["system-prompt"] },
+      },
+    );
+
+    expect(render("ask")).toBe(
+      [buildCliSessionDriftNote(["system-prompt"]), "Conversation info", "ask"].join("\n\n"),
+    );
+  });
+
+  it("leaves a fresh session to recover from saved history", () => {
+    expect(
+      createCliCurrentPromptRenderer(
+        { currentInboundContext },
+        { mode: "invalidate", invalidatedReason: "mcp" },
+      )("ask"),
+    ).toBe("Conversation info\n\nask");
+  });
+
+  it("withholds missed exchanges without the history account boundary", () => {
+    expect(
+      createCliCurrentPromptRenderer(
+        { currentInboundContext },
+        { mode: "reuse", sessionId: "native-bound" },
+      )("ask"),
+    ).toBe("Conversation info\n\nask");
+  });
 });
 
 const runtimeFacts = "Runtime: session=agent:main:private-probe | channel=cli";

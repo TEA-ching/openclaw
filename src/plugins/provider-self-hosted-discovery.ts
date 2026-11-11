@@ -1,5 +1,6 @@
 import { asOptionalRecord, isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { resolveDefaultModelMaxTokens } from "../agents/defaults.js";
 import { isNonSecretApiKeyMarker } from "../agents/model-auth-markers.js";
 import { readProviderJsonResponse } from "../agents/provider-http-errors.js";
 import { resolveProviderTransportSsrFPolicy } from "../agents/provider-network-policy.js";
@@ -7,7 +8,6 @@ import { resolveProviderRequestPolicyConfig } from "../agents/provider-request-c
 import {
   SELF_HOSTED_DEFAULT_CONTEXT_WINDOW,
   SELF_HOSTED_DEFAULT_COST,
-  SELF_HOSTED_DEFAULT_MAX_TOKENS,
 } from "../agents/self-hosted-provider-defaults.js";
 import type { ModelDefinitionConfig } from "../config/types.models.js";
 import { cancelUnreadResponseBody } from "../infra/http-body.js";
@@ -370,19 +370,37 @@ export async function discoverOpenAICompatibleLocalModels(
     const generationSettings = asOptionalRecord(props?.default_generation_settings);
     const runtimeContextTokens =
       readPositiveInteger(generationSettings?.n_ctx) ?? readPositiveInteger(props?.n_ctx);
+    const contextWindow =
+      params.contextWindow ??
+      readPositiveInteger(meta?.n_ctx_train) ??
+      readOpenAICompatibleContextWindow(model) ??
+      parentContextWindow ??
+      SELF_HOSTED_DEFAULT_CONTEXT_WINDOW;
+    const servingTokens =
+      typeof model.max_model_len === "number" &&
+      Number.isSafeInteger(model.max_model_len) &&
+      model.max_model_len > 0
+        ? model.max_model_len
+        : undefined;
     const modelConfig: ModelDefinitionConfig = {
       id: modelId,
       name: modelId,
-      reasoning: /r1|reasoning|think|reason/i.test(modelId),
+      reasoning: /r1|reason|think|deepseek[-_]?v4|nemotron-3[-_](?:nano|super|ultra)\b/i.test(
+        modelId,
+      ),
       input: ["text"],
       cost: SELF_HOSTED_DEFAULT_COST,
-      contextWindow:
-        params.contextWindow ??
-        readPositiveInteger(meta?.n_ctx_train) ??
-        readOpenAICompatibleContextWindow(model) ??
-        parentContextWindow ??
-        SELF_HOSTED_DEFAULT_CONTEXT_WINDOW,
-      maxTokens: params.maxTokens ?? SELF_HOSTED_DEFAULT_MAX_TOKENS,
+      contextWindow,
+      // Serving limits bound prompt plus output; explicit output caps remain authored.
+      maxTokens:
+        params.maxTokens ??
+        resolveDefaultModelMaxTokens(
+          Math.min(
+            contextWindow,
+            runtimeContextTokens ?? contextWindow,
+            servingTokens ?? contextWindow,
+          ),
+        ),
       ...(runtimeContextTokens ? { contextTokens: runtimeContextTokens } : {}),
     };
     return [modelConfig];

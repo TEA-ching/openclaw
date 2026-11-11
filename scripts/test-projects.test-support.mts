@@ -65,9 +65,11 @@ import {
   uiIsolatedTestFiles,
 } from "../test/vitest/vitest.ui-isolated-paths.mjs";
 import {
+  getRepositoryFileInventory,
   isControlUiSourcePath,
   isPluginControlUiPath,
   isUiBrowserTestFile,
+  isUiTestTarget,
   uiE2eRealGatewayTestFiles,
   uiTimingTestFiles,
 } from "../test/vitest/vitest.ui-paths.mjs";
@@ -89,6 +91,7 @@ import {
   detectChangedLanes,
   listChangedPathsFromGit as listChangedPathsFromGitSource,
 } from "./changed-lanes.mts";
+import { isGitWorktreeRoot } from "./check-file-utils.ts";
 import { parsePermissiveBooleanToken } from "./lib/arg-utils.mts";
 import {
   getChangedPathFacts,
@@ -501,7 +504,9 @@ const BROAD_TOOLING_SCRIPT_TEST_PATTERNS = new Set([
 const BROAD_TOOLING_SCRIPT_TEST_TARGET_CHUNK_SIZE = 60;
 const FULL_SUITE_AGENTS_CORE_TEST_TARGET_CHUNK_COUNT = 6;
 const FULL_SUITE_INFRA_TEST_TARGET_CHUNK_SIZE = 64;
-const FULL_SUITE_TOOLING_TEST_TARGET_CHUNK_SIZE = 2;
+const FULL_SUITE_GATEWAY_DATABASE_TEST_TARGET_CHUNK_SIZE = 50;
+const FULL_SUITE_TOOLING_TEST_TARGET_CHUNK_SIZE = 8;
+const FULL_SUITE_UI_TEST_TARGET_CHUNK_SIZE = 8;
 const FULL_SUITE_UNIT_FAST_TEST_TARGET_CHUNK_SIZE = 70;
 const FULL_SUITE_UNIT_SRC_TEST_TARGET_CHUNK_SIZE = 150;
 const TUI_VITEST_CONFIG = "test/vitest/vitest.tui.config.ts";
@@ -632,7 +637,7 @@ const PRECISE_SOURCE_TEST_TARGETS = new Map<string, string[]>([
     ["src/agents/bash-tools.process.liveness.test.ts"],
   ],
   [
-    "patches/vitest@5.0.1.patch",
+    "patches/vitest@5.0.5.patch",
     [
       "test/scripts/run-vitest-profile.test.ts",
       "test/scripts/run-vitest-state-cleanup.test.ts",
@@ -1175,6 +1180,24 @@ function listUnitSrcFullSuiteTestTargets(cwd: string) {
   return cachedUnitSrcFullSuiteTestTargets;
 }
 
+function listUiFullSuiteTestTargets(cwd: string) {
+  const files =
+    getRepositoryFileInventory(cwd) ??
+    [path.join(cwd, "ui", "src"), path.join(cwd, "extensions")].flatMap((root) =>
+      fs.existsSync(root) ? listRepoFilesRecursive(root, cwd) : [],
+    );
+  return [...files]
+    .filter(
+      (file) =>
+        isUiTestTarget(file) &&
+        !isSharedVitestExcludedPath(file) &&
+        !isUiIsolatedTestFile(file) &&
+        !isUiBrowserTestFile(file) &&
+        !uiTimingTestFiles.includes(file),
+    )
+    .toSorted((left, right) => left.localeCompare(right));
+}
+
 function listAgentsCoreFullSuiteTestTargets(cwd: string) {
   const isolatedTests = new Set([
     ...cliProcessTestFiles,
@@ -1433,6 +1456,9 @@ let cachedExplicitTestTargetFiles: string[] | null = null;
 let cachedExplicitTestTargetFilesCwd: string | null = null;
 
 function listExplicitTestTargetFilesFromGit(cwd: string) {
+  if (!isGitWorktreeRoot(cwd)) {
+    return null;
+  }
   const result = spawnSync(
     "git",
     [
@@ -2211,7 +2237,7 @@ function listImportGraphGrepMatches(
   // Git's fixed-string prefilter rescans for each term. Large frontiers use the
   // source reader's single-pass multi-term matcher over the same inventory.
   const result =
-    missing.length <= 64
+    missing.length <= 64 && isGitWorktreeRoot(cwd)
       ? spawnSync(
           "git",
           ["grep", "-l", "-z", "--fixed-strings", "-f", "-", "--", ...grepPaths],
@@ -3221,6 +3247,10 @@ const EXACT_TOOLING_TARGETS = new Map<string, string[]>([
     ["full-release-validation-at-sha", "release-candidate-checklist", packageAcceptance],
   ],
   [
+    "scripts/lib/release-candidate-changelog.mts",
+    ["full-release-validation-at-sha", "release-candidate-checklist"],
+  ],
+  [
     "scripts/lib/clawhub-bootstrap-artifact.mjs",
     ["clawhub-bootstrap-artifact", "verify-clawhub-published-artifact"],
   ],
@@ -3644,7 +3674,10 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
     ["check-composite-action-input-interpolation", "check-no-conflict-markers", workflowGuards],
   ],
   [/^apps\/android\/fastlane\/Fastfile$/u, ["android-release-fastlane-gates"]],
-  [/^apps\/ios\/fastlane\/Fastfile$/u, ["ios-release-fastlane-gates"]],
+  [
+    /^apps\/ios\/fastlane\/Fastfile$/u,
+    ["ios-release-fastlane-gates", "ios-release-screenshot-upload"],
+  ],
   [/^scripts\/ios-release-cut\.(?:sh|ts)$/u, ["ios-release-plan"]],
   [/^scripts\/ios-release-prepare\.sh$/u, ["ios-release-prepare", "ios-release-wrapper-args"]],
   [
@@ -3801,13 +3834,7 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
   ],
   [
     /^scripts\/e2e\/(?:mcp-code-mode-gateway-(?:live-)?docker|lib\/mcp-code-mode\/scenario)\.sh$/u,
-    [
-      dockerBuild,
-      dockerE2e,
-      pluginPrerelease,
-      "mcp-code-mode-gateway-client",
-      "session-log-mentions",
-    ],
+    [dockerBuild, dockerE2e, pluginPrerelease, "mcp-code-mode-gateway-client"],
   ],
   [
     /^scripts\/e2e\/agent-bundle-mcp-tools-docker\.sh$/u,
@@ -4007,7 +4034,7 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
       ].join(""),
       "u",
     ),
-    ["mcp-code-mode-gateway-client", "session-log-mentions"],
+    ["mcp-code-mode-gateway-client"],
   ],
   [
     /^scripts\/e2e\/(?:mcp-channels|cron-cli|cron-mcp-cleanup)-docker\.sh$/u,
@@ -5743,11 +5770,30 @@ export function buildFullSuiteVitestRunPlans(args: string[], cwd = process.cwd()
             Math.ceil(targets.length / FULL_SUITE_INFRA_TEST_TARGET_CHUNK_SIZE),
           );
         } else if (config === TOOLING_VITEST_CONFIG) {
-          // Tooling tests spawn package managers and native helpers. Keep native
-          // process lifetime short enough that unrelated files cannot crash together.
+          // Bound package-manager/native-helper lifetimes without paying for a new
+          // Vitest config and worker startup after every two ordinary tooling files.
           const targets = listToolingFullSuiteTestTargets(cwd);
           const chunkCount = Math.ceil(targets.length / FULL_SUITE_TOOLING_TEST_TARGET_CHUNK_SIZE);
           chunks = splitTargetChunks(targets, chunkCount);
+        } else if (config === UI_VITEST_CONFIG) {
+          // A retained jsdom worker made a 16-case file grow from 8.56s alone
+          // to 542s of case time in the full run. Keep its existing harness,
+          // but retire the shared document/module generation between small batches.
+          const targets = listUiFullSuiteTestTargets(cwd);
+          chunks = splitTargetChunks(
+            targets,
+            Math.ceil(targets.length / FULL_SUITE_UI_TEST_TARGET_CHUNK_SIZE),
+          );
+        } else if (config === GATEWAY_DATABASE_WORKERS_VITEST_CONFIG) {
+          // The 485-file shared fork exhausted its 4 GiB V8 heap in a full run.
+          // Keep native worker custody and exclusive scheduling; bound its graph lifetime.
+          chunks = splitTargetChunks(
+            gatewayDatabaseWorkerTestFiles,
+            Math.ceil(
+              gatewayDatabaseWorkerTestFiles.length /
+                FULL_SUITE_GATEWAY_DATABASE_TEST_TARGET_CHUNK_SIZE,
+            ),
+          );
         } else if (config === GATEWAY_SERVER_VITEST_CONFIG) {
           chunks = createGatewayServerTestTargetChunks(cwd);
         } else {

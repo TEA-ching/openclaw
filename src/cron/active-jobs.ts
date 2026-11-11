@@ -101,6 +101,26 @@ export function captureCronJobMessageSourceAuthority(params: {
   return captureCronJobMessageAuthority(params, true);
 }
 
+/** Source restoration precedes run admission, but still belongs to one live occurrence. */
+export function captureCronJobSourceAuthority(jobId: string): (() => void) | undefined {
+  const marker = getCurrentCronActiveJobMarker(jobId);
+  const owner = marker?.standingGrantAuthority;
+  if (!marker || !owner) {
+    return undefined;
+  }
+  return () => {
+    if (
+      getCurrentCronActiveJobMarker(jobId) !== marker ||
+      marker.messageSourceAuthorityRevoked ||
+      marker.jobRemoved ||
+      marker.cancellation?.kind === "requested"
+    ) {
+      throw new Error("Cron occurrence source authority is no longer active");
+    }
+    owner.assertCurrent();
+  };
+}
+
 export function captureCronJobStandingGrantAuthority(params: {
   jobId: string;
   operationalRunInstance: OperationalRunInstanceRef;
@@ -143,30 +163,39 @@ export function bindCronSelfRemovalCommitGuard(
   instance: OperationalRunInstanceRef,
   commitGuard: () => void,
   assertCallerActive: () => void,
-): void {
+): () => void {
   const { admittedJobRuns, selfRemovalOwners } = getCronActiveJobState();
   const marker = getCurrentCronActiveJobMarker(jobId);
   const owner = marker && admittedJobRuns.get(marker);
-  if (
-    !marker ||
-    !owner ||
-    owner.context.operationalRunInstance.instanceId !== instance.instanceId ||
-    owner.context.operationalRunInstance.runId !== instance.runId
-  ) {
-    return;
-  }
-  selfRemovalOwners.set(commitGuard, () => {
+  const assertOwner = () => {
+    assertCallerActive();
+    if (
+      !marker ||
+      !owner ||
+      owner.context.operationalRunInstance.instanceId !== instance.instanceId ||
+      owner.context.operationalRunInstance.runId !== instance.runId ||
+      getCurrentCronActiveJobMarker(jobId) !== marker ||
+      admittedJobRuns.get(marker) !== owner
+    ) {
+      throw new TypeError(
+        "Cron self-removal requires the exact live run; the job was not removed.",
+      );
+    }
+    owner.assertActive();
+    return marker;
+  };
+  const selfRemovalGuard = () => {
+    commitGuard();
+    assertOwner();
+  };
+  selfRemovalOwners.set(selfRemovalGuard, () => {
     try {
-      assertCallerActive();
-      owner.assertActive();
-      return getCurrentCronActiveJobMarker(jobId) === marker &&
-        admittedJobRuns.get(marker) === owner
-        ? marker
-        : undefined;
+      return assertOwner();
     } catch {
       return undefined;
     }
   });
+  return selfRemovalGuard;
 }
 
 export type CronActiveJobMarker = {

@@ -412,6 +412,11 @@ files. In hybrid mode, edits under
 with its new config. Unchanged plugin instances retain their registration
 snapshots. A plugin's narrower reload policy can retain an instance or require a restart.
 
+Plugin config edits keep cached session rows when their model, harness, CLI backend,
+and session-extension facts stay unchanged. Completed model catalog publications
+refresh affected agents when those facts change; unrelated hook settings or
+plugin enablement do not rebuild the entire session list.
+
 Plugin install, update, enable, disable, uninstall, and metadata refresh apply
 through the running Gateway's plugin lifecycle without a Gateway restart.
 Explicit plugin actions also work when passive reload is `off`. Source or
@@ -453,3 +458,5 @@ That keeps hot-reload decisions (hot-apply vs restart) predictable even when a
 single top-level section lives in its own included file such as
 `plugins: { $include: "./plugins.json5" }`. Reload planning stops if the
 source layout is ambiguous.
+
+Automatic plugin drain timeouts with successful rollback settle the writing request as failed before observing idle work and retrying the latest saved configuration. This lets the writing turn release its own retained plugin work. Explicit plugin reloads still report their bounded failure.

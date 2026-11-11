@@ -7,7 +7,10 @@ import crypto from "node:crypto";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { CliSessionBinding, SessionEntry } from "../config/sessions.js";
-import { normalizeCliSessionReseedReceipt } from "../config/sessions/cli-session-binding.js";
+import {
+  normalizeCliTranscriptCursor,
+  normalizeCliSessionReseedReceipt,
+} from "../config/sessions/cli-session-binding.js";
 import { readErrorName } from "../infra/errors.js";
 import { readInterSessionPromptEnvelope } from "../sessions/input-provenance.js";
 import { isFailoverError } from "./failover-error.js";
@@ -99,6 +102,13 @@ export function setCliSessionBinding(
       ? { authEpochVersion: binding.authEpochVersion }
       : {}),
   };
+  const transcriptCursor = normalizeCliTranscriptCursor(
+    binding.transcriptCursor ??
+      (previousBinding?.sessionId === trimmed ? previousBinding.transcriptCursor : undefined),
+  );
+  if (transcriptCursor) {
+    nextBinding.transcriptCursor = transcriptCursor;
+  }
   for (const field of [
     "extraSystemPromptHash",
     "messageToolPolicyHash",
@@ -173,7 +183,13 @@ export function resolveCliSessionClearReason(error: unknown): string {
   return isFailoverError(error) ? error.reason : (readErrorName(error) ?? "error");
 }
 
-type CliSessionInvalidatedReason = "auth-profile" | "auth-epoch" | "message-policy" | "cwd" | "mcp";
+type CliSessionInvalidatedReason =
+  | "auth-profile"
+  | "auth-epoch"
+  | "message-policy"
+  | "cwd"
+  | "mcp"
+  | "prompt-tools";
 
 type CliSessionContentDriftReason = "system-prompt" | "prompt-tools";
 
@@ -183,7 +199,7 @@ export type CliSessionReuseResult =
   | {
       mode: "reuse-with-drift";
       sessionId: string;
-      drift: { reasons: CliSessionContentDriftReason[] };
+      drift: { reasons: "system-prompt"[] };
     }
   | { mode: "invalidate"; invalidatedReason: CliSessionInvalidatedReason };
 
@@ -196,6 +212,7 @@ export function buildCliSessionDriftNote(reasons: readonly CliSessionContentDrif
 
 const CLI_SESSION_DRIFT_NOTES = [
   buildCliSessionDriftNote(["system-prompt"]),
+  // Older native transcripts still contain tool-drift notes; strip them on display.
   buildCliSessionDriftNote(["prompt-tools"]),
   buildCliSessionDriftNote(["system-prompt", "prompt-tools"]),
 ];
@@ -267,10 +284,8 @@ export function resolveCliSessionReuse(params: {
     storedAuthEpoch !== undefined &&
     currentAuthEpoch !== undefined &&
     storedAuthEpoch === currentAuthEpoch;
-  if (storedAuthProfileId !== currentAuthProfileId) {
-    if (!hasMatchingVersionedAuthEpoch) {
-      return { mode: "invalidate", invalidatedReason: "auth-profile" };
-    }
+  if (storedAuthProfileId !== currentAuthProfileId && !hasMatchingVersionedAuthEpoch) {
+    return { mode: "invalidate", invalidatedReason: "auth-profile" };
   }
   if (
     binding?.authEpochVersion === params.authEpochVersion &&
@@ -302,19 +317,14 @@ export function resolveCliSessionReuse(params: {
     }
   }
 
-  const driftReasons: CliSessionContentDriftReason[] = [];
-  const storedExtraSystemPromptHash = normalizeOptionalString(binding?.extraSystemPromptHash);
-  if (storedExtraSystemPromptHash !== currentExtraSystemPromptHash) {
-    driftReasons.push("system-prompt");
-  }
   const storedPromptToolNamesHash = normalizeOptionalString(binding?.promptToolNamesHash);
   if (storedPromptToolNamesHash !== currentPromptToolNamesHash) {
-    driftReasons.push("prompt-tools");
+    // The loopback bridge cannot notify a resumed CLI to refresh its cached tool catalog.
+    return { mode: "invalidate", invalidatedReason: "prompt-tools" };
   }
-  if (driftReasons.length > 0) {
-    // Content drift resumes by contract (#99729): the transcript remains usable.
-    // Deleting this binding here makes queued turns spawn without session history.
-    return { mode: "reuse-with-drift", sessionId, drift: { reasons: driftReasons } };
+  const storedExtraSystemPromptHash = normalizeOptionalString(binding?.extraSystemPromptHash);
+  if (storedExtraSystemPromptHash !== currentExtraSystemPromptHash) {
+    return { mode: "reuse-with-drift", sessionId, drift: { reasons: ["system-prompt"] } };
   }
   return { mode: "reuse", sessionId };
 }

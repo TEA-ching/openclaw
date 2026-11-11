@@ -2,6 +2,7 @@
 import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { resolveGatewayStartupTiming } from "../../commands/gateway-startup-timing.js";
 import { resolveGatewayServiceProbeHosts } from "../../daemon/gateway-service-probe-hosts.js";
+import { stopStalledGatewayStartup } from "../../daemon/schtasks-process.js";
 import { mergeGatewayServiceEnv } from "../../daemon/service-env-merge.js";
 import {
   assertGatewayServiceUpdateCurrent,
@@ -24,6 +25,7 @@ import {
   formatGatewayPidList,
   signalVerifiedGatewayPidSync,
 } from "../../infra/gateway-processes.js";
+import { captureStalledGatewayStartup } from "../../infra/gateway-startup-owner.js";
 import {
   assertGatewayServiceMutationAllowed,
   formatExternalSupervisorActionRequired,
@@ -123,6 +125,21 @@ async function stopGatewayWithoutServiceManager(
     serviceContext?.env ?? process.env,
     serviceContext?.command ?? null,
   );
+  const stalled = captureStalledGatewayStartup(env);
+  if (stalled) {
+    await stopStalledGatewayStartup(stalled, assertGatewayServiceUpdateCurrent);
+    appendGatewayLifecycleAudit({
+      action: "stop",
+      source: "cli",
+      mode: "sigterm",
+      pid: stalled.pid,
+      env,
+    });
+    return {
+      result: "stopped" as const,
+      message: `Stopped stalled Gateway startup pid ${stalled.pid}.`,
+    };
+  }
   const listenerPids = findVerifiedGatewayListenerPidsOnPortSync(port, { env });
   // Listener discovery needs lsof, which minimal containers omit. The gateway
   // lock already names the verified owner of this port, so signal it instead of
@@ -134,8 +151,8 @@ async function stopGatewayWithoutServiceManager(
     if (portUsage !== "free") {
       throw new Error(
         portUsage === "busy"
-          ? `Port ${port} is in use but the owning process could not be identified. Run ${formatCliCommand("openclaw gateway status --deep")} to diagnose.`
-          : `Could not determine whether port ${port} is still in use, so the gateway cannot be confirmed stopped. Run ${formatCliCommand("openclaw gateway status --deep")} to diagnose.`,
+          ? `Port ${port} is in use but the owning process could not be identified.`
+          : `Could not determine whether port ${port} is still in use, so the gateway cannot be confirmed stopped.`,
       );
     }
     return null;
@@ -246,12 +263,26 @@ async function runExternalSupervisorRestart(opts: DaemonLifecycleOptions): Promi
   return true;
 }
 
+function renderGatewayServiceStopHints(): string[] {
+  return [
+    `Run ${formatCliCommand("openclaw gateway status --deep")} to inspect the service, then retry.`,
+  ];
+}
+
+function renderGatewayServiceUninstallHints(): string[] {
+  return [
+    ...renderGatewayServiceStopHints(),
+    "To remove the service manually, see https://docs.openclaw.ai/install/uninstall#manual-service-removal-cli-not-installed",
+  ];
+}
+
 /** Uninstall the managed Gateway service after stopping it. */
 export async function runDaemonUninstall(opts: DaemonLifecycleOptions = {}) {
   assertGatewayServiceMutationAllowed("uninstall the gateway service");
   return await runServiceUninstall({
     serviceNoun: "Gateway",
     service: resolveGatewayService(),
+    renderFailureHints: renderGatewayServiceUninstallHints,
     opts,
     stopBeforeUninstall: true,
     assertNotLoadedAfterUninstall: true,
@@ -316,6 +347,7 @@ export async function runDaemonStop(opts: DaemonLifecycleOptions = {}) {
   return await runServiceStop({
     serviceNoun: "Gateway",
     service,
+    renderFailureHints: renderGatewayServiceStopHints,
     opts,
     stopWhenNotLoaded: process.platform === "darwin" && Boolean(opts.disable),
     onNotLoaded: async ({ stdout }) => {

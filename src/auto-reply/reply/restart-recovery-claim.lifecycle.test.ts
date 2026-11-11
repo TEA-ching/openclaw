@@ -11,6 +11,7 @@ import {
   replaceSessionEntry,
   updateSessionEntry,
 } from "../../config/sessions/session-accessor.js";
+import { memorySessionActorOwners } from "../../config/sessions/session-actor-memory-owner.js";
 import * as entryReads from "../../config/sessions/session-entry-read-runtime.js";
 import { resolveSqliteTargetFromSessionStorePath } from "../../config/sessions/session-sqlite-target.js";
 import type { InternalSessionEntry } from "../../config/sessions/types.js";
@@ -27,6 +28,11 @@ import { revokeSqliteDatabaseAdmissionsForPath } from "../../infra/sqlite-databa
 import { createSqliteLifecycleAggregateError } from "../../infra/sqlite-lifecycle-errors.js";
 import * as workerAdmission from "../../infra/sqlite-worker-operation-admission.js";
 import { sqliteWorkerOwnerProbe as probe } from "../../infra/sqlite-worker-owner-probe.test-support.js";
+import {
+  GatewayDrainingError,
+  markGatewayRestartDraining,
+  resetGatewayWorkAdmission,
+} from "../../process/gateway-work-admission.js";
 import { clearOpenClawAgentDatabaseValidationCache } from "../../state/openclaw-agent-db-validation-cache.js";
 import {
   closeOpenClawAgentDatabasesAsync,
@@ -41,6 +47,7 @@ import { createReplyRestartRecoveryClaimController } from "./restart-recovery-cl
 import { createReplyRecoveryActorFixture } from "./restart-recovery-claim.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+afterEach(() => memorySessionActorOwners.reset());
 
 async function withTrackedReply(
   test: (fixture: {
@@ -52,17 +59,17 @@ async function withTrackedReply(
     databasePath: string;
     readEntry: () => ReturnType<typeof loadSessionEntry>;
   }) => Promise<void>,
-  storage: "durable" | "native-incognito" = "durable",
+  storage: "durable" | "memory" = "durable",
 ) {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
     const scope = {
       agentId: "main",
       sessionKey:
-        storage === "native-incognito"
+        storage === "memory"
           ? "agent:main:dashboard:incognito-recovery"
           : "agent:main:retired-readiness",
       storePath:
-        storage === "native-incognito"
+        storage === "memory"
           ? resolveIncognitoOpenClawAgentSqlitePath({ agentId: "main", env: state.env })
           : state.statePath("sessions.json"),
     };
@@ -71,12 +78,12 @@ async function withTrackedReply(
       updatedAt: 1,
       status: undefined,
       restartRecoveryDeliveryRunId: "old-recovery",
-      ...(storage === "native-incognito" ? { incognito: true } : {}),
+      ...(storage === "memory" ? { incognito: true } : {}),
     };
     await replaceSessionEntry(scope, entry);
-    const native =
-      storage === "native-incognito"
-        ? getOpenClawAgentDatabaseIfOpen({ ...scope, path: scope.storePath })
+    const memory =
+      storage === "memory"
+        ? memorySessionActorOwners.read({ agentId: scope.agentId, path: scope.storePath })
         : undefined;
     const operation = createReplyOperation({
       ...scope,
@@ -130,9 +137,12 @@ async function withTrackedReply(
           env: state.env,
         }).path,
       });
-      if (storage === "native-incognito") {
-        expect(native).toBeDefined();
-        expect(getOpenClawAgentDatabaseIfOpen({ ...scope, path: scope.storePath })).toBe(native);
+      if (storage === "memory") {
+        expect(memory).toBeDefined();
+        expect(
+          memorySessionActorOwners.read({ agentId: scope.agentId, path: scope.storePath }),
+        ).toBe(memory);
+        expect(getOpenClawAgentDatabaseIfOpen({ ...scope, path: scope.storePath })).toBeUndefined();
         expect(fs.existsSync(scope.storePath)).toBe(false);
       }
     } finally {
@@ -141,7 +151,7 @@ async function withTrackedReply(
   });
 }
 
-it("settles native-incognito recovery through hook checkpoints and restart readiness", async () => {
+it("settles incognito recovery through hook checkpoints and restart readiness", async () => {
   await withTrackedReply(async ({ controller, operation, confirmArmed, readEntry }) => {
     await expect(controller.beginBeforeAgentReply()).resolves.toBe(true);
     await controller.checkpointBeforeAgentReply({ state: "handled-silent" });
@@ -169,7 +179,7 @@ it("settles native-incognito recovery through hook checkpoints and restart readi
       restartRecoveryDeliveryRunId: "old-recovery",
       abortedLastRun: true,
     });
-  }, "native-incognito");
+  }, "memory");
 });
 
 it.each([
@@ -627,3 +637,42 @@ describe("restart recovery claim settlement", () => {
     expect(persisted?.restartRecoveryTerminalRunIds).toContain("source-turn");
   });
 });
+
+it.each(["restart-drain", "stale-drain", "user-stop"] as const)(
+  "preserves an existing recovery claim only for a live restart refusal (%s)",
+  async (cause) => {
+    await withTrackedReply(async ({ controller, operation, readEntry }) => {
+      if (cause === "user-stop") {
+        operation.abortByUser();
+      }
+      if (cause !== "stale-drain") {
+        markGatewayRestartDraining();
+      }
+      try {
+        await handleReplyAgentRunError(new GatewayDrainingError(), {
+          resolveVisibleReplyDelivery: async () => false,
+          isHeartbeat: false,
+          replyExpectation: "required",
+          isRestartRecoveryArmed: controller.isArmed,
+          replyOperation: operation,
+          resolvedVerboseLevel: "off",
+          sessionCtx: {},
+          returnWithQueuedFollowupDrain: (value) => value,
+        });
+        await controller.clear();
+        expect(readEntry()?.restartRecoveryDeliveryRunId).toBe(
+          cause === "restart-drain" ? "old-recovery" : undefined,
+        );
+        expect(operation.result).toMatchObject(
+          cause === "restart-drain"
+            ? { kind: "aborted", code: "aborted_for_restart" }
+            : cause === "user-stop"
+              ? { kind: "aborted", code: "aborted_by_user" }
+              : { kind: "failed", code: "gateway_draining" },
+        );
+      } finally {
+        resetGatewayWorkAdmission();
+      }
+    });
+  },
+);

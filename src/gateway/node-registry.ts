@@ -132,6 +132,7 @@ type AuthorizedSystemRunEvent = PendingSystemRunEvent & {
   nodeId: string;
   connId: string;
   expiresAtMs: number | null;
+  resultDelivered?: boolean;
 };
 
 export type NodeConnectivityResult =
@@ -216,9 +217,9 @@ export class NodeRegistry {
           })
         : false;
     },
-    onFailedResult: (pending) => {
+    onSettledResult: (pending, delivered) => {
       if (pending.systemRunEvent) {
-        this.forgetAuthorizedSystemRunEvent({
+        this.settleAuthorizedSystemRunEvent(delivered, {
           nodeId: pending.nodeId,
           connId: pending.connId,
           ...pending.systemRunEvent,
@@ -1102,7 +1103,12 @@ export class NodeRegistry {
     runId?: string;
     sessionKey: string;
     terminal: boolean;
-  }): Pick<PendingSystemRunEvent, "invocationDeliveryContext"> | null {
+  }):
+    | (Pick<PendingSystemRunEvent, "invocationDeliveryContext"> & {
+        holdNotice?: (notify: () => void) => void;
+        resultDelivered?: true;
+      })
+    | null {
     if (!params.connId || !params.sessionKey) {
       return null;
     }
@@ -1126,11 +1132,40 @@ export class NodeRegistry {
     if (match === null) {
       return null;
     }
-    const source = this.authorizedSystemRunEvents.get(match)?.invocationDeliveryContext;
+    const event = this.authorizedSystemRunEvents.get(match);
+    const source = event?.invocationDeliveryContext;
+    let waiting: PendingInvoke | undefined;
     if (params.terminal) {
       this.authorizedSystemRunEvents.delete(match);
     }
-    return source ? { invocationDeliveryContext: { ...source } } : {};
+    if (event?.resultDelivered) {
+      return { resultDelivered: true };
+    }
+    if (params.terminal) {
+      // The node reports completion before its result; a still-waiting caller receives that output.
+      waiting = [...this.pendingInvokes.values()].find(
+        (pending) =>
+          pending.nodeId === params.nodeId &&
+          pending.connId === connId &&
+          pending.systemRunEvent?.runId === event?.runId,
+      );
+    }
+    return {
+      ...(source ? { invocationDeliveryContext: { ...source } } : {}),
+      ...(waiting
+        ? {
+            holdNotice: (notify: () => void) => {
+              const resolve = waiting.resolve;
+              waiting.resolve = (value) => {
+                resolve(value);
+                if (!value.ok) {
+                  notify();
+                }
+              };
+            },
+          }
+        : {}),
+    };
   }
 
   private rememberAuthorizedSystemRunEvent(
@@ -1142,6 +1177,22 @@ export class NodeRegistry {
       expiresAtMs: authorizedSystemRunEventExpiresAt(event.timeoutMs),
     };
     this.authorizedSystemRunEvents.set(authorizedSystemRunEventKey(authorized), authorized);
+  }
+
+  /** A bridged node may report completion after the caller already received its result. */
+  private settleAuthorizedSystemRunEvent(
+    delivered: boolean,
+    event: Omit<AuthorizedSystemRunEvent, "expiresAtMs">,
+  ): void {
+    if (!delivered) {
+      this.forgetAuthorizedSystemRunEvent(event);
+      return;
+    }
+    const authorized = this.authorizedSystemRunEvents.get(authorizedSystemRunEventKey(event));
+    if (authorized) {
+      // Retain correlation until the terminal event or normal expiry, not another notice.
+      authorized.resultDelivered = true;
+    }
   }
 
   private forgetAuthorizedSystemRunEvent(

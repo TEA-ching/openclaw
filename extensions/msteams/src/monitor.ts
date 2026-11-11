@@ -35,6 +35,7 @@ import { extractMSTeamsPollVote, type MSTeamsPollStore } from "./polls.js";
 import { resolveMSTeamsPrivateQaRuntime } from "./qa/private-runtime.js";
 import { createMSTeamsReplayContext } from "./replay-context.js";
 import {
+  keepConfiguredMSTeamsAllowlistActive,
   looksLikeMSTeamsConversationId,
   projectStableMSTeamsGroupAllowlist,
   projectStableMSTeamsUserAllowlist,
@@ -54,6 +55,7 @@ import {
 import { createMSTeamsSsoTokenStoreFs } from "./sso-token-store.js";
 import { createMSTeamsWebhookHandler } from "./webhook-handler.js";
 import {
+  resolveMSTeamsLegacyMessagesOwner,
   resolveMSTeamsLegacyWebhook,
   resolveMSTeamsWebhookPathIssue,
   resolveMSTeamsWebhookCollisionIssue,
@@ -185,6 +187,12 @@ export async function monitorMSTeamsProvider(
     runtime.error?.(
       `msteams resolve failed; mutable allowlist entries are disabled. ${formatUnknownError(err)}`,
     );
+  }
+
+  if (Array.isArray(configuredGroupAllowFrom)) {
+    // A configured sender list whose entries are all unresolvable names must keep restricting
+    // senders. An empty projection would fall back to the DM allowlist (or its wildcard).
+    groupAllowFrom = keepConfiguredMSTeamsAllowlistActive(configuredGroupAllowFrom, groupAllowFrom);
   }
 
   if (configuredGroupAllowFrom == null && groupAllowFrom) {
@@ -570,13 +578,16 @@ export async function monitorMSTeamsProvider(
         log: (message) => log.warn?.(message),
       }),
     );
-    if (accountId === DEFAULT_ACCOUNT_ID && configuredPath !== "/api/messages") {
+    // Only the Gateway alias yields; compatibility listeners retain their forwarder.
+    const legacyMessagesOwner = resolveMSTeamsLegacyMessagesOwner(accountPolicyCfg);
+    if (accountId === DEFAULT_ACCOUNT_ID && !legacyMessagesOwner) {
       unregisterRoutes.push(
         registerPluginHttpRoute({
           path: "/api/messages",
           auth: "plugin",
           pluginId: "msteams",
-          source: "msteams-webhook-alias",
+          // Same owner as primary routes, so reload handoffs pass between alias and primary.
+          source: "msteams-webhook",
           accountId,
           handler: webhook.handler,
           log: (message) => log.warn?.(message),

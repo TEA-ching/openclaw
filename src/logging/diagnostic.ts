@@ -27,6 +27,7 @@ import {
   resetDiagnosticMemoryForTest,
   type EmitDiagnosticMemorySample,
 } from "./diagnostic-memory.js";
+import { emitMessageProcessedDiagnosticEvent } from "./diagnostic-message-content.js";
 import {
   getCurrentDiagnosticPhase,
   getRecentDiagnosticPhases,
@@ -339,6 +340,11 @@ function isActiveAbortRecoveryEligible(params: {
   if (classification.classification !== "stalled_agent_run") {
     return false;
   }
+  // Repeated provider requests are diagnostic evidence, not independent stop
+  // authority. The provider retry/deadline owner must settle or stop the run.
+  if (classification.reason === "repeated_model_requests_without_progress") {
+    return false;
+  }
   // Repeated requests can be stalled while a tool owns the current phase.
   // Transport liveness must not replace that independent semantic evidence.
   if (isRepeatedModelRequestStalled(activity, stuckSessionAbortMs)) {
@@ -528,7 +534,12 @@ export function logMessageDispatchCompleted(
   markActivity();
 }
 
-export function logMessageProcessed(params: DiagnosticLogParams<"message.processed">) {
+export function logMessageProcessed(
+  params: DiagnosticLogParams<"message.processed"> & {
+    userPrompt?: string;
+    finalResponse?: string;
+  },
+) {
   if (!areDiagnosticsEnabledForProcess()) {
     return;
   }
@@ -545,19 +556,7 @@ export function logMessageProcessed(params: DiagnosticLogParams<"message.process
     }`;
     diag[level](payload);
   }
-  emitDiagnosticEvent({
-    type: "message.processed",
-    channel: params.channel,
-    chatId: params.chatId,
-    messageId: params.messageId,
-    sessionId: params.sessionId,
-    sessionKey: params.sessionKey,
-    ...(params.agentId ? { agentId: params.agentId } : {}),
-    durationMs: params.durationMs,
-    outcome: params.outcome,
-    reason: params.reason,
-    error: params.error,
-  });
+  emitMessageProcessedDiagnosticEvent(params);
   markActivity();
 }
 
@@ -991,6 +990,7 @@ export function startGatewayDiagnosticHeartbeat(
     id: "diagnostic-heartbeat",
     atMs: scheduler.now() + DIAGNOSTIC_HEARTBEAT_INTERVAL_MS,
     everyMs: DIAGNOSTIC_HEARTBEAT_INTERVAL_MS,
+    phase: "maintenance",
     run: tick,
   });
   heartbeatJob = job;

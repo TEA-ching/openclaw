@@ -4,8 +4,10 @@ import { withExecRequestTurn } from "../../infra/exec-request-context.js";
 import { recordMessageToolRunOutcome } from "../../infra/message-tool-run-outcome-store.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { VisibleWorkSession } from "../get-reply-options.types.js";
+import { prepareReplyTurnRunSource } from "./agent-runner-admission.js";
 import { resolveAgentTurnExecutionStatus } from "./agent-runner-execution-status.js";
 import type { AgentTurnExecutionResult, AgentTurnParams } from "./agent-runner-execution.types.js";
+import { resolveReplyOperationRunState } from "./reply-operation-run-state.js";
 import type { SessionEventExecution } from "./session-event-contract.js";
 import { getReplySystemEventContext } from "./system-event-session-key.js";
 import { withVisibleWorkSessionReporter } from "./visible-work-sessions.js";
@@ -33,7 +35,13 @@ async function recordAgentTurnExecutionOutcome(
     }
   }
   const executionStatus = resolveAgentTurnExecutionStatus(result?.outcome);
-  if (executionStatus !== "cancelled") {
+  if (
+    executionStatus !== "cancelled" &&
+    !(
+      result?.outcome.kind === "rejected" &&
+      resolveReplyOperationRunState(params.opts)?.replyCompletion?.outcome === "pending"
+    )
+  ) {
     params.opts?.onAgentRunTerminalOutcome?.(executionStatus === "ok" ? "completed" : "failed");
   }
   const sourceReplyDeliveryMode =
@@ -90,6 +98,11 @@ async function recordSessionEventTerminalOutcome(
       : result?.outcome.kind === "settled" && result.outcome.status === "ok"
         ? "completed"
         : "failed",
+    result?.outcome.kind === "settled"
+      ? { ...result.outcome.result, resolved: result.outcome.resolved }
+      : result?.outcome.kind === "rejected"
+        ? { payloads: [result.outcome.payload], resolved: result.outcome.resolved }
+        : undefined,
   );
 }
 
@@ -100,6 +113,7 @@ export async function runAgentTurnWithOutcome(
   run: () => Promise<AgentTurnExecutionResult>,
 ): Promise<AgentTurnExecutionResult> {
   const eventExecution = params.followupRun.run.internalEventExecution;
+  const source = prepareReplyTurnRunSource(params, runId);
   let terminalRecorded = false;
   try {
     if (eventExecution) {
@@ -108,6 +122,7 @@ export async function runAgentTurnWithOutcome(
       params.replyOperation?.abortSignal.throwIfAborted();
       eventExecution.assertCurrent?.();
     }
+    source.claim();
     const result = await withExecRequestTurn(
       {
         identity: {
@@ -135,10 +150,13 @@ export async function runAgentTurnWithOutcome(
     await recordSessionEventTerminalOutcome(eventExecution, runId, result);
     return result;
   } catch (error) {
+    eventExecution?.onFailed?.(error);
     if (!terminalRecorded) {
       await recordAgentTurnExecutionOutcome(params, undefined);
       await recordSessionEventTerminalOutcome(eventExecution, runId, undefined);
     }
     throw error;
+  } finally {
+    source.close();
   }
 }

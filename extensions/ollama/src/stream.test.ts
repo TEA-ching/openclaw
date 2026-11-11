@@ -2,8 +2,11 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { expectDefined } from "@openclaw/normalization-core";
+import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import { onLlmRequestActivity } from "openclaw/plugin-sdk/provider-stream-shared";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildOllamaModelDefinition } from "./provider-models.js";
 
 const { fetchWithSsrFGuardMock } = vi.hoisted(() => ({
   fetchWithSsrFGuardMock: vi.fn(),
@@ -195,6 +198,50 @@ describe("createOllamaStreamFn thinking events", () => {
     }
     return events;
   }
+
+  it.each([
+    ["local", false, undefined, undefined, 16384],
+    ["minimax-m3", true, undefined, undefined, 131072],
+    ["local", false, -1, undefined, -1],
+    ["local", false, 2048, 1024, 1024],
+  ] as const)(
+    "sends resolved output budget for %s (remote=%s)",
+    async (id, remote, numPredict, requestCap, expected) => {
+      const definition = buildOllamaModelDefinition(id, 131072, ["completion"], { remote });
+      const model: ProviderRuntimeModel = {
+        ...STREAM_MODEL,
+        id: definition.id,
+        name: definition.name,
+        reasoning: definition.reasoning ?? false,
+        cost: expectDefined(definition.cost, "discovered cost"),
+        input: ["text"],
+        maxTokens: expectDefined(definition.maxTokens, "discovered output budget"),
+        api: "ollama",
+        provider: "ollama",
+        baseUrl: "http://localhost:11434",
+        params: numPredict === undefined ? {} : { num_predict: numPredict },
+      };
+      let payload: unknown;
+      fetchWithSsrFGuardMock.mockResolvedValue({
+        response: new Response(makeNdjsonBody([makeOllamaResponse({ content: "ok" })])),
+        release: vi.fn(async () => undefined),
+      });
+      const stream = await createOllamaStreamFn("http://localhost:11434")(
+        model,
+        { messages: [] },
+        {
+          ...(requestCap === undefined ? {} : { maxTokens: requestCap }),
+          onPayload: (body) => {
+            payload = body;
+          },
+        },
+      );
+      await stream.result();
+      expect(payload).toMatchObject({ options: { num_predict: expected } });
+      const request = fetchWithSsrFGuardMock.mock.calls.at(-1)?.[0];
+      expect(JSON.parse(request.init.body)).toMatchObject({ options: { num_predict: expected } });
+    },
+  );
 
   it.each([
     [0, 0, 0],
@@ -490,6 +537,34 @@ describe("createOllamaStreamFn thinking events", () => {
       type: "toolCall",
       name: "mempalace_mempalace_search",
       arguments: { query: "codename", wing: "personal", room: "identities" },
+    });
+  });
+
+  it("preserves a fenced Ollama text tool call as visible text", async () => {
+    const text = [
+      "```powershell",
+      'exec(command="echo hello", title="Echo command", workdir="C:\\workspace")',
+      "```",
+    ].join("\n");
+    const events = await streamOllamaEvents(
+      [makeOllamaResponse({ content: text })],
+      {},
+      {
+        messages: [{ role: "user", content: "Use exec to run echo hello", timestamp: 0 }],
+        tools: [{ name: "exec", description: "Run a command", parameters: Type.Object({}) }],
+      },
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "text_start",
+      "text_delta",
+      "text_end",
+      "done",
+    ]);
+    expect(events.find((event) => event.type === "done")).toMatchObject({
+      reason: "stop",
+      message: { stopReason: "stop", content: [{ type: "text", text }] },
     });
   });
 

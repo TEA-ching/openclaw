@@ -1,6 +1,7 @@
 /** Repairs interrupted and finalized cron runs while the service starts. */
 import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import { resolveCronCompletionStatus } from "../completion-status.js";
+import { STARTUP_INTERRUPTED_ERROR } from "../execution-error-constants.js";
 import { parseAbsoluteTimeMs } from "../parse.js";
 import type { CronRunLogEntry } from "../run-log-types.js";
 import type { InterruptedStartupRun } from "../store/run-recovery.types.js";
@@ -14,8 +15,6 @@ import {
   applyTriggerNoFireResult,
 } from "./timer-outcomes.js";
 import { applyTriggerRunResult } from "./timer-trigger.js";
-
-export const STARTUP_INTERRUPTED_ERROR = "cron: job interrupted by gateway restart";
 
 function resolveOneShotReplacementAtMs(job: CronJob, runningAtMs: number): number | undefined {
   if (job.schedule.kind !== "at" || !job.enabled) {
@@ -34,11 +33,13 @@ export function markInterruptedStartupRun(params: {
   state: CronJobPolicyContext;
   job: CronJob;
   runningAtMs: number;
+  preservedOccurrenceAtMs?: number;
   nowMs: number;
   deferredNotifications: DeferredCronNotifications;
 }): InterruptedStartupRun {
   const { job, runningAtMs, nowMs } = params;
-  const replacementAtMs = resolveOneShotReplacementAtMs(job, runningAtMs);
+  const replacementAtMs =
+    params.preservedOccurrenceAtMs ?? resolveOneShotReplacementAtMs(job, runningAtMs);
   // A persisted running marker means the gateway stopped mid-run; mark it as a
   // normal failed run so retries, alerts, and run logs all see one outcome.
   const previousErrors =
@@ -114,6 +115,7 @@ export function restoreFinalizedStartupRun(params: {
   state: CronJobPolicyContext;
   job: CronJob;
   runningAtMs: number;
+  preservedOccurrenceAtMs?: number;
   entry: CronRunLogEntry & { status: CronRunStatus };
   scriptResult?: { scriptStateChanged: true; scriptState?: unknown };
   triggerEval?: CronTriggerEvalOutcome;
@@ -131,14 +133,19 @@ export function restoreFinalizedStartupRun(params: {
     );
     return undefined;
   }
-  const replacementAtMs = resolveOneShotReplacementAtMs(job, startedAt);
+  const replacementAtMs =
+    (entry.nextRunAtMs === params.preservedOccurrenceAtMs
+      ? params.preservedOccurrenceAtMs
+      : undefined) ?? resolveOneShotReplacementAtMs(job, startedAt);
   const persistedNextRunAtMs = asDateTimestampMs(job.state.nextRunAtMs);
   // Committed edits own scheduling even if the clock repeats or moves back.
-  // Older pending one-shots still retain a later replacement deadline.
+  // Legacy split-write finalization can leave a newer retry deadline in the job row.
   const scheduleOwnership =
     typeof job.state.runningScheduleChangeId === "string" ||
     (job.schedule.kind === "at" &&
-      (!job.enabled || (persistedNextRunAtMs !== undefined && persistedNextRunAtMs > startedAt)))
+      (!job.enabled ||
+        replacementAtMs !== undefined ||
+        (persistedNextRunAtMs !== undefined && persistedNextRunAtMs > startedAt)))
       ? "stale"
       : "current";
   // A once result can record no next run before a later edit retires its

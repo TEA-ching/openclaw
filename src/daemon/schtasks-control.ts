@@ -9,13 +9,16 @@ import { sleep } from "../utils.js";
 import { resolveGatewayServiceProbeHosts } from "./gateway-service-probe-hosts.js";
 import { formatLine } from "./output.js";
 import { OPENCLAW_WRAPPER_ENV_KEY, resolveOpenClawWrapperPath } from "./program-args.js";
-import { execSchtasks } from "./schtasks-exec.js";
+import { execScheduledTaskEnabledChange, execSchtasks } from "./schtasks-exec.js";
 import {
   readScheduledTaskCommand,
   resolveTaskName,
   resolveTaskScriptPath,
 } from "./schtasks-layout.js";
-import { describeUnverifiedPortListeners } from "./schtasks-port-diagnostics.js";
+import {
+  describeUnverifiedPortListeners,
+  waitForGatewayPortRelease,
+} from "./schtasks-port-diagnostics.js";
 import {
   findInstalledProcessPid,
   isNodeHostArgv,
@@ -29,7 +32,6 @@ import {
   terminateGatewayProcessTree,
   terminateScheduledTaskGatewayListeners,
   terminateScheduledTaskNodeHost,
-  waitForGatewayPortRelease,
 } from "./schtasks-process.js";
 import {
   assertSchtasksAvailable,
@@ -188,8 +190,10 @@ export async function runScheduledTaskOrThrow(params: {
   onMutation?: () => void;
   assertCurrent?: () => void;
   allowFallback?: boolean;
+  beforeEffect?: () => void;
 }): Promise<ScheduledTaskActivation> {
   params.assertCurrent?.();
+  params.beforeEffect?.();
   const run = await execSchtasks(["/Run", "/TN", params.taskName]);
   if (run.code !== 0) {
     throw new Error(`schtasks run failed: ${run.stderr || run.stdout}`.trim());
@@ -201,7 +205,12 @@ export async function runScheduledTaskOrThrow(params: {
     return "scheduled-task";
   }
   if (params.allowFallback !== false && !shouldManageGatewayListenerPort(params.env)) {
-    await launchFallbackTaskScript(params.env, undefined, params.assertCurrent);
+    await launchFallbackTaskScript(
+      params.env,
+      undefined,
+      params.assertCurrent,
+      params.beforeEffect,
+    );
     return "direct-fallback";
   }
   throw new Error(
@@ -304,14 +313,14 @@ async function changeScheduledTaskEnabledState(params: {
     }
   }
 
-  const action = params.enabled ? "/ENABLE" : "/DISABLE";
+  const action = params.enabled ? "enable" : "disable";
   await params.beforeMutation?.();
   params.assertCurrent?.();
-  const result = await execSchtasks(["/Change", "/TN", taskName, action]);
+  const result = await execScheduledTaskEnabledChange(taskName, params.enabled);
   if (result.code !== 0) {
     const detail = (result.stderr || result.stdout).trim() || "unknown error";
-    const changeError = new Error(`schtasks ${action.slice(1).toLowerCase()} failed: ${detail}`);
-    if (/access is denied|0x80070005/iu.test(detail)) {
+    const changeError = new Error(`Scheduled Task ${action} failed: ${detail}`);
+    if (result.hresult === -2147024891) {
       throw Object.assign(changeError, { code: "EACCES" });
     }
     if (!params.enabled && params.restoreOnFailure !== false) {
@@ -319,10 +328,10 @@ async function changeScheduledTaskEnabledState(params: {
       try {
         await params.beforeMutation?.("restore");
         params.assertCurrent?.("restore");
-        const restore = await execSchtasks(["/Change", "/TN", taskName, "/ENABLE"]);
+        const restore = await execScheduledTaskEnabledChange(taskName, true);
         if (restore.code !== 0) {
           const restoreDetail = (restore.stderr || restore.stdout).trim() || "unknown error";
-          throw new Error(`schtasks enable failed: ${restoreDetail}`);
+          throw new Error(`Scheduled Task enable failed: ${restoreDetail}`);
         }
       } catch (restoreError) {
         throw new ScheduledTaskAutoStartRecoveryError(
@@ -484,6 +493,7 @@ export async function startScheduledTask({
   env,
   onMutation,
   assertCurrent,
+  beforeEffect,
   preserveAutoStart,
 }: GatewayServiceControlArgs): Promise<void> {
   const effectiveEnv = env ?? (process.env as GatewayServiceEnv);
@@ -499,6 +509,7 @@ export async function startScheduledTask({
       stdout,
       () => reportMutation("startup-entry-start"),
       assertCurrent,
+      beforeEffect,
     );
     return;
   }
@@ -584,6 +595,7 @@ export async function startScheduledTask({
   await runScheduledTaskOrThrow({
     taskName,
     assertCurrent,
+    beforeEffect,
     allowFallback: preserveAutoStart !== true,
     env: effectiveEnv,
     scriptPath: resolveTaskScriptPath(effectiveEnv),

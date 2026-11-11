@@ -11,6 +11,7 @@ import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { initializeGlobalHookRunner } from "openclaw/plugin-sdk/hook-runtime";
 import { MESSAGE_TOOL_DELIVERY_HINTS } from "openclaw/plugin-sdk/message-tool-delivery-hints";
 import { createMockPluginRegistry } from "openclaw/plugin-sdk/plugin-test-runtime";
+import { setRuntimeConfigSnapshot } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { registerSandboxBackend } from "openclaw/plugin-sdk/sandbox";
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { readSessionTranscriptEvents } from "openclaw/plugin-sdk/session-transcript-runtime";
@@ -32,14 +33,20 @@ import {
   createStartedThreadHarness,
   getRequestInputText,
   makeThreadBootstrapBinding,
-  requestMethodsExcludingSkillDiscovery,
   requireRecord,
   runCodexAppServerAttempt,
   writeCodexAppServerBinding,
 } from "./run-attempt.context-engine.test-support.js";
 import { readCodexAppServerBinding } from "./session-binding.test-helpers.js";
+import { withoutCodexTurnContextHandoffs } from "./test-support.js";
 
 const CODEX_TURN_START_TEXT_INPUT_MAX_CHARS = 1 << 20;
+
+function requestMethodsExcludingSkillDiscovery(harness: {
+  requests: ReadonlyArray<{ method: string; params?: unknown }>;
+}) {
+  return withoutCodexTurnContextHandoffs(harness.requests);
+}
 
 async function createSqliteParams(
   workspaceDir: string,
@@ -54,12 +61,8 @@ async function createSqliteParams(
     storePath,
   });
   const params = createParams(sessionFile, workspaceDir);
-  await upsertSessionEntry({
-    agentId: "main",
-    sessionKey,
-    storePath,
-    entry: { sessionFile, sessionId, updatedAt: Date.now() },
-  });
+  const entry = { sessionFile, sessionId, updatedAt: Date.now() };
+  await upsertSessionEntry({ agentId: "main", sessionKey, storePath, entry });
   params.sessionTarget = {
     agentId: "main",
     sessionId,
@@ -144,6 +147,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     params.fallbackReason = "provider_unavailable";
     params.degradedReason = "context_overflow";
     params.config = { memory: { citations: "on" } } as EmbeddedRunAttemptParams["config"];
+    setRuntimeConfigSnapshot(params.config ?? {});
 
     const run = runCodexAppServerAttempt(params);
     await harness.waitForMethod("turn/start");
@@ -528,6 +532,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
             defaults: { compaction: { maxActiveTranscriptBytes: resumed ? 1_000 : "1mb" } },
           },
         };
+        setRuntimeConfigSnapshot(params.config);
       }
       const harness = createStartedThreadHarness(
         async (method) => {
@@ -544,6 +549,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
       const run = runCodexAppServerAttempt(params);
       await harness.waitForMethod("turn/start");
       expect(requestMethodsExcludingSkillDiscovery(harness)).toEqual([
+        "configRequirements/read",
         "config/read",
         "configRequirements/read",
         ...(resumed ? ["thread/read", "thread/resume", "thread/inject_items"] : ["thread/start"]),
@@ -601,6 +607,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     await harness.waitForMethod("turn/start");
 
     expect(requestMethodsExcludingSkillDiscovery(harness)).toEqual([
+      "configRequirements/read",
       "config/read",
       "configRequirements/read",
       "thread/start",
@@ -664,6 +671,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
       const run = runCodexAppServerAttempt(params);
       await harness.waitForMethod("turn/start");
       expect(requestMethodsExcludingSkillDiscovery(harness)).toEqual([
+        "configRequirements/read",
         "config/read",
         "configRequirements/read",
         "thread/start",
@@ -752,6 +760,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
           },
         },
       } as EmbeddedRunAttemptParams["config"];
+      setRuntimeConfigSnapshot(params.config ?? {});
 
       const run = runCodexAppServerAttempt(params);
       await Promise.race([

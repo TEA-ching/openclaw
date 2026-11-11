@@ -37,6 +37,7 @@ import { redactSensitiveLines, resolveRedactOptions } from "../logging/redact.js
 import { defaultRuntime } from "../runtime.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { formatCliCommand } from "./command-format.js";
+import { throwExpectedCliError } from "./failure-output.js";
 import { resolveGatewayLocalPortOverride } from "./gateway-port-option.js";
 import { addGatewayClientOptions, callGatewayFromCli } from "./gateway-rpc.js";
 import type { GatewayRpcOpts } from "./gateway-rpc.types.js";
@@ -415,6 +416,7 @@ export function registerLogsCli(program: Command) {
     const limit = parseLogsPositiveInt(opts.limit, 200, "--limit");
     const maxBytes = parseLogsPositiveInt(opts.maxBytes, 250_000, "--max-bytes");
     let gatewayCursor: number | undefined;
+    let gatewayFile: string | undefined;
     let journalCursor: string | undefined;
     let journalSince: string | undefined;
     let preferJournal = false;
@@ -425,6 +427,9 @@ export function registerLogsCli(program: Command) {
       jsonMode ? emitJsonLine({ type: "notice", message }) : errorLine(message);
     const pretty = !jsonMode && process.stdout.isTTY && !opts.plain;
     const rich = isRich() && opts.color !== false && !opts.plain;
+    if (opts.localTime && opts.utc) {
+      throwExpectedCliError("Pass only one of --local-time or --utc.");
+    }
     const localTime = !opts.utc;
     const emitConnectionNotice = (message: string, style: (value: string) => string) =>
       jsonMode
@@ -550,6 +555,28 @@ export function registerLogsCli(program: Command) {
                 };
               }
             }
+          }
+          if (
+            gatewayCursor !== undefined &&
+            gatewayFile !== undefined &&
+            payload.file !== undefined &&
+            payload.file !== gatewayFile
+          ) {
+            // Byte cursors belong to one file, including across journal recovery.
+            // Discard the stale cursor before retrying so a failed reread stays cursorless.
+            gatewayCursor = undefined;
+            gatewayPollStartedAt = new Date().toISOString();
+            payload = opts.localConfigUnavailable
+              ? {
+                  ...(await readConfiguredLogTail({ limit, maxBytes })),
+                  sourceKind: "file",
+                  localFallback: true,
+                }
+              : await fetchGatewayLogs(opts, gatewayCursor, false, {
+                  limit,
+                  maxBytes,
+                  signal,
+                });
           }
         } catch (err) {
           signal?.throwIfAborted();
@@ -682,6 +709,7 @@ export function registerLogsCli(program: Command) {
           gatewayRecovery = { kind: "idle" };
           if (typeof payload.cursor === "number" && Number.isFinite(payload.cursor)) {
             gatewayCursor = payload.cursor;
+            gatewayFile = payload.file;
             if (opts.follow) {
               // A recovered Gateway cursor supersedes the prior journal bridge.
               // A later fallback must start from this poll, not replay the old outage.

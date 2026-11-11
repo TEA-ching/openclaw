@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
+import "../../lib/toast-host.ts";
+import "../mcp-app-view-registration.ts";
 // Side-effect import: registers the custom elements mount() depends on
 // without relying on transitive fixture imports.
 import "./board-view.ts";
@@ -12,6 +14,7 @@ import {
   callbacks,
   gatewayContext,
   mount,
+  openBoardMenu,
   settleCells,
   snapshot,
 } from "./board-view.test-support.ts";
@@ -91,7 +94,7 @@ describe("openclaw-board-view", () => {
   it("paces a stalled proxy retry without spending the authorization refresh budget", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => new Response("<!doctype html><p>Ready document</p>"));
-    vi.stubGlobal("fetch", fetchMock);
+    stubBoardDocumentFetch(fetchMock);
     const frameLoadFailed = vi.fn(async () => undefined);
     const view = await mount({
       context: gatewayContext(null),
@@ -377,6 +380,7 @@ describe("openclaw-board-view", () => {
     });
     const view = await mount({ callbacks: callbacks({ applyOps }) });
     const frame = view.querySelector("iframe");
+    await openBoardMenu(view);
     view.querySelector<HTMLButtonElement>(".board-widget__menu-danger")?.click();
     await vi.waitFor(() => {
       expect(view.querySelector(".board-view__error")?.textContent).toContain("could not be saved");
@@ -395,9 +399,11 @@ describe("openclaw-board-view", () => {
     const applyOps = vi.fn(() => pending.promise);
     const view = await mount({ callbacks: callbacks({ applyOps }) });
     const cells = [...view.querySelectorAll("openclaw-board-widget-cell")];
+    await openBoardMenu(cells[0]!);
     cells[0]?.querySelector<HTMLButtonElement>(".board-widget__menu-danger")?.click();
     await vi.waitFor(() => expect(applyOps).toHaveBeenCalledTimes(1));
     await settleCells(view);
+    await openBoardMenu(cells[1]!);
     const secondRemove = cells[1]?.querySelector<HTMLButtonElement>(".board-widget__menu-danger");
     expect(secondRemove?.disabled).toBe(true);
     secondRemove?.click();
@@ -410,6 +416,7 @@ describe("openclaw-board-view", () => {
     const pending = deferred();
     const applyOps = vi.fn(() => pending.promise);
     const view = await mount({ callbacks: callbacks({ applyOps }) });
+    await openBoardMenu(view);
     view.querySelector<HTMLButtonElement>(".board-widget__menu-danger")?.click();
     await vi.waitFor(() => expect(applyOps).toHaveBeenCalledTimes(1));
     view.snapshot = { ...snapshot(), sessionKey: "agent:main:new-session" };
@@ -471,9 +478,6 @@ describe("openclaw-board-view", () => {
   });
 
   it("shows stale MCP Apps with retry and delete without breaking the board", async () => {
-    if (!customElements.get("mcp-app-view")) {
-      customElements.define("mcp-app-view", class extends HTMLElement {});
-    }
     const widgetAppView = vi.fn(async () => ({
       status: "stale" as const,
       error: "origin transcript pruned",
@@ -485,9 +489,12 @@ describe("openclaw-board-view", () => {
     }));
     const applyOps = vi.fn(async () => undefined);
     const source = snapshot({ widgets: [boardWidget({ contentKind: "mcp-app" })] });
+    const context = gatewayContext(null);
+    const connection = createApplicationGateway(context.gateway.snapshot);
     const view = await mount({
       snapshot: source,
       callbacks: callbacks({ applyOps, widgetAppView, refreshWidgetAppView }),
+      context: { ...context, gateway: connection.gateway },
     });
 
     await vi.waitFor(() =>
@@ -692,7 +699,7 @@ describe("openclaw-board-view", () => {
   it("leaves arrow keys from nested widget controls untouched", async () => {
     const applyOps = vi.fn(async () => undefined);
     const view = await mount({ callbacks: callbacks({ applyOps }) });
-    const menuButton = view.querySelector<HTMLButtonElement>(".board-widget__menu-danger");
+    const menuButton = view.querySelector<HTMLButtonElement>(".board-widget__menu-trigger");
     menuButton?.focus();
     menuButton?.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -752,14 +759,10 @@ describe("openclaw-board-view", () => {
     expect(view.querySelector(".board-tabs__overflow-trigger")?.getAttribute("aria-label")).toBe(
       "More dashboard tabs",
     );
-    expect(view.querySelectorAll(".board-tabs__overflow > wa-dropdown-item")).toHaveLength(2);
-    const firstOverflowTab = view.querySelector(".board-tabs__overflow > wa-dropdown-item");
-    view.querySelector(".board-tabs__overflow")?.dispatchEvent(
-      new CustomEvent("wa-select", {
-        detail: { item: firstOverflowTab },
-        bubbles: true,
-      }),
-    );
-    expect(selectTab).toHaveBeenCalledWith(firstOverflowTab?.getAttribute("value"));
+    await openBoardMenu(view, ".board-tabs__overflow-trigger");
+    expect(view.querySelectorAll(".board-tabs__overflow-item")).toHaveLength(2);
+    const firstOverflowTab = view.querySelector<HTMLButtonElement>(".board-tabs__overflow-item")!;
+    firstOverflowTab.click();
+    await vi.waitFor(() => expect(selectTab).toHaveBeenCalledWith(firstOverflowTab.dataset.value));
   });
 });

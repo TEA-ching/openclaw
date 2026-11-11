@@ -151,6 +151,24 @@ if (kind === "git" && args.join(" ") === "--version") {
 describe("install.ps1 failure handling", () => {
   const harness = createScriptTestHarness();
   const source = readFileSync(SCRIPT_PATH, "utf8");
+  it("only continues a failed Git pull after exact checkout restoration", () => {
+    const state = extractFunctionBody(source, "Get-GitCheckoutState");
+    const update = extractFunctionBody(source, "Update-GitCheckoutBestEffort");
+    const install = extractFunctionBody(source, "Install-OpenClawFromGit");
+    expect(state).toContain("rev-parse --verify HEAD");
+    expect(state).toContain("status --porcelain=v1 --untracked-files=all");
+    expect(state).toContain('"rebase-merge"');
+    expect(state).toContain('"rebase-apply"');
+    expect(update).toContain('$ErrorActionPreference = "Continue"');
+    expect(update).toContain("-not $before -or $before.Rebasing");
+    expect(update).toContain("if ($LASTEXITCODE -eq 0)");
+    expect(update).toContain("rebase --abort");
+    expect(update).toContain("-not $after.Rebasing");
+    expect(update).toContain("$after.Head -eq $before.Head");
+    expect(update).toContain("$after.Status -eq $before.Status");
+    expect(install).toContain("Update-GitCheckoutBestEffort -RepoDir $RepoDir");
+    expect(install).not.toContain("try { git -C $RepoDir pull --rebase");
+  });
   const powershell = findPowerShell();
   const bootstrapShells =
     process.platform === "win32"
@@ -199,6 +217,76 @@ describe("install.ps1 failure handling", () => {
       },
     );
   };
+  // Both Windows engines are required proof, not a best-available-shell fallback.
+  describe.skipIf(process.platform !== "win32")("Git pull native recovery", () => {
+    it.each([
+      { command: "powershell.exe", major: 5, minor: 1 },
+      { command: "pwsh.exe", major: 7, minor: undefined },
+    ])("restores a conflicted checkout with $command", ({ command, major, minor }) => {
+      const version = spawnSync(
+        command,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "$PSVersionTable.PSVersion.ToString()",
+        ],
+        { encoding: "utf8", timeout: 30_000 },
+      );
+      expect(version.status, "Required engine unavailable: " + command + " " + version.stderr).toBe(
+        0,
+      );
+      const parts = version.stdout.trim().split(".").map(Number);
+      expect(parts[0]).toBe(major);
+      if (minor !== undefined) {
+        expect(parts[1]).toBe(minor);
+      }
+      const result = spawnSync(
+        command,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-File",
+          "test/scripts/install-git-pull.ps1",
+          "-InstallerPath",
+          join(process.cwd(), SCRIPT_PATH),
+          "-FixtureRoot",
+          join(harness.createTempDir("openclaw-install-pull-"), "fixture"),
+        ],
+        { encoding: "utf8", timeout: 60_000 },
+      );
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      const receipt = result.stdout
+        .split(/\r?\n/)
+        .findLast((line) => line.startsWith('{"passed":'));
+      expect(receipt, result.stdout).toBeDefined();
+      const proof = JSON.parse(receipt!);
+      expect(proof).toMatchObject({
+        passed: true,
+        aborted: true,
+        outcome: "FIXTURE_BUILD_BOUNDARY",
+        status: "",
+        rebasing: false,
+      });
+      expect(proof.head).toBe(proof.expectedHead);
+      expect(proof.cases).toEqual({
+        successfulPull: true,
+        callerPreferenceRestored: true,
+        unchangedFailure: true,
+        preexistingRebase: true,
+        unreadableState: true,
+        abortFailure: true,
+        mismatchedHead: true,
+        mismatchedStatus: true,
+        dirtyBypass: true,
+        skipUpdate: true,
+        callerEnvironmentRestored: true,
+      });
+    });
+  });
+
   const batchedPowerShellResults = new Map<string, { error: string; ok: boolean }>();
 
   beforeAll(() => {
@@ -234,12 +322,12 @@ function Invoke-NpmCommand { throw 'unexpected npm invocation' }
 function Invoke-RestMethod {
     param([string]$Uri, [int]$TimeoutSec)
     if ($Uri -ne 'https://nodejs.org/dist/index.json') { throw "unexpected metadata URL: $Uri" }
-    return @([pscustomobject]@{ version = 'v26.1.0'; files = @('win-x64-zip', 'win-arm64-zip') })
+    return @([pscustomobject]@{ version = 'v26.12.1'; files = @('win-x64-zip', 'win-arm64-zip') })
 }
 function Save-InstallerDownload {
     param([string]$Uri, [string]$OutFile)
     if ($script:Scenario -eq 'download') { throw 'fixture download failure' }
-    if ($Uri -eq 'https://nodejs.org/dist/v26.1.0/SHASUMS256.txt') {
+    if ($Uri -eq 'https://nodejs.org/dist/v26.12.1/SHASUMS256.txt') {
         $archive = Get-ChildItem -LiteralPath (Split-Path -Parent $OutFile) -Filter '*.zip' | Select-Object -First 1
         $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash
         if ($script:Scenario -eq 'checksum') { $hash = '0' * 64 }
@@ -247,7 +335,7 @@ function Save-InstallerDownload {
         [IO.File]::WriteAllText($OutFile, "$hash  $name")
         return
     }
-    if ($Uri -notmatch '^https://nodejs\.org/dist/v26\.1\.0/node-v26\.1\.0-win-(x64|arm64)\.zip$') { throw "unexpected archive URL: $Uri" }
+    if ($Uri -notmatch '^https://nodejs\.org/dist/v26\.12\.1/node-v26\.12\.1-win-(x64|arm64)\.zip$') { throw "unexpected archive URL: $Uri" }
     [IO.File]::WriteAllText($OutFile, 'downloaded archive bytes')
 }
 function Expand-PortableNodeArchive {
@@ -528,8 +616,11 @@ try {
           "  return $script:FixtureSqlite",
           "}",
           "foreach ($case in @(",
-          "  @{ version = 'v24.19.0'; text = $true; expected = $true },",
-          "  @{ version = 'v24.19.0'; text = $false; expected = $false },",
+          "  @{ version = 'v24.22.1'; text = $true; expected = $true },",
+          "  @{ version = 'v24.22.1'; text = $false; expected = $false },",
+          "  @{ version = 'v24.16.0+vendor.1'; text = $true; expected = $true },",
+          "  @{ version = 'v26.1.0'; text = $true; expected = $true },",
+          "  @{ version = 'v24.16.0'; text = $false; expected = $false },",
           "  @{ version = 'v24.15.0+vendor.1'; text = $true; expected = $false },",
           "  @{ version = 'v26.0.0+vendor.1'; text = $true; expected = $false },",
           "  @{ version = 'v24.15.0'; text = $false; expected = $false },",
@@ -661,7 +752,7 @@ try {
           "",
           "function private-node-fixture {",
           "  $global:LASTEXITCODE = 0",
-          "  if ($args[0] -eq '-v') { return 'v26.1.0' }",
+          "  if ($args[0] -eq '-v') { return 'v26.12.1' }",
           "  $input | Out-Null",
           "  return (@{ available = $true; version = $script:FixtureSqliteVersion; text = $true; blob = $true; json = $true } | ConvertTo-Json -Compress)",
           "}",
@@ -2144,7 +2235,7 @@ function Get-Command {
 function Invoke-FixtureNode {
     $global:LASTEXITCODE = 0
     if ($args[0] -eq '-v') {
-        return 'v26.1.0'
+        return 'v26.12.1'
     }
     $probe = @($input) -join [Environment]::NewLine
     if (-not $probe.Contains('CREATE TABLE probe') -or -not $probe.Contains('a\u0000b\u0000')) {

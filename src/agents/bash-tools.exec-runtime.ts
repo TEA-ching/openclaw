@@ -20,6 +20,7 @@ import {
 import { findPathKey, mergePathPrepend } from "../infra/path-prepend.js";
 import { logWarn } from "../logger.js";
 import { redactToolPayloadText } from "../logging/redact.js";
+import { withChildProcessOperation } from "../process/spawn-diagnostics.js";
 import type { SpawnInitiation } from "../process/spawn-initiation.js";
 import type { ManagedRun } from "../process/supervisor/index.js";
 import { getProcessSupervisor } from "../process/supervisor/index.js";
@@ -53,7 +54,7 @@ import {
   waitForExecSession,
 } from "./bash-process-registry.js";
 import { emitExecProcessCompleted } from "./bash-tools.exec-diagnostics.js";
-import { prepareHostExecSpawn } from "./bash-tools.exec-host-spawn.js";
+import { prepareHostExecSpawn, resolveExecLaunchEnv } from "./bash-tools.exec-host-spawn.js";
 import { createExecLaunchLifecycle } from "./bash-tools.exec-launch.js";
 import { maybeNotifyOnExit, prepareExecExitNotification } from "./bash-tools.exec-notify.js";
 import {
@@ -757,18 +758,20 @@ export async function runExecProcess({
         : undefined;
       secretEgressGrant = grant;
       try {
-        return await withoutGatewayToolCallerIdentity(() =>
-          supervisor.spawn({
-            ...input,
-            ...(grant ? { env: { ...input.env, ...grant.env } } : {}),
-            onCancel: () => {
-              beginSandboxTermination();
-              grant?.revoke();
-            },
-            assertCurrent,
-            beforeSpawn: assertHostPolicyCurrent,
-            initiateSpawn: launchLifecycle.wrap(assertCurrent, assertHostPolicyCurrent),
-          }),
+        return await withChildProcessOperation("agent.exec", () =>
+          withoutGatewayToolCallerIdentity(() =>
+            supervisor.spawn({
+              ...input,
+              env: resolveExecLaunchEnv(input.env, Boolean(opts.sandbox), grant?.env),
+              onCancel: () => {
+                beginSandboxTermination();
+                grant?.revoke();
+              },
+              assertCurrent,
+              beforeSpawn: assertHostPolicyCurrent,
+              initiateSpawn: launchLifecycle.wrap(assertCurrent, assertHostPolicyCurrent),
+            }),
+          ),
         );
       } catch (error) {
         grant?.revoke();

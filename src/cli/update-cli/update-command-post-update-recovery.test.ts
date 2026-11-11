@@ -362,8 +362,20 @@ describe("failed update recovery restart", () => {
     async ({ mutationStarted, stopped, waitForStartup }) => {
       const root = tempDirs.make("update-recovery-startup-policy-");
       await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ version: "1.0.0" }));
-      await finishFailedUpdate({ ...failedResult(undefined), root }, { mutationStarted, stopped });
-      expect(mocks.verifyGateway).toHaveBeenCalledWith(expect.objectContaining({ waitForStartup }));
+      const failure = await finishFailedUpdate(
+        { ...failedResult(undefined), root },
+        { mutationStarted, stopped },
+      );
+      if (mutationStarted || stopped) {
+        expect(mocks.verifyGateway).toHaveBeenCalledWith(
+          expect.objectContaining({ waitForStartup }),
+        );
+      } else {
+        expect(mocks.verifyGateway).not.toHaveBeenCalled();
+        expect(failure.result.steps).toContainEqual(
+          expect.objectContaining({ name: "gateway recovery observation", exitCode: 0 }),
+        );
+      }
       expect(mocks.restart).not.toHaveBeenCalled();
       expect(mocks.restartCandidate).not.toHaveBeenCalled();
     },
@@ -556,7 +568,9 @@ describe("failed update recovery restart", () => {
       const nextAction = getUpdateRun(run.runId, { env })?.origin.nextAction;
       expect(mocks.restart).not.toHaveBeenCalled();
       expect(nextAction).toContain("Run `openclaw --profile work triage`");
-      expect(nextAction?.includes("Keep the gateway stopped")).toBe(stopped);
+      expect(nextAction).not.toMatch(/keep the gateway stopped/i);
+      expect(nextAction).toContain("openclaw --profile work update repair");
+      expect(nextAction).toContain("openclaw --profile work gateway status --deep");
       expect(mocks.printResult.mock.lastCall?.[2]).toEqual({ nextAction });
     },
   );
@@ -603,6 +617,7 @@ describe("failed update recovery restart", () => {
       expect(recorded.origin.nextAction).not.toContain("remains stopped");
       expect(recorded.origin.nextAction).toContain("triage");
       expect(recorded.origin.nextAction).toContain("update repair");
+      expect(recorded.origin.nextAction).toContain("gateway status --deep");
       expect(recorded.verification).toMatchObject({ serviceRunning: true, pid });
       expect(recorded.verification.runningVersion).toBe(version);
       expect(mocks.printResult.mock.lastCall?.[2]).toEqual({

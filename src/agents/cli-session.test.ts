@@ -308,11 +308,7 @@ describe("cli-session helpers", () => {
         ...current,
         promptToolNamesHash: "prompt-tools-b",
       }),
-    ).toEqual({
-      mode: "reuse-with-drift",
-      sessionId: "cli-session-1",
-      drift: { reasons: ["prompt-tools"] },
-    });
+    ).toEqual({ mode: "invalidate", invalidatedReason: "prompt-tools" });
     expect(
       resolveCliSessionReuse({
         ...current,
@@ -321,6 +317,33 @@ describe("cli-session helpers", () => {
     ).toEqual({ mode: "invalidate", invalidatedReason: "mcp" });
   });
 
+  it.each(["prompt-a", "prompt-b"])(
+    "invalidates tool catalog drift with a stable MCP topology and system prompt %s",
+    (extraSystemPromptHash) => {
+      const binding = {
+        sessionId: "cli-session-1",
+        authProfileId: "anthropic:work",
+        authEpoch: "auth-epoch-a",
+        authEpochVersion: 2,
+        extraSystemPromptHash: "prompt-a",
+        mcpConfigHash: "mcp-a",
+        promptToolNamesHash: "tools-without-exec",
+      };
+
+      expect(
+        resolveCliSessionReuse({
+          binding,
+          authProfileId: "anthropic:work",
+          authEpoch: "auth-epoch-a",
+          authEpochVersion: 2,
+          extraSystemPromptHash,
+          mcpConfigHash: "mcp-a",
+          promptToolNamesHash: "tools-with-exec",
+        }),
+      ).toEqual({ mode: "invalidate", invalidatedReason: "prompt-tools" });
+    },
+  );
+
   it("validates a forked binding against the child's account before resuming it", () => {
     const forked = forkCliSessionBindings(
       {
@@ -328,6 +351,7 @@ describe("cli-session helpers", () => {
           "claude-cli": {
             sessionId: "native-parent",
             resumeCheckpointId: "parent-checkpoint",
+            transcriptCursor: { localSessionId: "parent", entryId: "input", runId: "run" },
             forceReuse: true,
             authProfileId: "anthropic:work",
             authEpoch: "auth-epoch-a",

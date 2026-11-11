@@ -22,8 +22,9 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-vi.mock("ws", () => ({
-  default: mocks.FakeWebSocket,
+vi.mock("openclaw/plugin-sdk/websocket-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/websocket-runtime")>()),
+  WebSocket: mocks.FakeWebSocket,
 }));
 
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", () => ({
@@ -318,12 +319,12 @@ describe("OpenAI realtime voice browser authentication", () => {
     ).rejects.toThrow("OpenAI Realtime voice requires an OpenAI Platform API key");
   });
 
-  it("does not configure Azure realtime sessions without a Platform API key", () => {
+  it("does not configure Azure realtime sessions without a Platform API key", async () => {
     const provider = buildOpenAIRealtimeVoiceProvider();
     const cfg = { agents: { defaults: {} } } as never;
 
     expect(
-      provider.isConfigured({
+      await provider.isConfiguredAsync?.({
         cfg,
         providerConfig: {
           azureEndpoint: "https://example.openai.azure.com",

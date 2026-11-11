@@ -7,8 +7,6 @@ import {
   isCommandPaletteShortcut,
   SHELL_NAV_DRAWER_TOGGLE_EVENT,
   shellNavDrawerTriggerFromEvent,
-  type CommandPaletteElement,
-  type CommandPaletteTargetDetail,
 } from "../components/command-palette-contract.ts";
 import { registryFor } from "../components/overlay-registry.ts";
 import {
@@ -24,7 +22,6 @@ import {
   TERMINAL_PANEL_TOGGLE_EVENT,
 } from "../components/panel-toggle-contract.ts";
 import { focusWithoutTooltip } from "../components/tooltip.ts";
-import type { BoardFace } from "../lib/board/settings.ts";
 import { canCallGatewayMethod } from "../lib/gateway-methods.ts";
 import {
   KEYBOARD_SHORTCUT_COMBOS,
@@ -42,9 +39,10 @@ import {
   type DebugOverlayElement,
   type DebugOverlayMode,
 } from "../pages/debug/debug-overlay-state.ts";
+import type { ShellChromeHost } from "./app-shell-chrome.types.ts";
 import { ShellCommandPaletteOwner } from "./app-shell-command-palette-loading.ts";
-import { openShellNewSession, type ShellNewSessionHost } from "./app-shell-new-session.ts";
-import { ShellPanelOwner, type ShellPanelHost } from "./app-shell-panels.ts";
+import { openShellNewSession } from "./app-shell-new-session.ts";
+import { ShellPanelOwner } from "./app-shell-panels.ts";
 import type { ApplicationNavigationOptions } from "./context.ts";
 import {
   isOptionalElementDefined,
@@ -80,31 +78,9 @@ import { isHomePanelAvailable } from "./panel-availability.ts";
 import { NAV_WIDTH_MAX, NAV_WIDTH_MIN } from "./settings.ts";
 import { retryStaleChunkReloadWhenReachable } from "./stale-chunk-reload.ts";
 
-let nativeCommandsOwner: AbortController | undefined;
+export type { ShellChromeHost } from "./app-shell-chrome.types.ts";
 
-export interface ShellChromeHost extends ShellNewSessionHost, ShellPanelHost {
-  readonly element: HTMLElement;
-  readonly isConnected: boolean;
-  readonly activeSessionKey: string;
-  readonly updateComplete: Promise<boolean>;
-  readonly commandPaletteElement: OptionalCustomElement;
-  readonly execApprovalElement: OptionalCustomElement;
-  readonly commandPalette: CommandPaletteElement | undefined;
-  readonly approvalOverlay: (HTMLElement & { show(): void; dialogOpen?: boolean }) | undefined;
-  navDrawerOpen: boolean;
-  desktopNavigationExpanded: boolean;
-  navDrawerTrigger: HTMLElement | null;
-  nativeHistoryState: NativeHistoryState;
-  commandPaletteTarget: CommandPaletteTargetDetail | undefined;
-  requestUpdate(): void;
-  closeNavDrawer(options?: { restoreFocus?: boolean }): void;
-  exitSettings(): void;
-  navigate(routeId: string, options?: ApplicationNavigationOptions): void;
-  chatNavigationOptions(
-    face: BoardFace,
-    options?: ApplicationNavigationOptions,
-  ): ApplicationNavigationOptions | undefined;
-}
+let nativeCommandsOwner: AbortController | undefined;
 
 export class ShellChromeOwner {
   readonly panels: ShellPanelOwner;
@@ -233,16 +209,17 @@ export class ShellChromeOwner {
     if (nextNavCollapsed) {
       this.dismissSidebarTransientMenus();
     }
+    const activeRailView = host.querySelector<HTMLElement>(
+      '[data-navigation-view][aria-pressed="true"]',
+    );
     host.closeNavDrawer();
     context.navigation.update({ navCollapsed: nextNavCollapsed });
     if (nextNavCollapsed) {
-      void host.updateComplete.then(() => {
-        this.restoreFocusTo(host.querySelector<HTMLElement>(".shell-chrome-controls__nav-toggle"));
-      });
+      void host.updateComplete.then(() => this.restoreFocusTo(activeRailView));
     }
   };
 
-  /** Native Mac chrome hides in-page toggles, so restoration falls back to content. */
+  /** Restore to the persistent rail view, or content when navigation is unavailable. */
   restoreFocusTo = (target: HTMLElement | null | undefined): void =>
     focusWithoutTooltip(
       target?.isConnected && target.checkVisibility()
@@ -349,9 +326,7 @@ export class ShellChromeOwner {
     host.requestUpdate();
     void host.updateComplete.then(() => {
       if (isMobileNavLayout() && !host.navDrawerOpen && dismissedSidebarMenus) {
-        requestAnimationFrame(() => {
-          this.restoreFocusTo(visibleNavDrawerToggle(host.element));
-        });
+        requestAnimationFrame(() => this.restoreFocusTo(visibleNavDrawerToggle(host.element)));
       }
     });
   };
@@ -385,7 +360,7 @@ export class ShellChromeOwner {
     if (event.defaultPrevented || !matchesShortcutCombo(KEYBOARD_SHORTCUT_COMBOS.escape, event)) {
       return;
     }
-    if (host.navDrawerOpen && isMobileNavLayout() && !document.openClawModalLayers?.size) {
+    if (host.navDrawerOpen && isMobileNavLayout() && !this.shouldIgnoreSettingsEscape(event)) {
       event.preventDefault();
       host.closeNavDrawer({ restoreFocus: true });
     } else if (
@@ -426,7 +401,9 @@ export class ShellChromeOwner {
     }
     if (!host.commandPalette && isCommandPaletteShortcut(event)) {
       event.preventDefault();
-      this.togglePalette();
+      if (!event.repeat) {
+        this.togglePalette();
+      }
       return;
     }
     if (
@@ -480,7 +457,7 @@ export class ShellChromeOwner {
       matchesShortcutCombo(KEYBOARD_SHORTCUT_COMBOS.escape, event) &&
       isSettingsTakeover(host.routeState.routeId)
     ) {
-      if (host.navDrawerOpen) {
+      if (host.navDrawerOpen && !this.shouldIgnoreSettingsEscape(event)) {
         event.preventDefault();
         host.closeNavDrawer({ restoreFocus: true });
         return;
@@ -617,12 +594,14 @@ export class ShellChromeOwner {
       return true;
     }
     const target = event.target;
-    return (
-      target instanceof Element &&
-      target.closest(
-        "input, textarea, select, wa-select[open], wa-dropdown[open], [contenteditable], dialog, [role='dialog'], [role='menu'], [role='listbox']",
-      ) !== null
-    );
+    const control =
+      target instanceof Element
+        ? target.closest(
+            "input, textarea, select, wa-select[open], wa-dropdown[open], [contenteditable], dialog, [role='dialog'], [role='menu'], [role='listbox']",
+          )
+        : null;
+    // The drawer owns Escape; its own dialog role is not a nested modal.
+    return control !== null && control !== host.querySelector(".shell-nav");
   }
 
   get commandPaletteLoading() {
@@ -753,14 +732,11 @@ export class ShellChromeOwner {
   readonly handleCommandPaletteTarget = (event: Event): void =>
     applyCommandPaletteTargetEvent(this.host, event);
 
-  readonly nativeNavCollapsed = (): boolean => {
-    return (
-      this.host.onboardingMode ||
-      isMobileNavLayout() ||
-      isSettingsTakeover(this.host.routeState.routeId) ||
-      (!this.host.navDrawerOpen &&
-        !this.host.desktopNavigationExpanded &&
-        (this.host.context?.navigation.snapshot.navCollapsed ?? false))
-    );
-  };
+  readonly nativeNavCollapsed = (): boolean =>
+    this.host.onboardingMode ||
+    isMobileNavLayout() ||
+    isSettingsTakeover(this.host.routeState.routeId) ||
+    (!this.host.navDrawerOpen &&
+      !this.host.desktopNavigationExpanded &&
+      (this.host.context?.navigation.snapshot.navCollapsed ?? false));
 }

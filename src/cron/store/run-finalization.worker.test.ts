@@ -6,6 +6,7 @@ import {
   runOpenClawStateWriteTransaction,
 } from "../../state/openclaw-state-db.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import { readCronRunHistoryPageForTests } from "../run-history.test-support.js";
 import { loadCronStore, saveCronStore } from "../store.js";
 import { cronStoreKey } from "./key.js";
 import { finalizeCronRunsInWorker } from "./run-finalization.worker.js";
@@ -33,7 +34,6 @@ it("commits execution, delivery, and history once despite an owner edit and a du
       claimCronRunReceiptInDatabaseForTest({
         database: db,
         prepared,
-        resolveAgentId: () => "main",
       }),
     );
     job.state.runningReceiptId = receipt.receiptId;
@@ -121,5 +121,11 @@ it("commits execution, delivery, and history once despite an owner edit and a du
     expect(
       database.db.prepare("SELECT status, ended_at FROM task_runs WHERE source_id = ?").all(job.id),
     ).toEqual([{ status: "succeeded", ended_at: now + 10 }]);
+    expect(
+      readCronRunHistoryPageForTests({
+        storeKey: cronStoreKey(storePath),
+        jobId: job.id,
+      }).entries,
+    ).toMatchObject([{ runId: `cron:${job.id}:${now}:${receipt.receiptId}` }]);
   });
 });

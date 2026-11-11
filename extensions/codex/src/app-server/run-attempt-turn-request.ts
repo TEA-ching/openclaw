@@ -1,4 +1,8 @@
-import { embeddedAgentLog, formatErrorMessage } from "openclaw/plugin-sdk/agent-harness-runtime";
+import {
+  embeddedAgentLog,
+  formatErrorMessage,
+  runAgentHarnessLlmInputHook,
+} from "openclaw/plugin-sdk/agent-harness-runtime";
 import {
   interruptCodexTurnAndWaitBestEffort,
   retireUnsafeCodexTurnClientBestEffort,
@@ -19,6 +23,7 @@ import { resolveCodexExplicitSkillInputs } from "./explicit-skill-input.js";
 import { CODEX_INFERENCE_GENERATION_KEY } from "./inference-context.js";
 import { getCodexInferenceThread } from "./inference-routing.js";
 import { readCodexRuntimeModelId } from "./model-runtime.js";
+import { assertCodexProtectedContextCarrier } from "./protected-context-carrier.js";
 import { assertCodexTurnStartResponse } from "./protocol-validators.js";
 import type { CodexTurnStartResponse } from "./protocol.js";
 import { prepareCodexProviderReviewContinuation } from "./provider-review-continuation.js";
@@ -29,6 +34,10 @@ import {
 } from "./run-attempt-lifecycle.js";
 import type { CodexAttemptResources } from "./run-attempt-resources.js";
 import type { CodexAttemptTurnState } from "./run-attempt-turn-state.js";
+import {
+  buildCodexConversationTurnInstructions,
+  splitCodexExtraSystemPrompt,
+} from "./thread-prompt.js";
 import { recordCodexTrajectoryContext } from "./trajectory.js";
 import { buildCodexParentLocalInstructions, buildTurnStartParams } from "./turn-params.js";
 import type { CodexThreadRouteReservation } from "./turn-router.js";
@@ -162,6 +171,12 @@ export async function prepareCodexAttemptTurnRequest(
       resourceState.client,
       resourceState.thread.threadId,
     );
+    assertCodexProtectedContextCarrier(
+      turnClient,
+      threadId,
+      Boolean(inferenceRoute),
+      splitCodexExtraSystemPrompt(runtimeParams).turn,
+    );
     const turnStartParams = await buildTurnStartParams(runtimeParams, {
       threadId: resourceState.thread.threadId,
       cwd: resourceState.codexExecutionCwd,
@@ -217,20 +232,21 @@ export async function prepareCodexAttemptTurnRequest(
           }
         : undefined;
     if (inferenceRoute) {
-      if (!usesSupervisionConnection) {
-        prompt.setParentLocalEgress();
-      }
       resourceState.releaseInferenceContext?.();
       const inferenceThread = resourceState.thread;
-      const registration = inferenceRoute.context.register({
-        threadId: resourceState.thread.threadId,
-        text: usesSupervisionConnection
+      const inferenceInstructions = joinPresentSections(
+        usesSupervisionConnection
           ? ""
           : (buildCodexParentLocalInstructions(runtimeParams, {
               personaInstructions: workspaceBootstrapContext.personaInstructions,
               skillsInstructions: context.skillsInstructions,
               memoryInstructions: workspaceBootstrapContext.memoryInstructions,
             }) ?? ""),
+        buildCodexConversationTurnInstructions(runtimeParams, toolBridge.availableSpecs),
+      );
+      const registration = await inferenceRoute.context.register({
+        threadId: resourceState.thread.threadId,
+        text: inferenceInstructions,
         signal: runAbortController.signal,
         assertCurrent: () => {
           params.hostCapabilities.assertActive();
@@ -246,6 +262,7 @@ export async function prepareCodexAttemptTurnRequest(
         },
       });
       resourceState.releaseInferenceContext = registration.release;
+      prompt.setInferenceInstructions(inferenceInstructions);
       turnStartParams.responsesapiClientMetadata = {
         ...turnStartParams.responsesapiClientMetadata,
         [CODEX_INFERENCE_GENERATION_KEY]: registration.generation,
@@ -267,6 +284,11 @@ export async function prepareCodexAttemptTurnRequest(
       assertCurrent: assertTurnCurrent,
     });
     codexModelCallDiagnostics.setRequestPayloadBytes(utf8JsonByteLength(turnStartParams));
+    runAgentHarnessLlmInputHook({
+      event: buildLlmInputEvent(),
+      ctx: context.hookContext,
+      hookRunner: context.hookRunner,
+    });
     recordCodexTrajectoryContext(resources.trajectoryRecorder, {
       attempt: params,
       developerInstructions: joinPresentSections(
@@ -302,6 +324,12 @@ export async function prepareCodexAttemptTurnRequest(
           withCurrent: connection.withCurrent,
           assertCurrent: () => {
             assertTurnCurrent();
+            assertCodexProtectedContextCarrier(
+              turnClient,
+              threadId,
+              Boolean(getCodexInferenceThread(turnClient, threadId)),
+              splitCodexExtraSystemPrompt(runtimeParams).turn,
+            );
             continuation?.dispatch();
           },
         }),
@@ -405,5 +433,5 @@ export async function prepareCodexAttemptTurnRequest(
       ? { harnessId: params.runtimePlan.observability.harnessId }
       : {}),
   });
-  return { codexModelCallDiagnostics, startCodexTurn, buildLlmInputEvent, buildLlmOutputEvent };
+  return { codexModelCallDiagnostics, startCodexTurn, buildLlmOutputEvent };
 }

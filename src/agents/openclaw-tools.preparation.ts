@@ -2,6 +2,7 @@ import { selectApplicableRuntimeConfig } from "../config/config.js";
 import { isEmbeddedMode } from "../infra/embedded-mode.js";
 import { getActiveSecretsRuntimeConfigSnapshot } from "../secrets/runtime-state.js";
 import { getActiveRuntimeWebToolsMetadataFromState } from "../secrets/runtime-web-tools-state.js";
+import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
   hasMultipleSessionSharingIdentities,
   isUserProfileCatalogReady,
@@ -14,6 +15,7 @@ import {
   resolveSessionAgentIds,
 } from "./agent-scope.js";
 import { ensureAuthProfileStoreWithoutExternalProfilesAsync } from "./auth-profiles/store-runtime.js";
+import { resolveCapturedOpenClawToolsFsPolicy } from "./openclaw-tools.fs-policy.js";
 import { resolveOptionalMediaToolFactoryPlan } from "./openclaw-tools.media-factory-plan.js";
 import { prepareProgressCardToolForOpenClawTools } from "./openclaw-tools.registration.js";
 import type { OpenClawToolsOptions } from "./openclaw-tools.types.js";
@@ -40,6 +42,7 @@ export async function prepareOpenClawTools(
     captured.agentDir ?? resolveAgentDir(captured.config ?? {}, sessionAgentId),
     { allowKeychainPrompt: false },
   );
+  captured.fsPolicy = resolveCapturedOpenClawToolsFsPolicy(captured, sessionAgentId);
   const delegated = isEmbeddedMode()
     ? []
     : await createOpenClawDelegateToolsForRunAsync({ ...captured, sessionAgentId }, shared);
@@ -107,7 +110,7 @@ export async function prepareOpenClawTools(
   let personalInstructionsEnabled = false;
   if (!isEmbeddedMode()) {
     const profileOptions = { env: shared.env };
-    const catalog = isUserProfileCatalogReady(profileOptions)
+    const catalog = isUserProfileCatalogReady(resolveOpenClawStateSqlitePath(shared.env))
       ? undefined
       : await prepareUserProfileCatalog(profileOptions);
     try {

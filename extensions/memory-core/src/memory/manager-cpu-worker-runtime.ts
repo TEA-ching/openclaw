@@ -1,6 +1,6 @@
 import { resolveStateDir } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { ensureSqliteLibrarySelected } from "openclaw/plugin-sdk/memory-core-host-engine-knn";
-import type { readTranscriptStatsBatchReadOnlySync } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
+import type { readTranscriptStatsBatchReadOnlySync } from "openclaw/plugin-sdk/memory-core-host-transcript-stats";
 import { resolveRuntimeWorkerUrl, WorkerTaskPool } from "openclaw/plugin-sdk/process-runtime";
 import type {
   MemoryOriginReadFilters,
@@ -19,6 +19,12 @@ import type {
   MemorySearchWorkerOutput,
   MemoryVectorWorkerQuery,
 } from "./manager-search.worker.js";
+import {
+  sessionIndexPages,
+  type SessionIndexPreparation,
+  type SessionIndexProgress,
+} from "./manager-session-index-preparation.js";
+import type { MemoryStatusQuery } from "./manager-status-state.js";
 const MEMORY_INDEX_WORKER_INPUT_LIMIT_BYTES = 256 * 1024 * 1024;
 
 type MemoryTranscriptStatsScope = Omit<
@@ -27,6 +33,7 @@ type MemoryTranscriptStatsScope = Omit<
 >;
 export type MemoryIndexTask =
   | { kind: "prepare"; input: MemoryIndexPreparationInput }
+  | { kind: "prepare-session"; input: SessionIndexPreparation }
   | {
       kind: "transcript-stats";
       scopes: readonly MemoryTranscriptStatsScope[];
@@ -119,6 +126,16 @@ export async function prewarmMemorySearchWorker(): Promise<void> {
 export async function runMemoryIndexState(target: MemoryReadTarget, signal?: AbortSignal) {
   const result = await runRetrieval({ ...target, kind: "index-state" }, { signal }, "index state");
   return result.state;
+}
+
+export async function runMemoryDatabaseAdmission(target: MemoryReadTarget) {
+  const result = await runRetrieval({ ...target, kind: "admission" }, {}, "database admission");
+  return result.admission;
+}
+
+export async function runMemoryStatus(target: MemoryReadTarget, query: MemoryStatusQuery) {
+  const result = await runRetrieval({ ...target, kind: "status", query }, {}, "status");
+  return result.snapshot;
 }
 
 export async function runMemoryVectorLoad(
@@ -243,6 +260,46 @@ export async function prepareMemoryIndexInWorker(input: MemoryIndexPreparationIn
         (provenance.originClass.length +
           provenance.sessionKind.length +
           (provenance.supersedesKey?.length ?? 0));
+  }
+  if (input.source === "sessions") {
+    const pages = sessionIndexPages(input);
+    const chunks: ReturnType<typeof prepareMemoryIndexChunks>["chunks"] = [];
+    const { content: _content, entry, cutoffLine, ...settings } = input;
+    const cutoffIndex =
+      cutoffLine === undefined
+        ? -1
+        : (entry.lineMap?.findIndex((line) => line >= cutoffLine) ?? -1);
+    const result = await indexing.run(
+      {
+        kind: "prepare-session",
+        input: {
+          ...settings,
+          // Preserve the reset owner's exact map boundary, including an empty or partial map.
+          resetAtLine: cutoffIndex > 0 ? cutoffIndex + 1 : undefined,
+          entry: { path: entry.path, mtimeMs: entry.mtimeMs },
+        },
+      },
+      {
+        // Oversized documents stream alone instead of being permanently rejected by a queue budget.
+        inputBytes: Math.min(inputBytes, MEMORY_INDEX_WORKER_INPUT_LIMIT_BYTES),
+        onRequest: (value) => {
+          // The worker exchanges a completed chunk batch for the next immutable source page.
+          // SAFETY: only the paired prepare-session worker sends requests on this task.
+          const progress = value as SessionIndexProgress;
+          for (const chunk of progress.chunks) {
+            chunks.push(chunk);
+          }
+          return Promise.resolve({
+            input: pages.next().value ?? { lines: [], done: true },
+            timeoutMs: 60_000,
+          });
+        },
+      },
+    );
+    if (result.kind !== "prepared") {
+      throw new Error("Invalid memory indexing worker result");
+    }
+    return { contentHash: undefined, chunks };
   }
   const result = await indexing.run({ kind: "prepare", input }, { inputBytes });
   if (result.kind !== "prepared") {

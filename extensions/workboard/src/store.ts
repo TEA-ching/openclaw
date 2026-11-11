@@ -39,6 +39,7 @@ import type {
 import { capText, normalizeBoardId, normalizeTimestamp } from "./store-normalizers.js";
 import { WorkboardNotificationStore } from "./store-notifications.js";
 import { readCards } from "./store-read.js";
+import { finishRun } from "./store-status-write.js";
 
 export type { WorkboardDispatchResult } from "./store-inputs.js";
 export { WorkboardCardConflictError } from "./store-core.js";
@@ -138,7 +139,6 @@ function executionAssociationPatch(
     if (attempt) {
       attempts[attemptIndex] = {
         ...attempt,
-        id: input.runId ?? attempt.id,
         sessionKey: input.sessionKey,
         ...(input.runId ? { runId: input.runId } : {}),
       };
@@ -404,9 +404,7 @@ export class WorkboardStore extends WorkboardNotificationStore {
       return undefined;
     }
     const board = await this.boardStore.lookup(cardBoardId(card));
-    return board?.version === 1 && board.board.orchestration?.autoDecompose === true
-      ? board.board
-      : undefined;
+    return board?.board.orchestration?.autoDecompose === true ? board.board : undefined;
   }
 
   async dispatch(
@@ -446,8 +444,8 @@ export class WorkboardStore extends WorkboardNotificationStore {
             const reason = timedOut
               ? "Run exceeded the card max runtime."
               : "Claim expired without a recent heartbeat.";
-            const finished = this.finishRun(latest, "blocked", now, reason);
-            latest = await this.updateCard(await this.requireCard(latest.id), {
+            const finished = finishRun(latest, "blocked", now, reason);
+            latest = await this.updateCard(latest, {
               ...finished,
               metadata: {
                 ...finished.metadata,
@@ -459,7 +457,7 @@ export class WorkboardStore extends WorkboardNotificationStore {
             });
             blocked.push(latest);
           } else if (claimExpired) {
-            latest = await this.updateCard(await this.requireCard(latest.id), {
+            latest = await this.updateCard(latest, {
               metadata: { ...latest.metadata, claim: undefined },
             });
             reclaimed.push(latest);
@@ -469,7 +467,7 @@ export class WorkboardStore extends WorkboardNotificationStore {
             retriesExhausted &&
             isDependencyPromotableStatus(latest.status)
           ) {
-            latest = await this.updateCard(await this.requireCard(latest.id), {
+            latest = await this.updateCard(latest, {
               status: "blocked",
               metadata: {
                 ...latest.metadata,
@@ -595,17 +593,26 @@ export class WorkboardStore extends WorkboardNotificationStore {
   }
 
   async buildWorkerContext(id: string): Promise<string> {
+    return (await this.readWithWorkerContext(id)).workerContext;
+  }
+
+  async readWithWorkerContext(id: string): Promise<{
+    card: WorkboardCard;
+    workerContext: string;
+  }> {
     const card = await this.requireCard(id);
-    return buildWorkerContext(
-      card,
-      await readCards(this.store, {
-        kind: "worker-context",
-        cardId: card.id,
-        boardId: cardBoardId(card),
-        agentId: card.agentId,
-        parentIds: cardParentIds(card),
-      }),
-    );
+    const parentIds = cardParentIds(card);
+    const relatedCards =
+      parentIds.length > 0 || card.agentId
+        ? await readCards(this.store, {
+            kind: "worker-context",
+            cardId: card.id,
+            boardId: cardBoardId(card),
+            agentId: card.agentId,
+            parentIds,
+          })
+        : [];
+    return { card, workerContext: buildWorkerContext(card, relatedCards) };
   }
 
   static openSqlite(

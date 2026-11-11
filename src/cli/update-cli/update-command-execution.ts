@@ -1,8 +1,10 @@
 import path from "node:path";
+import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { ScheduledTaskAutoStartRecoveryError } from "../../daemon/schtasks-update-recovery.js";
 import { tryReadJson } from "../../infra/json-files.js";
 import type { PackageUpdateTransaction } from "../../infra/package-update-swap-contract.js";
 import type { UpdateStateSchemaVersion } from "../../infra/update-candidate-state.js";
+import { assertUpdateDatabaseEngineContexts } from "../../infra/update-database-engine-admission.js";
 import type { UpdateDoctorConfigChange } from "../../infra/update-doctor-config.js";
 import { canResolveRegistryVersionForPackageTarget } from "../../infra/update-global.js";
 import { reportUpdateStepCompletion } from "../../infra/update-runner-command.js";
@@ -103,6 +105,7 @@ export async function executeMutableUpdate(
   } = params.executionGuards;
   let retentionInstallTarget = params.packageInstallTarget;
   const prepareMutableUpdate = async (env?: NodeJS.ProcessEnv, activationTimeoutMs?: number) => {
+    await params.assertPackageRuntimeCurrent?.();
     assertExecutionCurrent();
     await params.prepareMutableUpdate(
       env,
@@ -118,7 +121,7 @@ export async function executeMutableUpdate(
       : (params.packageInstallTarget?.manager ?? "unknown");
   if (opts.recovery) {
     throw new UpdatePreMutationError(
-      "rollback-state-unverified",
+      "update-recovery-pending",
       "Full-state checkpoint recovery is deferred.",
     );
   }
@@ -361,17 +364,26 @@ export async function executeMutableUpdate(
   let failure: MutableUpdateExecutionResult["failure"];
   let mutationStarted = false;
   const validateCandidate = async (root: string) => {
+    await params.assertPackageRuntimeCurrent?.();
     assertUpdateCommandRecovery(opts);
     const env = ownedManagedUpdateContext?.env ?? opts.run?.env ?? process.env;
     await recordPhase("validating");
     assertExecutionCurrent();
     try {
+      const manifest =
+        params.updateInstallKind === "package"
+          ? await tryReadJson<unknown>(path.join(root, "package.json"))
+          : undefined;
+      if (params.updateInstallKind === "package") {
+        await assertUpdateDatabaseEngineContexts(
+          admission!.contexts,
+          async () => asNullableRecord(asNullableRecord(manifest)?.openclaw)?.databaseEngines,
+        );
+      }
       // Staged manifests own package schema support; Git builds refresh their admitted versions.
       const versions =
         params.updateInstallKind === "package"
-          ? (parsePackageOpenClawSchemaVersions(
-              await tryReadJson<unknown>(path.join(root, "package.json")),
-            ) ?? admittedTargetSchemaVersions)
+          ? (parsePackageOpenClawSchemaVersions(manifest) ?? admittedTargetSchemaVersions)
           : admittedTargetSchemaVersions;
       admittedTargetSchemaVersions = versions;
       if (stagedPluginAdmission) {
@@ -576,6 +588,7 @@ export async function executeMutableUpdate(
         managedServiceEnv: preManagedServiceStop?.serviceEnv,
         onTransaction,
       };
+      await params.assertPackageRuntimeCurrent?.();
       result = await withMutableUpdateForwardScope(opts, () =>
         params.stagedPackage
           ? params.stagedPackage.run(packageUpdate)
@@ -593,6 +606,10 @@ export async function executeMutableUpdate(
         channel: params.channel,
         devTarget: params.devTarget,
         inspectGitTarget: async (target, installTarget) => {
+          await assertUpdateDatabaseEngineContexts(
+            admission!.contexts,
+            async () => target.databaseEngines,
+          );
           retentionInstallTarget = installTarget;
           await recordInspectedGitTarget(target, recordPhase, assertExecutionCurrent);
           assertExecutionCurrent();
@@ -624,10 +641,15 @@ export async function executeMutableUpdate(
         },
         beforeGitMutation: async (target) => {
           assertReadableGitMetadata(target.metadataUnreadable);
+          await assertUpdateDatabaseEngineContexts(
+            admission!.contexts,
+            async () => target.databaseEngines,
+          );
           admittedTargetSchemaVersions = target.schemaVersions;
           await beforeActivate(gitMutationRoots ?? [params.root]);
         },
       };
+      await params.assertPackageRuntimeCurrent?.();
       result = await withMutableUpdateForwardScope(opts, () => updateGitInstall(gitUpdate));
     }
   } catch (err) {

@@ -64,6 +64,7 @@ import {
   createSubagentAnnounceConfig,
   createSubagentAnnounceHandoffOptions,
   createSubagentAnnounceSessionStore,
+  INTER_SESSION_REPLY_POLICY_CASES,
   SUBAGENT_ANNOUNCE_CLAUDE_CLI_DELIVERY_CASES,
   SUBAGENT_ANNOUNCE_EMBEDDED_DELIVERY_CASES,
 } from "./attempt-execution.announce.test-support.js";
@@ -80,6 +81,7 @@ import {
   saveTestAuthProfiles,
 } from "./attempt-execution.cli.test-support.js";
 import { runAgentAttempt as runAgentAttemptImpl } from "./attempt-execution.js";
+import { registerSandboxedDelegatedCliTests } from "./attempt-execution.sandbox-cli.test-support.js";
 import { resolveClaudeCliProjectDirForWorkspace } from "./claude-cli-project-dir.js";
 import { resolveEmbeddedModelSelection } from "./model-selection.js";
 import { persistAcpTurnTranscript, persistCliTurnTranscript } from "./transcript-persistence.js";
@@ -2141,15 +2143,8 @@ describe("CLI attempt execution", () => {
         privateCompletion,
         allowSilence,
         sourceTool = "subagent_settle",
-      ] of [
-        ["agent:main:subagent:reply-required", "discord"],
-        ["agent:main:direct:reply-required", "webchat"],
-        ["agent:main:direct:private-reply-required", "telegram", true],
-        ["agent:main:telegram:direct:reply-required", "telegram"],
-        ["agent:main:telegram:group:optional", "telegram", undefined, true],
-        ["agent:main:telegram:direct:delegated", "telegram", undefined, false, "sessions_send"],
-        ["agent:main:telegram:group:delegated", "telegram", undefined, true, "sessions_send"],
-      ] as const) {
+        replyExpectation,
+      ] of INTER_SESSION_REPLY_POLICY_CASES) {
         const sessionEntry = makeSessionEntry(`session-${messageChannel}`);
         const sessionStore = await seedSessionStore(sessionKey, sessionEntry);
         selectedRunner.mockResolvedValueOnce({ meta: { durationMs: 1 } });
@@ -2163,7 +2158,8 @@ describe("CLI attempt execution", () => {
           messageChannel,
           cfg: { surfaces: { telegram: { silentReply: { group: "allow" } } } },
           opts: {
-            privateCompletion,
+            privateCompletion: privateCompletion || undefined,
+            replyExpectation,
             inputProvenance: { kind: "inter_session", sourceTool },
           },
         });
@@ -2179,6 +2175,14 @@ describe("CLI attempt execution", () => {
       }
     },
   );
+
+  registerSandboxedDelegatedCliTests({
+    runStoredAttempt,
+    seedSessionStore,
+    runEmbeddedAgentMock,
+    runCliAgentMock,
+    executePreparedCliRunMock: runCliAgentMock,
+  });
 
   it("suppresses live stream output for hidden internal runs", async () => {
     const embeddedArg = await runOpenClawEmbeddedAttemptForTest({

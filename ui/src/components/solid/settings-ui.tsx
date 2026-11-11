@@ -34,6 +34,7 @@ type SettingsRowProps = {
   carapace?: boolean;
   stacked?: boolean;
   stackedOnNarrow?: boolean;
+  nested?: boolean;
 };
 
 export function SettingsPage(props: {
@@ -209,6 +210,7 @@ export function SettingsRow(props: SettingsRowProps & { role?: "alert" | "status
         {
           "settings-row--stacked": props.stacked,
           "settings-row--stacked-on-narrow": props.stackedOnNarrow,
+          "settings-row--nested": props.nested,
           "oc-settings-row": props.carapace,
           "oc-settings-row-stacked": props.carapace && props.stacked,
         },
@@ -256,7 +258,7 @@ function ToggleControl(
         type="checkbox"
         role="switch"
         checked={props.checked}
-        disabled={props.disabled}
+        aria-disabled={props.disabled ? "true" : undefined}
         aria-labelledby={props.labelledBy ?? labelId}
         onClick={(event) => settingsSwitchClick(event, props)}
         onChange={(event) => settingsSwitchChange(event, props)}
@@ -282,6 +284,8 @@ export function SettingsToggleRow(
     title: JSX.Element;
     ariaLabel?: JSX.Element;
     description?: JSX.Element;
+    /** Secondary actions beside the switch, such as opening related settings. */
+    actions?: JSX.Element;
   },
 ) {
   const titleId = nextSettingsRadioName();
@@ -293,6 +297,7 @@ export function SettingsToggleRow(
       {props.icon}
       <SettingsRowText id={titleId} title={props.title} description={props.description} />
       <div class="settings-row__control">
+        {props.actions}
         <ToggleControl
           {...props}
           label={props.ariaLabel}
@@ -338,11 +343,12 @@ export function SettingsSegmented<T extends string>(props: SettingsSegmentedProp
                   name={name}
                   value={option().value}
                   checked={option().value === props.value}
-                  disabled={props.disabled || option().disabled}
+                  disabled={option().disabled}
+                  aria-disabled={props.disabled ? "true" : undefined}
                   aria-label={option().ariaLabel}
                   onClick={(event) => settingsRadioClick(event, option().value, props)}
                   onChange={(event) => settingsRadioChange(event, option().value, props)}
-                  onKeyDown={settingsRadioKeyDown}
+                  onKeyDown={(event) => settingsRadioKeyDown(event, props.disabled)}
                 />
                 {option().label}
               </label>
@@ -390,13 +396,14 @@ function SettingsSegmentedButtons<T extends string>(props: SettingsSegmentedProp
             data-compact-label={option().compactLabel}
             data-test-id={option().testId}
             title={option().title}
-            disabled={props.disabled || option().disabled}
+            disabled={option().disabled}
+            aria-disabled={props.disabled ? "true" : undefined}
             onClick={(event) => {
-              if (props.mode !== "buttons") {
+              if (props.mode !== "buttons" || props.disabled) {
                 return;
               }
               props.onClick?.(event, option().value);
-              if (event.defaultPrevented || props.disabled || option().disabled) {
+              if (event.defaultPrevented || option().disabled) {
                 return;
               }
               if (option().value === props.value) {

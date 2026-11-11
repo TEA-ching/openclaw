@@ -1,3 +1,4 @@
+import { resolveUpdateRehearsalRoot } from "../infra/update-rehearsal-paths.js";
 import { runInitialConfigWriteHealth } from "./doctor-health-contribution-runners.config.js";
 import {
   runClaudeCliHealth,
@@ -34,6 +35,7 @@ import {
   legacyOwnedRepair,
   recordDoctorHealthWarnings,
 } from "./doctor-health-contribution.js";
+import { appContainerSpawnCheck, nativeStatusCheck } from "./doctor-native-status-check.js";
 
 function coreHealthRunner(checkId: string): DoctorHealthContribution["run"] {
   return async (ctx) => {
@@ -79,6 +81,9 @@ export function resolveInitialDoctorHealthContributions(params: {
           }));
         },
       },
+    }),
+    createDoctorHealthContribution("doctor:native-status", "Native helpers and child pipes", {
+      healthChecks: [appContainerSpawnCheck, nativeStatusCheck],
     }),
     createDoctorHealthContribution("doctor:node-runtime", "Node runtime", {
       healthCheckIds: ["core/doctor/node-runtime"],
@@ -141,7 +146,11 @@ export function resolveInitialDoctorHealthContributions(params: {
           async detect(ctx) {
             const { collectNodeHostingPreconditionFindings } =
               await import("../commands/doctor-node-hosting-preconditions.js");
-            return collectNodeHostingPreconditionFindings(ctx.cfg);
+            const findings = await collectNodeHostingPreconditionFindings(ctx.cfg);
+            // The rehearsal's loopback listener does not describe the serving Gateway's ingress.
+            return resolveUpdateRehearsalRoot(ctx.env ?? process.env)
+              ? findings.filter((finding) => finding.requirement !== "node-onboarding-url")
+              : findings;
           },
         },
       },

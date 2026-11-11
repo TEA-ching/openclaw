@@ -25,7 +25,10 @@ For switching channels, see [Release channels](/install/development-channels).
 Extended-stable includes the Gateway, official npm plugins, and Docker images.
 It does not include native apps or ClawHub publication, and it does not change
 the regular stable channel. Its GitHub release is not marked Latest. A monthly
-line retires when `main` advances into the next month.
+line retires when `main` advances into the next month. Maintain only one
+extended-stable line: the trailing completed month relative to `main`'s version;
+older `.33+` lines are retired. Publishing a retired line requires an explicit
+maintainer decision; never bypass the release guards.
 
 ## Version naming
 
@@ -124,6 +127,62 @@ reason to wait, re-cut, or pause.
 See [Full release validation](/reference/full-release-validation) for coverage
 by profile and how to interpret the results.
 
+### Operator capabilities
+
+Repository write access, organization membership, branch-policy reads, CI bypass,
+release environment approval, and production deployment are separate capabilities.
+An unavailable [prior-CI exception](/reference/scripts/prior-ci) is not a blanket
+release blocker or proof that environment approval is unavailable. Conversely,
+repository MAINTAIN access or CI-bypass authority does not authorize an environment
+approval or production deployment.
+
+The candidate checklist reports pending environment approvals for its authenticated
+caller. It prints an approval command only when GitHub reports that caller can
+approve; otherwise an eligible environment reviewer must act. An unavailable
+approval-status read is reported as unknown, not as no pending approval, and does
+not stop validation monitoring. Public release evidence can still use its existing
+anonymous rate-limit fallback; caller-specific approval reads cannot.
+
+### Watch publication
+
+After the stable orchestrator has dispatched publication, keep its read-only
+watcher running in a separate shell:
+
+```bash
+pnpm release:stable YYYY.M.PATCH --watch
+```
+
+For any publish parent, including beta and resumed runs, watch it by run ID:
+
+```bash
+pnpm release:watch --run <publish-parent-run-id>
+```
+
+`release:stable --watch` authenticates the parent against the orchestrator's
+retained state. `release:watch` derives the parent's protected tooling tag and
+SHA from the run itself. Both correlate the parent's npm and ClawHub children by
+the exact parent run and attempt each child records, plus tooling identity. They
+exit as soon as an environment approval is pending on the parent or a child, or
+a publication run or job fails. That includes `continue-on-error` jobs such as
+the core child's Windows notification. Otherwise they wait until the observed
+publication tree succeeds. They only perform GitHub reads; they never approve,
+rerun, cancel, dispatch, or publish. On a GitHub rate limit they back off
+beyond the poll interval instead of failing.
+
+The exit contract is:
+
+- `0`: the observed tree succeeded, or `--once` found no item needing attention.
+- `1`: a pending environment approval, failed publication run, or failed job needs attention.
+- `2`: usage, identity, transport, truncation, timeout, or observation failed.
+
+Use `--once --json` for a single machine-readable snapshot. JSON has
+`contractVersion: 1` and a top-level `state` of `active`, `attention`, or
+`success`, plus exact parent, child, pending-approval, failed-run, and failed-job records.
+`--poll-seconds` changes the default interval (60 seconds for `release:stable`,
+120 for `release:watch`) and
+`--timeout-seconds` changes the default 12-hour observation deadline. These
+options do not create a daemon or persist watcher state.
+
 ### Plugin SDK evidence transport
 
 SDK comparison reports and release evidence use the
@@ -159,7 +218,7 @@ New candidate qualification records three separate identities:
   main revision or protected publication tag. P may differ from C/Q; C/Q does not
   need to be an ancestor of P. Trust in P does not replace qualification of C.
 
-The canonical SHA-pinned helper first asks P to record the reviewed operator
+The standard SHA-pinned helper first asks P to record the reviewed operator
 attestation, complete normalized inputs, and data-only frozen Q coverage in an
 immutable admission artifact. Only then does that same helper dispatch Full
 Release Validation from an immutable `release-ci/*` ref at Q. A publication

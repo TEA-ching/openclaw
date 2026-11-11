@@ -135,9 +135,12 @@ Room allowlist keys (`groups`, legacy `rooms`) should be room IDs or aliases. Pl
 
 ### Access and policy
 
+`openclaw config validate` warns about missing `dm.allowFrom` entries, including account overrides and inherited defaults. For `dm.policy: "open"`, add `"*"` to the indicated nested allowlist or run `openclaw doctor --fix`; for `"allowlist"`, add the intended Matrix user IDs.
+
 - `groupPolicy`: `"open"`, `"allowlist"`, or `"disabled"`. Default: `"allowlist"`.
 - `groupAllowFrom`: allowlist of user IDs for room traffic.
 - `mentionPatterns`: scoped regex patterns for room mentions. Object with `{ mode: "allow"|"deny", allowIn: [roomId, ...], denyIn: [roomId, ...] }`. Controls whether configured `agents.entries.*.groupChat.mentionPatterns` apply per-room.
+  Formatted `matrix.to` mentions must still visibly name the bot. Malformed or repetitive HTML is scanned in linear time and does not bypass mention requirements.
 - `dm.enabled`: when `false`, ignore all DMs. Default: `true`.
 - `dm.policy`: `"pairing"` (default), `"allowlist"`, `"open"`, or `"disabled"`. Applies after the bot has joined and classified the room as a DM; it does not affect invite handling.
 - `dm.allowFrom`: allowlist of user IDs for DM traffic.
@@ -175,6 +178,7 @@ Room allowlist keys (`groups`, legacy `rooms`) should be room IDs or aliases. Pl
 
 - `actions`: per-action tool gating (`messages`, `reactions`, `pins`, `profile`, `memberInfo`, `channelInfo`, `verification`).
 - `groups`: per-room policy map. Session identity uses the stable room ID after resolution. (`rooms` is a legacy alias.)
+  Room tool and mention policies use room IDs resolved from configured keys; inbound display names never select another room's policy.
   - `groups.<room>.account`: restrict one inherited room entry to a specific account.
   - `groups.<room>.enabled`: per-room toggle. When `false`, the room is ignored as if it were not in the map.
   - `groups.<room>.requireMention`: per-room override of the channel-level mention requirement.

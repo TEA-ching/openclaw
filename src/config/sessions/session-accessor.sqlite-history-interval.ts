@@ -1,11 +1,13 @@
 import { sql, type Expression, type RawBuilder, type SqlBool } from "kysely";
 import { OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE } from "../../agents/internal-runtime-context.js";
 import { SOURCE_PAGE_MAX_BYTES } from "../../gateway/session-transcript-source-pages.js";
+import { engineIndexHint } from "../../infra/database-engine/index-hint.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
 } from "../../infra/kysely-sync.js";
 import {
+  boundHistoryAnchorPageRange,
   resolveHistoryAnchorPageRange,
   type TranscriptAnchorPageOptions,
 } from "../../sessions/transcript-anchor-page.js";
@@ -36,10 +38,10 @@ export function isVisibleHistoryNonMessageEventSql(
   valid: Expression<number>,
 ): RawBuilder<SqlBool> {
   return /* kysely-allow-raw: malformed selected custom messages are returned for the existing read refusal. */ sql<SqlBool>`(${type} IN ('compaction', 'reset', 'custom_message') AND CASE
-    WHEN ${type} IN ('compaction', 'reset') THEN 1
+    WHEN ${type} IN ('compaction', 'reset') THEN TRUE
     WHEN ${type} = 'custom_message' THEN
       ${valid} = 0 OR (${display} = 1 AND (${customType} IS NULL OR ${customType} != ${OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE}))
-    ELSE 0 END)`;
+    ELSE FALSE END)`;
 }
 
 export const historyNavigationValidSql =
@@ -64,7 +66,7 @@ function selectHistoricalDisplayEvents(
       .selectFrom("transcript_event_identities")
       .select(["session_id", "seq", "event_type"])
       .modifyEnd(
-        /* kysely-allow-raw: pin the canonical sequence lookup to avoid quadratic cold-history joins. */ sql`INDEXED BY idx_agent_transcript_event_identity_sequence`,
+        engineIndexHint(projection.database.db, "idx_agent_transcript_event_identity_sequence"),
       )
       .as("identity");
   const withIdentity = projection.hasUnindexedPrefix
@@ -261,6 +263,7 @@ function readHistoricalDisplayEventRange(
   count: number,
   anchor: { activePosition: number; displayPosition: number },
   maxBytes?: number,
+  anchorOptions?: TranscriptAnchorPageOptions,
 ): SessionTranscriptMessageEvent[] {
   if (count <= 0) {
     return [];
@@ -270,7 +273,7 @@ function readHistoricalDisplayEventRange(
     historyNavigationValidSql.as("navigation_valid"),
     eb(transcriptEventReadBytesSql("event"), "+", 1).as("serialized_bytes"),
   ]);
-  const olderCount = anchor.displayPosition - start;
+  const olderCount = Math.max(0, anchor.displayPosition - start);
   // The anchor already identifies the physical position; visit only its selected neighbors.
   const older =
     olderCount === 0
@@ -285,7 +288,11 @@ function readHistoricalDisplayEventRange(
   const newer = executeSqliteQuerySync(
     projection.database.db,
     query
-      .where("active.active_position", ">=", anchor.activePosition)
+      .where(
+        "active.active_position",
+        start > anchor.displayPosition ? ">" : ">=",
+        anchor.activePosition,
+      )
       .orderBy("active.active_position", "asc")
       .limit(count - olderCount),
   ).rows;
@@ -293,29 +300,19 @@ function readHistoricalDisplayEventRange(
     assertTranscriptNavigationValid(row.navigation_valid);
     return Object.assign(row, { displaySeq: start + index + 1 });
   });
-  let selected = ranged;
-  if (
-    maxBytes === undefined &&
-    ranged.reduce((bytes, row) => bytes + row.serialized_bytes, 2) > SOURCE_PAGE_MAX_BYTES
-  ) {
-    throw new Error(
-      `Transcript history page exceeds the ${SOURCE_PAGE_MAX_BYTES}-byte limit; request a smaller limit`,
-    );
-  }
-  if (maxBytes !== undefined) {
-    const limit = Math.min(SOURCE_PAGE_MAX_BYTES, Math.max(1_024, Math.floor(maxBytes)));
-    let bytes = 2;
-    let selectedStart = ranged.length;
-    while (selectedStart > 0) {
-      const nextBytes = ranged[selectedStart - 1]!.serialized_bytes;
-      if (bytes + nextBytes > limit) {
-        break;
-      }
-      bytes += nextBytes;
-      selectedStart--;
-    }
-    selected = ranged.slice(selectedStart);
-  }
+  // Size the contiguous anchor window before loading event bodies.
+  const limit = Math.min(
+    SOURCE_PAGE_MAX_BYTES,
+    Math.max(1_024, Math.floor(maxBytes ?? SOURCE_PAGE_MAX_BYTES)),
+  );
+  const selectedRange = boundHistoryAnchorPageRange(
+    { readStart: 0, endExclusive: ranged.length, hasOverreadContext: false, offset: 0 },
+    anchorOptions ? anchor.displayPosition - start : ranged.length - 1,
+    limit,
+    (position) => ranged[position]!.serialized_bytes,
+    anchorOptions !== undefined && maxBytes === undefined,
+  );
+  const selected = ranged.slice(selectedRange.start, selectedRange.endExclusive);
   if (selected.length === 0) {
     return [];
   }
@@ -422,19 +419,22 @@ export function readHistoricalHistoryAnchorPage(
     excludeClosingReset ? total - 1 : anchorPosition,
     options,
   );
+  const requested = range.endExclusive - range.readStart;
+  const events = readHistoricalDisplayEventRange(
+    projection,
+    displaySource,
+    interval,
+    range.readStart,
+    requested,
+    { activePosition: row.active_position, displayPosition: anchorPosition },
+    options.maxBytes,
+    options,
+  );
   return {
-    events: readHistoricalDisplayEventRange(
-      projection,
-      displaySource,
-      interval,
-      range.readStart,
-      range.endExclusive - range.readStart,
-      { activePosition: row.active_position, displayPosition: anchorPosition },
-      options.maxBytes,
-    ),
+    events,
     found: true,
-    hasOverreadContext: range.hasOverreadContext,
-    offset: range.offset,
+    hasOverreadContext: range.hasOverreadContext && events[0]?.seq === range.readStart + 1,
+    offset: total - (events.at(-1)?.seq ?? range.endExclusive),
     displaySource,
     totalMessages: total,
   };

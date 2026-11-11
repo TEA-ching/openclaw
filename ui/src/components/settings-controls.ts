@@ -44,7 +44,11 @@ export const nextSettingsRadioName = () => `settings-radio-${++radioId}`;
 export function settingsSwitchClick(event: MouseEvent, props: SettingsToggleControl) {
   // SAFETY: Both renderers bind this listener directly to the native switch input.
   const input = event.currentTarget as HTMLInputElement;
-  if (!input.matches(":disabled") && !props.disabled && input.checked !== props.checked) {
+  if (props.disabled) {
+    event.preventDefault();
+    return;
+  }
+  if (!input.matches(":disabled") && input.checked !== props.checked) {
     props.onAct?.(input.checked);
   }
 }
@@ -63,10 +67,10 @@ export function settingsSwitchKeyDown(event: KeyboardEvent, props: SettingsToggl
   }
   // SAFETY: Both renderers bind this listener directly to the native switch input.
   const input = event.currentTarget as HTMLInputElement;
+  event.preventDefault();
   if (input.matches(":disabled") || props.disabled) {
     return;
   }
-  event.preventDefault();
   const checked = (event.key === "ArrowRight") !== (getComputedStyle(input).direction === "rtl");
   if (checked === input.checked) {
     return;
@@ -79,7 +83,11 @@ export function settingsSwitchKeyDown(event: KeyboardEvent, props: SettingsToggl
 }
 
 export function settingsToggleRowClick(event: MouseEvent, props: SettingsToggleControl) {
-  if (event.target instanceof Element && event.target.closest(".settings-toggle")) {
+  // Links, buttons, and fields in the row own their clicks; only plain row area toggles.
+  if (
+    event.target instanceof Element &&
+    event.target.closest(".settings-toggle, a, button, input, select, textarea")
+  ) {
     return;
   }
   // SAFETY: Both renderers bind this listener directly to the settings row div.
@@ -99,7 +107,11 @@ export function settingsRadioClick<T extends string, Label>(
 ) {
   // SAFETY: Both renderers bind this listener directly to a native radio input.
   const input = event.currentTarget as HTMLInputElement;
-  if (props.mode === "buttons" || props.disabled || input.matches(":disabled")) {
+  if (props.disabled) {
+    event.preventDefault();
+    return;
+  }
+  if (props.mode === "buttons" || input.matches(":disabled")) {
     return;
   }
   if (value === props.value) {
@@ -129,7 +141,7 @@ export function settingsRadioChange<T extends string, Label>(
   }
 }
 
-export function settingsRadioKeyDown(event: KeyboardEvent) {
+export function settingsRadioKeyDown(event: KeyboardEvent, busy = false) {
   // SAFETY: Both renderers bind this listener directly to a native radio input.
   const input = event.currentTarget as HTMLInputElement;
   const group = input.closest('[role="radiogroup"]');
@@ -155,6 +167,9 @@ export function settingsRadioKeyDown(event: KeyboardEvent) {
       return;
   }
   event.preventDefault();
+  if (busy) {
+    return;
+  }
   const enabled = [...group.querySelectorAll<HTMLInputElement>('input[type="radio"]')].filter(
     (radio) => !radio.matches(":disabled"),
   );

@@ -7,6 +7,8 @@ import {
 import { retireSessionSqliteRecovery } from "../../commands/doctor-session-sqlite-retirement.js";
 import { readSourceConfigBestEffort } from "../../config/io.js";
 import { defaultRuntime, ExitError, writeRuntimeJson } from "../../runtime.js";
+import { formatCliJsonFailure } from "../failure-output.js";
+import { updateMaintenanceError } from "./update-maintenance-error.js";
 
 function renderCleanup(report: RecoveryCleanupReport): void {
   defaultRuntime.log(`Recovery cleanup: ${report.stateDir}`);
@@ -95,10 +97,15 @@ export async function updateCleanupCommand(options: {
     if (error instanceof ExitError) {
       throw error;
     }
+    const message = String(updateMaintenanceError(error));
     if (options.json) {
-      writeRuntimeJson(defaultRuntime, { ...report, status: "blocked", error: String(error) });
+      writeRuntimeJson(defaultRuntime, {
+        ...report,
+        ...formatCliJsonFailure(message),
+        status: "blocked",
+      });
     } else {
-      defaultRuntime.error(String(error));
+      defaultRuntime.error(message);
     }
     defaultRuntime.exit(1);
   }

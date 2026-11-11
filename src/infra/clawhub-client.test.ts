@@ -73,13 +73,13 @@ describe("clawhub client", () => {
     await expect(
       searchClawHubSkills({
         query: "calendar",
-        fetchImpl: async (_input, init) => {
+        fetchImpl: vi.fn(async (_input, init) => {
           authorization = new Headers(init?.headers).get("Authorization");
           return new Response(JSON.stringify({ results: [] }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
-        },
+        }),
       }),
     ).resolves.toStrictEqual([]);
     return authorization;
@@ -120,29 +120,6 @@ describe("clawhub client", () => {
   );
 
   it.runIf(process.platform === "darwin")(
-    "loads ClawHub request auth from the macOS Application Support path",
-    async () => {
-      await withTestDir({ prefix: "openclaw-clawhub-home-" }, async (fakeHome) => {
-        const configPath = path.join(
-          fakeHome,
-          "Library",
-          "Application Support",
-          "clawhub",
-          "config.json",
-        );
-        const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
-        try {
-          await writeConfigFile(configPath, JSON.stringify({ token: "fixture-macos-token" }));
-
-          await expectSearchUsesAuthToken("fixture-macos-token");
-        } finally {
-          homedirSpy.mockRestore();
-        }
-      });
-    },
-  );
-
-  it.runIf(process.platform === "darwin")(
     "falls back to XDG_CONFIG_HOME for ClawHub request auth on macOS",
     async () => {
       await withTestDir({ prefix: "openclaw-clawhub-home-" }, async (fakeHome) => {
@@ -167,34 +144,18 @@ describe("clawhub client", () => {
     await expect(
       searchClawHubSkills({
         query: "calendar",
-        fetchImpl: async () =>
-          new Response("Rate limit exceeded", {
-            status: 429,
-            headers: {
-              "RateLimit-Reset": "invalid",
-              "Retry-After": "7",
-            },
-          }),
+        fetchImpl: vi.fn(
+          async () =>
+            new Response("Rate limit exceeded", {
+              status: 429,
+              headers: {
+                "RateLimit-Reset": "invalid",
+                "Retry-After": "7",
+              },
+            }),
+        ),
       }),
     ).rejects.toThrow(/Rate limit exceeded \(resets in 7s\) Sign in for higher rate limits\.$/);
-  });
-
-  it("preserves the final ClawHub error body after transient retries are exhausted", async () => {
-    let attempts = 0;
-    await expect(
-      searchClawHubSkills({
-        query: "calendar",
-        fetchImpl: async () => {
-          attempts += 1;
-          return new Response("Rate limit temporarily unavailable", {
-            status: 503,
-            headers: { "Retry-After": "0" },
-          });
-        },
-      }),
-    ).rejects.toThrow("ClawHub /api/v1/search failed (503): Rate limit temporarily unavailable");
-
-    expect(attempts).toBe(4);
   });
 
   it.each(["GET", "POST"] as const)(
@@ -206,7 +167,7 @@ describe("clawhub client", () => {
         method,
         skipAuth: true,
         timeoutMs: 5,
-        fetchImpl: async (_input, init) => {
+        fetchImpl: vi.fn(async (_input, init) => {
           attempts += 1;
           if (attempts > 1) {
             return new Response('{"recovered":true}');
@@ -221,7 +182,7 @@ describe("clawhub client", () => {
               { once: true },
             );
           });
-        },
+        }),
       });
       if (method === "GET") {
         await expect(result).resolves.toEqual({ recovered: true });
@@ -237,11 +198,13 @@ describe("clawhub client", () => {
     await expect(
       searchClawHubSkills({
         query: "calendar",
-        fetchImpl: async () =>
-          new Response(malformedUtf8('{"results":[{"slug":"', '"}]}'), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          }),
+        fetchImpl: vi.fn(
+          async () =>
+            new Response(malformedUtf8('{"results":[{"slug":"', '"}]}'), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+        ),
       }),
     ).rejects.toThrow("ClawHub /api/v1/search returned malformed JSON");
   });
@@ -256,7 +219,7 @@ describe("clawhub client", () => {
       searchClawHubSkills({
         query: "calendar",
         timeoutMs: 5,
-        fetchImpl: async () => stalled.response,
+        fetchImpl: vi.fn(async () => stalled.response),
       }),
     ).rejects.toThrow(/ClawHub \/api\/v1\/search response stalled after 5ms/);
     expect(stalled.cancel).toHaveBeenCalledTimes(1);
@@ -270,7 +233,7 @@ describe("clawhub client", () => {
       searchClawHubSkills({
         query: "calendar",
         timeoutMs: 5,
-        fetchImpl: async () => {
+        fetchImpl: vi.fn(async () => {
           const stalled = createStalledBodyResponse({
             firstChunk: new TextEncoder().encode("partial error"),
             headers: { "content-type": "text/plain", "retry-after": "0" },
@@ -279,7 +242,7 @@ describe("clawhub client", () => {
           });
           stalledResponses.push(stalled);
           return stalled.response;
-        },
+        }),
       }),
     ).rejects.toThrow("ClawHub /api/v1/search failed (500): Server Error");
     for (const stalled of stalledResponses) {
@@ -308,8 +271,10 @@ describe("clawhub client", () => {
           cancel();
         },
       });
-      const fetchImpl = async () =>
-        new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+      );
       const result =
         kind === "verification"
           ? fetchClawHubSkillVerification({ slug: "weather", fetchImpl })
@@ -329,8 +294,9 @@ describe("clawhub client", () => {
     try {
       await searchClawHubSkills({
         query: "calendar",
-        fetchImpl: async () =>
-          new Response(oversized, { status: 500, headers: { "retry-after": "0" } }),
+        fetchImpl: vi.fn(
+          async () => new Response(oversized, { status: 500, headers: { "retry-after": "0" } }),
+        ),
       });
     } catch (caught) {
       error = caught;

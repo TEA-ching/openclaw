@@ -32,6 +32,7 @@ import { CommandProcessCleanupError } from "../../process/exec-result.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db.js";
 import { acquireTestPortBlock, type TestPortClaim } from "../../test-utils/port-claims.js";
+import { leaveExitedWriterWalFamily } from "./update-command-database-rollback.test-support.js";
 import { updateExecutorNativeEntrypoints } from "./update-command-executor-native-runtime.test-support.js";
 import type { PreManagedServiceStop } from "./update-command-service-context-types.js";
 
@@ -185,6 +186,7 @@ function readDatabase(file: string) {
 
 it.each([
   "package",
+  "exited-writer",
   "git",
   "git-edited",
   "verification",
@@ -211,6 +213,7 @@ it.each([
     const migratedVersions = scenario === "schema-neutral-write" ? [15, 21] : [18, 23];
     const initialFailure =
       scenario === "package" ||
+      scenario === "exited-writer" ||
       gitInstall ||
       scenario === "verification" ||
       scenario === "serving" ||
@@ -331,8 +334,8 @@ it.each([
     } else {
       const {version}=manifest;
       assert(version==='1.0.0'||${preservesMigrated},'only the compatible candidate may serve preserved writes');
-      assert.deepEqual(files.map(file=>read(file).version),version==='1.0.0'?[15,21]:${JSON.stringify(migratedVersions)},'runtime must match the retained state');
       const custody=await acquireCustody('gateway',Number(process.argv[3]));
+      assert.deepEqual(files.map(file=>read(file).version),version==='1.0.0'?[15,21]:${JSON.stringify(migratedVersions)},'runtime must match the retained state');
       const server=http.createServer((request,response)=>{
         if(request.url==='/commit') for(const file of files) {const db=new DatabaseSync(file);db.exec("INSERT INTO payload(rowid,value) VALUES(99,'after-capture')");db.close();}
         response.setHeader('content-type','application/json');response.end(JSON.stringify({version,databases:files.map(read)}));
@@ -544,6 +547,9 @@ it.each([
           ...swapFixture.params,
           beforeActivate: params.beforeActivate,
           onTransaction: async (transaction) => {
+            if (scenario === "exited-writer") {
+              await leaveExitedWriterWalFamily(agent, path.join(base, "exited-writer"));
+            }
             await params.onTransaction?.(transaction);
             retainedSnapshotDirectory = `${transaction.backupRoot}.databases`;
             if (scenario === "intervening") {
@@ -713,6 +719,12 @@ it.each([
           assert(databaseBackup, "Git update must capture pre-migration databases");
           retainedSnapshotDirectory = databaseBackup.directory;
         }
+        if (scenario === "exited-writer") {
+          // Capture under maintenance custody must not rebuild the source WAL index.
+          const captured = execution.result.steps.find((step) => step.name === "database snapshot");
+          expect(captured?.warnings ?? []).toEqual([]);
+          expect(databaseBackup?.sourceGenerations[agent]).toEqual(expect.any(String));
+        }
         if (restores && initialFailure) {
           expect(databaseBackup?.migration).toMatchObject({
             name: "openclaw doctor",
@@ -740,6 +752,7 @@ it.each([
           outsideWrite
             ? "state-migrated-no-rollback"
             : scenario === "package" ||
+                scenario === "exited-writer" ||
                 gitInstall ||
                 scenario === "serving" ||
                 scenario === "config-refused"
@@ -804,8 +817,16 @@ it.each([
             expect(readDatabase(snapshot)).toEqual(file === shared ? before.shared : before.agent);
           }
           const preserved = { shared: readDatabase(shared), agent: readDatabase(agent) };
+          if (preservesMigrated) {
+            expect(execution.result.recovery).toMatchObject({
+              serviceRestartSafe: false,
+              dataAtRisk: "state-migrated-no-rollback",
+            });
+          }
           await expect(finalize()).rejects.toMatchObject({
-            result: { reason: "state-migrated-no-rollback" },
+            result: {
+              reason: preservesMigrated ? "post-update-failed" : "state-migrated-no-rollback",
+            },
           });
           expect({ shared: readDatabase(shared), agent: readDatabase(agent) }).toEqual(preserved);
           const active = JSON.parse(
@@ -833,9 +854,15 @@ it.each([
           if (preservesMigrated) {
             expect(record).toMatchObject({
               status: "failed",
-              reason: "state-migrated-no-rollback",
-              verification: { serviceRunning: true, readyz: true, runningVersion: "2.0.0" },
+              reason: "post-update-failed",
+              verification: {
+                serviceRunning: true,
+                readyz: true,
+                runningVersion: "2.0.0",
+                recovery: { serviceRestartSafe: true, service: "healthy", version: "2.0.0" },
+              },
             });
+            expect(record.verification.recovery).not.toHaveProperty("dataAtRisk");
             expect(renderUpdateRunReport(record).lines.join("\n")).toContain(
               "running on the preserved migrated state",
             );

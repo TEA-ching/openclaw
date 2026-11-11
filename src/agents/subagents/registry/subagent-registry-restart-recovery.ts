@@ -1,5 +1,7 @@
 import type { SessionEntryCurrentFacts } from "../../../config/sessions/session-entry-current.types.js";
+import type { SessionSourceAssertion } from "../../../config/sessions/session-source-authority.js";
 import { prepareSqliteTargetFromSessionStorePath } from "../../../config/sessions/session-sqlite-target.js";
+import type { GatewayRecoveryRuntime } from "../../../gateway/server-instance-runtime.types.js";
 import * as agentEvents from "../../../infra/agent-events.js";
 import { listAgentRunsForSession } from "../../../infra/agent-run-registry.js";
 import {
@@ -7,12 +9,17 @@ import {
   getGatewayContextResolver,
 } from "../../../plugins/runtime/gateway-request-scope.js";
 import { isSessionWorkAdmissionActive } from "../../../sessions/session-lifecycle-admission.js";
+import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
 import { resolveSubagentChildAuthority } from "./subagent-child-owner-match.js";
 import { isQuietSubagentRestartContinuation } from "./subagent-recovery-state.js";
 import {
   getSubagentRunsForRequesterSession,
   getSubagentRunsForChildSession,
+  subagentRuns,
 } from "./subagent-registry-memory.js";
+import { assertSubagentRegistryWriteSourceCurrent } from "./subagent-registry-persistence.js";
+import { appendDeniedSubagentRecoveryNotice } from "./subagent-registry-recovery-notice.js";
+import { getUnrestorableSubagentCompletionSourceReason } from "./subagent-registry-requester-source.js";
 import {
   isRestartRecoveryLifecycleCurrent,
   ownsSubagentSessionExecution,
@@ -22,14 +29,154 @@ import type {
   RestartRecoveryParams,
   RestartRecoveryResult,
 } from "./subagent-registry-restart-recovery-types.js";
-import type { SubagentSessionEffects } from "./subagent-registry.types.js";
+import type { SubagentRunRecord, SubagentSessionEffects } from "./subagent-registry.types.js";
 import {
   hasRequesterCompletionCohort,
   isRequesterCompletionCohortCurrent,
   isRequesterSettleWakeForRun,
+  sameRequesterSettleRunIdentity,
 } from "./subagent-requester-settle-identity.js";
-import { latestSubagentRun } from "./subagent-run-generation.js";
+import { isRestoredRequesterWakeRunnable } from "./subagent-restored-wake-readiness.js";
+import { isSameSubagentRunOwner, latestSubagentRun } from "./subagent-run-generation.js";
 import { resolveCompletionFromSessionEntry } from "./subagent-session-reconciliation.js";
+
+type RequesterSettleWakeRecoveryTarget = {
+  runId: string;
+  requesterSessionKey: string;
+  requesterAgentId: string;
+  sessionId: string;
+  lifecycleRevision?: string;
+  storePath: string;
+  gatewayRuntime: GatewayRecoveryRuntime;
+};
+
+/** The dispatched frozen cohort owns this exact requester input across a restart. */
+function findRequesterSettleWakeRecoveryBatch(
+  params: RequesterSettleWakeRecoveryTarget,
+  requireGatewayCurrent = true,
+  allowPending = false,
+  requireRunnable = true,
+): SubagentRunRecord[] | undefined {
+  const children = new Map(
+    [...getSubagentRunsForRequesterSession(params.requesterSessionKey)].map((child) => [
+      child.runId,
+      child,
+    ]),
+  );
+  for (const child of children.values()) {
+    const wake = child.requesterSettleWake;
+    if (
+      !(wake?.status === "dispatching" || (allowPending && wake?.status === "pending")) ||
+      !(hasRequesterCompletionCohort(child) || isQuietSubagentRestartContinuation(child)) ||
+      !isRequesterSettleWakeForRun({
+        entry: child,
+        runId: params.runId,
+        requesterSessionKey: params.requesterSessionKey,
+        requesterAgentId: params.requesterAgentId,
+        runsById: children,
+      })
+    ) {
+      continue;
+    }
+    const batchRunIds =
+      child.pauseReason === "sessions_yield" && wake.pauseNotice
+        ? [child.runId]
+        : (wake.batchRunIds ?? []);
+    const batch = batchRunIds.flatMap((id) => {
+      const member = children.get(id);
+      return member?.requesterSettleWake !== undefined &&
+        member.requesterSettleWake.rearmGeneration === wake.rearmGeneration
+        ? [member]
+        : [];
+    });
+    if (
+      batch.length > 0 &&
+      new Set(batchRunIds).size === batchRunIds.length &&
+      batch.every(
+        (member) =>
+          (!requireRunnable ||
+            isRestoredRequesterWakeRunnable(
+              member,
+              subagentRuns.values(),
+              Boolean(wake.pauseNotice),
+            )) &&
+          isRequesterCompletionCohortCurrent(
+            member,
+            (key, matches, agentId) =>
+              latestSubagentRun(getSubagentRunsForChildSession(key, agentId), matches) ?? null,
+          ) &&
+          (member.expectsCompletionMessage === true ||
+            isQuietSubagentRestartContinuation(member)) &&
+          !member.collect &&
+          member.completionRequesterSessionId === params.sessionId &&
+          (member.completionTarget !== "parent" ||
+            member.completionRequesterLifecycleRevision === params.lifecycleRevision) &&
+          member.requesterStorePath === params.storePath &&
+          member.requesterAgentId === params.requesterAgentId &&
+          !member.suppressCompletionDelivery &&
+          !member.killReconciliation?.suppressTaskDelivery &&
+          (member.requesterSettleWake?.status === "dispatching" ||
+            (allowPending && member.requesterSettleWake?.status === "pending")) &&
+          member.requesterSettleWake.rearmGeneration === wake.rearmGeneration &&
+          member.requesterSettleWake.attemptCount === wake.attemptCount &&
+          (!requireGatewayCurrent ||
+            getGatewayContextResolver(member)?.()?.recoveryRuntime === params.gatewayRuntime),
+      )
+    ) {
+      return batch;
+    }
+  }
+  return undefined;
+}
+
+export function captureRequesterSettleWakeRecoverySource(
+  params: RequesterSettleWakeRecoveryTarget & { context: OpenClawStateWorkerContext },
+): SessionSourceAssertion | undefined {
+  assertSubagentRegistryWriteSourceCurrent(params.context);
+  const lifecycleGeneration = agentEvents.getAgentEventLifecycleGeneration();
+  // Observing the admitted recovery can put its wake into backoff. That progress
+  // transition does not revoke the still-executing input's source custody.
+  const batch = findRequesterSettleWakeRecoveryBatch(params, true, true);
+  if (!batch) {
+    if (findRequesterSettleWakeRecoveryBatch(params, false, true)) {
+      throw new Error("Requester settle recovery awaits its current Gateway binding");
+    }
+    return undefined;
+  }
+  const assertCurrent = () => {
+    assertSubagentRegistryWriteSourceCurrent(params.context);
+    const current = findRequesterSettleWakeRecoveryBatch(params, true, true);
+    if (
+      !agentEvents.isAgentEventLifecycleGenerationCurrent(lifecycleGeneration) ||
+      !current ||
+      current.length !== batch.length ||
+      !batch.every((observed) =>
+        current.some(
+          (member) =>
+            isSameSubagentRunOwner(member, observed) &&
+            sameRequesterSettleRunIdentity(member, observed) &&
+            member.requesterSettleWake?.attemptCount ===
+              observed.requesterSettleWake?.attemptCount &&
+            member.requesterSettleWake?.yieldedFinalDeliverable ===
+              observed.requesterSettleWake?.yieldedFinalDeliverable,
+        ),
+      )
+    ) {
+      throw new Error("Requester settle recovery lost its exact dispatched cohort");
+    }
+    // This checks retained cohort custody; the durable operator source restores
+    // its principal separately when the Gateway admits the recovery run.
+    subagentRuns.runWithCompletionBatchAuthority(current, () => {});
+  };
+  assertCurrent();
+  return Object.assign(assertCurrent, {
+    nativeSource: true,
+    async prepareSessionSource() {
+      assertCurrent();
+      return { nativeSource: true, checks: [], assertCurrent };
+    },
+  });
+}
 
 export async function recoverInterruptedSubagentRow(
   params: RestartRecoveryParams,
@@ -143,51 +290,23 @@ export async function recoverInterruptedSubagentRow(
       ) {
         return false;
       }
-      const children = new Map(
-        [...getSubagentRunsForRequesterSession(childSessionKey)].map((child) => [
-          child.runId,
-          child,
-        ]),
-      );
-      return [...children.values()].some((child) => {
-        const wake = child.requesterSettleWake;
-        return (
-          wake?.status === "dispatching" &&
-          (hasRequesterCompletionCohort(child) || isQuietSubagentRestartContinuation(child)) &&
-          isRequesterSettleWakeForRun({
-            entry: child,
+      return Boolean(
+        physicalStorePath &&
+        findRequesterSettleWakeRecoveryBatch(
+          {
             runId,
             requesterSessionKey: childSessionKey,
             requesterAgentId: sessionAgentId,
-            runsById: children,
-          }) &&
-          wake.batchRunIds?.every((id) => {
-            const member = children.get(id);
-            return (
-              member !== undefined &&
-              isRequesterCompletionCohortCurrent(
-                member,
-                (key, matches, agentId) =>
-                  latestSubagentRun(getSubagentRunsForChildSession(key, agentId), matches) ?? null,
-              ) &&
-              (member.expectsCompletionMessage === true ||
-                isQuietSubagentRestartContinuation(member)) &&
-              !member.collect &&
-              member.completionRequesterSessionId === sessionId &&
-              (member.completionTarget !== "parent" ||
-                member.completionRequesterLifecycleRevision === lifecycleRevision) &&
-              member.requesterStorePath === physicalStorePath &&
-              member.requesterAgentId === sessionAgentId &&
-              !member.suppressCompletionDelivery &&
-              !member.killReconciliation?.suppressTaskDelivery &&
-              member.requesterSettleWake?.status === "dispatching" &&
-              member.requesterSettleWake.rearmGeneration === wake.rearmGeneration &&
-              member.requesterSettleWake.attemptCount === wake.attemptCount &&
-              getGatewayContextResolver(member)?.()?.recoveryRuntime === params.gatewayRuntime
-            );
-          })
-        );
-      });
+            sessionId,
+            lifecycleRevision,
+            storePath: physicalStorePath,
+            gatewayRuntime: params.gatewayRuntime,
+          },
+          true,
+          false,
+          false,
+        ),
+      );
     };
     if (!replayTerminal && hasPendingRequesterSettleWake()) {
       return { status: "handled" };
@@ -303,6 +422,20 @@ export async function recoverInterruptedSubagentRow(
       }
       return true;
     };
+    await appendDeniedSubagentRecoveryNotice({
+      runId,
+      reason: getUnrestorableSubagentCompletionSourceReason(entry),
+      agentId: sessionAgentId,
+      sessionKey: childSessionKey,
+      storePath,
+      entry: sessionEntry,
+      suppressSessionEffects,
+      assertCurrent: () => {
+        if (!isRecoveryHostCurrent()) {
+          throw new Error("Subagent recovery notice owner changed");
+        }
+      },
+    });
     return {
       status: "terminal",
       recoveryCurrent: {

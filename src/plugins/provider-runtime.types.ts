@@ -100,6 +100,8 @@ export type ProviderPrepareRuntimeAuthContext = ProviderPreferRuntimeResolvedMod
   apiKey: string;
   authMode: string;
   profileId?: string;
+  /** Cancel caller-owned exchanges when the run stops or its auth budget expires. */
+  signal?: AbortSignal;
 };
 
 /**
@@ -141,7 +143,7 @@ export type ProviderResolveUsageAuthContext = {
   workspaceDir?: string;
   env: NodeJS.ProcessEnv;
   provider: string;
-  /** @deprecated Await resolveApiKeyCandidatesFromConfigAndStore instead. Removed at the next Plugin SDK major. */
+  /** @deprecated Await resolveApiKeyCandidatesFromConfigAndStore instead. Removal follows an announced ordinary stable release window. */
   resolveApiKeyFromConfigAndStore: (params?: {
     providerIds?: string[];
     envDirect?: Array<string | undefined>;

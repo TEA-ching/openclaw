@@ -926,7 +926,11 @@ async function handlePreparedNodeEvent(
           reason: "unmatched_exec_event",
         };
       }
-      if (cfg.tools?.exec?.notifyOnExit === false || obj.suppressNotifyOnExit === true) {
+      if (
+        (typeof auth === "object" && auth.resultDelivered) ||
+        cfg.tools?.exec?.notifyOnExit === false ||
+        obj.suppressNotifyOnExit === true
+      ) {
         return undefined;
       }
       if (evt.event === "exec.denied") {
@@ -969,14 +973,14 @@ async function handlePreparedNodeEvent(
         }
       }
 
-      enqueueNodeExecNotice({
-        cfg,
-        sessionKey,
-        agentId,
-        authorization: auth,
-        runId,
-        text,
-      });
+      const notify = () =>
+        enqueueNodeExecNotice({ cfg, sessionKey, agentId, authorization: auth, runId, text });
+      // A caller still waiting on this run gets its output inline; notify only if that fails.
+      if (typeof auth === "object" && auth.holdNotice) {
+        auth.holdNotice(notify);
+      } else {
+        notify();
+      }
       return undefined;
     }
     case "push.apns.register": {

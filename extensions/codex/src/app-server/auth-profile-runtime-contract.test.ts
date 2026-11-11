@@ -23,7 +23,7 @@ import {
   readCodexAppServerBinding,
   writeCodexAppServerBinding as writeRawCodexAppServerBinding,
 } from "./session-binding.test-helpers.js";
-import type { CodexAppServerClientOptions } from "./shared-client.js";
+import type { CodexAppServerClientOptions } from "./shared-client-options.js";
 import { createCodexTestOAuthProfile } from "./test-support.js";
 
 /** Keeps native Codex bindings reusable while omitting OpenClaw tools and search. */
@@ -158,6 +158,9 @@ function createCodexAuthProfileHarness(params: {
       }
       if (method === "turn/start") {
         return turnStartResult("turn-auth-contract");
+      }
+      if (method === "thread/inject_items") {
+        return {};
       }
       throw new Error(`unexpected method: ${method}`);
     },

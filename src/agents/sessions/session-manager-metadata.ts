@@ -3,10 +3,11 @@ import { sameSessionTranscriptTargetBinding } from "../../config/sessions/transc
 import {
   captureSessionMetadataPublication,
   SessionTranscriptWriterClaimReboundError,
-  type SessionMetadataChange,
-  type SessionMetadataCommit,
 } from "../../config/sessions/transcript-write-context.js";
-import { isIncognitoSessionKey } from "../../routing/session-key.js";
+import type {
+  SessionMetadataChange,
+  SessionMetadataCommit,
+} from "../../config/sessions/transcript-write-context.types.js";
 import { withSessionManagerAppend } from "./session-manager-append-admission.js";
 import { SessionManagerEntries } from "./session-manager-entries.js";
 import { generateSessionEntryId } from "./session-manager-id.js";
@@ -24,13 +25,7 @@ export class SessionManagerMetadata extends SessionManagerEntries {
         parentId: this.appendParentId,
         timestamp: new Date().toISOString(),
       };
-      if (
-        !admission ||
-        (isIncognitoSessionKey(this.persistenceTarget?.sessionKey) &&
-          !("actor" in admission) &&
-          "db" in admission.database)
-      ) {
-        // Volatile storage keeps its one native owner until its complete actor cutover.
+      if (!admission) {
         const appended = this.appendEntry(entry);
         return this.publishMetadataCommit(
           { entry: appended.entry, version: this.transcriptVersion, target: publication.target },

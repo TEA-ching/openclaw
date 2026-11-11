@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import { sql, type AliasableExpression } from "kysely";
 import {
   createSqliteQueryCache,
@@ -8,7 +9,7 @@ import {
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { chunkItems } from "../../utils/chunk-items.js";
 import type { SessionTranscriptStats } from "./session-accessor.sqlite-contract.js";
-import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
+import { getSessionKysely } from "./session-accessor.sqlite-scope-helpers.js";
 import { transcriptEventReadBytesSql } from "./session-transcript-read-bytes.js";
 
 type TranscriptStatsRow = Omit<
@@ -34,7 +35,7 @@ function transcriptStatsFromRow(row: TranscriptStatsRow | undefined): SessionTra
   };
 }
 
-const transcriptStatsQuery = createSqliteQueryCache((database) => {
+const transcriptStatsQuery = createSqliteQueryCache((database: DatabaseSync) => {
   const db = getSessionKysely(database);
   const prepare = (point: boolean, includeGeneration = false) =>
     prepareSqliteQuerySync<readonly string[], TranscriptStatsRow>(database, (parameter) => {

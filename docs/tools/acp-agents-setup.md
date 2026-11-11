@@ -38,7 +38,7 @@ Built-in acpx harness aliases (from the pinned `acpx` dependency):
 | `droid`      | [Factory Droid](https://www.factory.ai)                                                                |
 | `fast-agent` | [fast-agent](https://fast-agent.ai)                                                                    |
 | `gemini`     | [Gemini CLI](https://github.com/google-gemini/gemini-cli)                                              |
-| `grok-build` | Grok Build (`grok agent stdio`)                                                                        |
+| `grok-build` | [Grok Build](https://docs.x.ai/build/overview) (`grok agent stdio`)                                    |
 | `iflow`      | [iFlow CLI](https://github.com/iflow-ai/iflow-cli)                                                     |
 | `kilocode`   | [Kilocode](https://kilocode.ai)                                                                        |
 | `kimi`       | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli)                                                     |
@@ -57,6 +57,7 @@ Built-in acpx harness aliases (from the pinned `acpx` dependency):
 `factory-droid` and `factorydroid` also resolve to the built-in `droid` adapter.
 
 When OpenClaw uses the acpx backend, prefer these values for `agentId` unless your acpx config defines custom agent aliases.
+`grok-build` is an ACPX agent target, not the xAI model id `xai/grok-build-0.1`. Use `agentId: "grok-build"` to launch the Grok Build CLI through ACP; use `xai/grok-build-0.1` only when selecting that model on OpenClaw's xAI provider route.
 If your local Cursor install still exposes ACP as `agent acp`, override the `cursor` agent command in your acpx config instead of changing the built-in default.
 
 Direct acpx CLI usage can also target arbitrary adapters via `--agent <command>`, but that raw escape hatch is an acpx CLI feature (not the normal OpenClaw `agentId` path).
@@ -159,12 +160,14 @@ Core ACP baseline:
       "cursor",
       "droid",
       "gemini",
+      "grok-build",
       "iflow",
       "kilocode",
       "kimi",
       "kiro",
       "openclaw",
       "opencode",
+      "pool",
       "qwen",
     ],
     stream: {
@@ -266,8 +269,17 @@ signal. That check also supplies failure diagnostics and is bounded by
 `plugins.entries.acpx.config.timeoutSeconds`; an unhealthy result does not
 launch a second check. Set `OPENCLAW_ACPX_RUNTIME_STARTUP_PROBE=0` or
 `OPENCLAW_SKIP_ACPX_RUNTIME_PROBE=1` only for scripts or environments that
-intentionally keep the startup check disabled. Run `/acp doctor` for an explicit
-on-demand check.
+intentionally keep the startup check disabled.
+
+Health checks run from the plugin-owned `<state>/acpx` directory, which the
+service creates before probing. They do not require the default agent workspace
+to exist. Sessions still launch in their requested `cwd`, falling back to the
+configured plugin or service workspace when no session directory is supplied.
+
+A failed check makes the backend unavailable for ACP spawns across the Gateway.
+After correcting the cause, run `/acp doctor` to check again; a successful check
+restores availability without restarting. Spawn attempts do not automatically
+retry the health check.
 
 Override an individual ACP agent command with structured arguments when a path
 or flag value should remain one argv token:

@@ -47,7 +47,7 @@ import {
   TelegramSpooledReplayProcessingError,
 } from "./bot-processing-outcome.js";
 import { createTelegramUpdateTracker } from "./bot-update-tracker.js";
-import { apiThrottler, Bot, type ApiClientOptions } from "./bot.runtime.js";
+import { Bot, type ApiClientOptions } from "./bot.runtime.js";
 import type { TelegramBotOptions } from "./bot.types.js";
 import {
   setTelegramCallbackQueryAnswerPromise,
@@ -112,7 +112,7 @@ export async function createTelegramBotCore(
     client,
     ...(opts.botInfo ? { botInfo: opts.botInfo } : {}),
   });
-  const accountThrottler = getOrCreateAccountThrottler(opts.token, apiThrottler);
+  const accountThrottler = getOrCreateAccountThrottler(opts.token);
   bot.api.config.use(accountThrottler.transformer);
   const sendChatActionHandler: TelegramSendChatActionHandler = {
     sendChatAction: (chatId, action, threadParams) =>
@@ -152,6 +152,16 @@ export async function createTelegramBotCore(
   bot.use(async (ctx, next) => {
     const begin = updateTracker.beginUpdate(ctx);
     if (!begin.accepted) {
+      // Dedupe must distinguish a completed update from an older attempt that
+      // still owns middleware after its spool claim timed out.
+      recordTelegramMessageProcessingResult(
+        begin.reason === "pending"
+          ? {
+              kind: "failed-retryable",
+              error: new Error("Telegram update processing is still pending"),
+            }
+          : { kind: "skipped" },
+      );
       return;
     }
     try {

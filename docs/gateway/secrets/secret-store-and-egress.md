@@ -56,6 +56,8 @@ The secret egress proxy lets Gateway-hosted agent subprocesses use shared-store 
 
 The listener runs in a dedicated Gateway Worker that owns TLS, certificate preparation, substitution, and forwarding. Request and response bytes stay off the Gateway's main event loop. The Gateway exchanges process grants and certificate health with that Worker; revocation immediately fences the grant before its connections are closed. A failed Worker closes protected egress and requires a Gateway restart.
 
+The proxy's destination trust and exported subprocess CA bundle exclude the emSign ECC G3 root following the published eMudhra incident distrust policy. This also rejects legitimate chains relying exclusively on that root. The generated local proxy CA and other bundled public roots remain trusted. Restart the Gateway after installing this repair. Child runtimes and clients that use their own trust stores, including blind `bypassHosts` tunnels, still require their appropriate security updates; an extra CA file does not remove Node's built-in trust.
+
 Each secret must also name the exact HTTPS hosts where substitution is allowed. Hostnames are stored lowercase in ASCII/punycode form and matched exactly; wildcards, suffix matching, and ports are not supported. A secret with no allowed hosts is never substituted. Bind a host without replacing the stored value:
 
 ```bash
@@ -175,6 +177,24 @@ read-worker snapshot. Unrelated secrets and agent-readable `env` entries are not
 loaded or registered. A missing or non-secret selection fails before launching
 the job; changes to the store apply to the next job's snapshot.
 
+Cloud worker profiles select these jobs with `settings.setupSecrets`, a bounded
+map of POSIX environment names to store SecretRefs. Only protected entries with
+exact destination bindings qualify. A committed devcontainer `secrets` property
+requests names from this approved map; it cannot select another store entry or
+grant destinations. Missing mappings are reported together before repository
+commands run. See [cloud environment files](/gateway/cloud-workers/environment-file).
+
+Profile setup, preparation, and post-create/start use Crabbox native `egress run`
+on the worker's owned coordinator Linux lease. Crabbox 0.77.0 or newer permits
+public destinations for ordinary HTTPS package downloads, while the Gateway
+substitutes each sentinel only at that secret's bound host. This job does not
+require `secrets.egressProxy.enabled`. Unsupported leases, unavailable helpers or
+proxy service, and old CLIs fail with repair guidance before repository code.
+No-secret jobs retain their existing transport.
+Protected setup exports only HTTPS proxy settings and unsets inherited
+`HTTP_PROXY` and `http_proxy` values. Plain HTTP downloads go directly from the
+lease and never receive substituted secrets.
+
 The job receives remote sentinel environment values and public CA bundle
 contents. Its authenticated upstream proxy environment belongs only on the
 credential-owning host, never in the remote environment or a snapshot. The host
@@ -183,6 +203,14 @@ same worker-owned grant lifecycle: cancellation revokes access synchronously
 before process termination, and completion or failure revokes the grant, stops
 the proxy, and removes temporary CA files. See the
 [SDK runtime contract](/plugins/sdk-runtime#setup-secret-egress).
+
+Setup secrets no longer disable snapshots. Compatibility records use sorted
+environment names and store references with a protected-egress identity, never
+values or sentinel bytes. Capture removes runner-owned CA files and Crabbox
+command staging. No runner-generated credential config is retained; repository
+configuration stays owned by the repository. Legacy `setupEnv` requires Doctor
+repair against existing bound store entries; values are never forwarded or
+rewritten by that migration.
 
 ## Model credentials for Crabbox commands
 

@@ -14,7 +14,9 @@ const nextTag = "v2026.9.4";
 const channel = "linux-stable";
 const publicKey = Buffer.from("fixture public key\n").toString("base64");
 const signature = Buffer.from("fixture signature\n").toString("base64");
-const toolingSha = "b".repeat(40);
+const requestSha = "a".repeat(40);
+const builderSha = "b".repeat(40);
+const toolingSha = requestSha;
 const toolingRef = `release-publish/${toolingSha.slice(0, 12)}-42`;
 
 type Asset = {
@@ -92,6 +94,8 @@ type State = {
   releaseResponseTag?: { tag: string; value: string };
   authority: {
     toolingSha: string;
+    requestSha: string;
+    writerSha: string;
     toolingPresent: boolean;
     toolingRef: string;
     toolingFullRef: string;
@@ -277,13 +281,13 @@ try {
       }
       answer();
     } else if (route.startsWith("compare/") && route.endsWith("...main")) {
-      assert.equal(route, "compare/" + "b".repeat(40) + "...main");
+      assert.equal(route, "compare/" + state.authority.toolingSha + "...main");
       answer({ status: "identical" });
     } else if (route === "actions/runs/42") {
       answer({
         id: 42, run_attempt: state.authority.parentAttempt,
         repository: { full_name: "openclaw/openclaw" }, event: "workflow_dispatch",
-        head_branch: state.authority.toolingRef, head_sha: "b".repeat(40),
+        head_branch: state.authority.toolingRef, head_sha: state.authority.toolingSha,
         path: ".github/workflows/openclaw-release-publish.yml@" + state.authority.toolingFullRef,
         status: state.authority.parentStatus, conclusion: state.authority.parentConclusion,
       });
@@ -294,7 +298,7 @@ try {
       answer({
         id: 43, run_attempt: state.authority.requestAttempt,
         repository: { full_name: "openclaw/openclaw" }, event: "workflow_dispatch",
-        head_branch: "main", head_sha: "b".repeat(40),
+        head_branch: "main", head_sha: state.authority.requestSha,
         path: ".github/workflows/linux-app-release-request.yml",
         display_title: "Linux App Release Request [" + state.authority.requestTag + "] desktop=" + state.authority.desktop,
         status: "completed", conclusion: "success",
@@ -304,7 +308,7 @@ try {
         id: 44, run_attempt: state.authority.writerAttempt,
         repository: { full_name: "openclaw/openclaw" },
         event: state.authority.writerEvent,
-        head_branch: state.authority.writerRef, head_sha: "b".repeat(40),
+        head_branch: state.authority.writerRef, head_sha: state.authority.writerSha,
         path: state.authority.writerPath + "@" + state.authority.writerFullRef,
         status: state.authority.writerStatus, conclusion: state.authority.writerConclusion,
       });
@@ -550,6 +554,8 @@ function fixture(workflowRef = toolingRef, desktop = false, windows = false) {
       verifierExit: 0,
       authority: {
         toolingSha,
+        requestSha,
+        writerSha: toolingSha,
         toolingPresent: true,
         toolingRef: workflowRef,
         toolingFullRef: workflowFullRef,
@@ -564,7 +570,7 @@ function fixture(workflowRef = toolingRef, desktop = false, windows = false) {
         writerConclusion: null,
         writerRef: workflowRef,
         writerFullRef: workflowFullRef,
-        writerPath: ".github/workflows/linux-app-release.yml",
+        writerPath: ".github/workflows/linux-app-mirror.yml",
         writerEvent: "workflow_dispatch",
       },
     } satisfies State),
@@ -689,12 +695,16 @@ function fixture(workflowRef = toolingRef, desktop = false, windows = false) {
     const args = [mode, "--tag", releaseTag, "--source-sha", sourceSha(releaseTag)];
     args.push("--tooling-sha", toolingSha);
     update((value) => {
+      value.authority.toolingSha = toolingSha;
+      value.authority.writerSha = mode === "publish" ? builderSha : toolingSha;
       value.authority.writerRef = mode === "publish" ? "main" : workflowRef;
       value.authority.writerFullRef = mode === "publish" ? "refs/heads/main" : workflowFullRef;
       value.authority.writerPath =
         mode === "finalize-core"
           ? ".github/workflows/openclaw-release-publish.yml"
-          : ".github/workflows/linux-app-release.yml";
+          : mode === "publish"
+            ? ".github/workflows/linux-app-release.yml"
+            : ".github/workflows/linux-app-mirror.yml";
       value.authority.writerEvent = mode === "publish" ? "workflow_run" : "workflow_dispatch";
     });
     if (mode === "publish") {
@@ -702,6 +712,8 @@ function fixture(workflowRef = toolingRef, desktop = false, windows = false) {
         value.authority.requestTag = releaseTag;
       });
       args.push(
+        "--builder-sha",
+        builderSha,
         "--workflow-ref",
         "main",
         "--workflow-full-ref",
@@ -803,6 +815,18 @@ function failed(result: ReturnType<ReturnType<typeof fixture>["run"]>, message: 
   expect(result.stdout.trim()).toBe("");
 }
 
+it("publishes with request SHA tooling under an independently authorized later builder SHA", () => {
+  const f = fixture();
+  expect(succeeded(f.run("publish"))).toMatchObject({ state: "published" });
+  expect(f.state().authority).toMatchObject({
+    toolingSha: requestSha,
+    requestSha,
+    writerSha: builderSha,
+  });
+  expect(requestSha).not.toBe(builderSha);
+  expect(f.mutations().length).toBeGreaterThan(0);
+});
+
 it("reuses complete public Linux assets without local build inputs", () => {
   const f = fixture();
   const original = f.seedLegacy();
@@ -833,19 +857,6 @@ it("reuses complete public Linux assets without local build inputs", () => {
   const advanced = f.bytes(nextTag, "OpenClaw-2026.9.4-linux.json");
   expect(f.bytes(channel, "latest.json")).toEqual(advanced);
   expect(f.bytes(nextTag, "latest.json")).toEqual(advanced);
-});
-
-it("reuses immutable publication bytes without local build inputs on replay", () => {
-  const f = fixture();
-  succeeded(f.run("publish"));
-  const original = f.bytes(tag, "OpenClaw-2026.9.3-linux.json");
-  f.update((state) => {
-    state.calls = [];
-  });
-  succeeded(f.run("publish", tag, undefined, true));
-  expect(f.bytes(channel, "latest.json")).toEqual(original);
-  expect(f.bytes(tag, "OpenClaw-2026.9.3-linux.json")).toEqual(original);
-  expect(f.mutations()).toEqual([]);
 });
 
 it("retains partial canonical replacement when the executing writer is cancelled after deletion", () => {
@@ -995,6 +1006,40 @@ it("publishes Windows with regular Linux bundles and reuses its immutable bytes"
   succeeded(f.run("publish", tag, undefined, true));
   expect(f.mutations()).toHaveLength(writes);
 });
+
+it.each(["withdrawn", "replaced", "linux-missing"] as const)(
+  "advances past a previous publication whose Windows companion was %s",
+  (change) => {
+    const f = fixture(toolingRef, false, true);
+    succeeded(f.run("publish"));
+    const exe = "OpenClaw-2026.9.3-windows-x86_64.exe";
+    f.update((state) => {
+      const release = releaseFrom(state, tag);
+      if (change === "withdrawn") {
+        release.assets = release.assets.filter((entry) => entry.name !== exe);
+      } else if (change === "replaced") {
+        replaceAsset(state, tag, exe, Buffer.from("other bytes\n"));
+      } else {
+        release.assets = release.assets.filter(
+          (entry) => entry.name !== "OpenClaw-2026.9.3-amd64.deb",
+        );
+      }
+      state.calls = [];
+    });
+    f.addRelease(nextTag, true);
+    const previousChannel = f.bytes(channel, "latest.json");
+    const result = f.run("publish", nextTag);
+    if (change === "withdrawn") {
+      succeeded(result);
+      expect(f.bytes(channel, "latest.json")).toEqual(
+        f.bytes(nextTag, "OpenClaw-2026.9.4-linux.json"),
+      );
+    } else {
+      failed(result, "Published Linux asset changed");
+      expect(f.bytes(channel, "latest.json")).toEqual(previousChannel);
+    }
+  },
+);
 
 it("completes an interrupted Windows publication only from matching signed local inputs", () => {
   const f = fixture(toolingRef, false, true);

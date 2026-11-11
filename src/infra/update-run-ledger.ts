@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { UPDATE_RUN_DRIVER_LIMIT } from "../../packages/gateway-protocol/src/update-run-vocabulary.js";
 import { runExistingOpenClawStateWriteTransaction } from "../state/openclaw-state-db-existing-write.js";
@@ -10,6 +9,7 @@ import {
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "./kysely-sync.js";
+import type { EngineConnection } from "./sql-connection.js";
 import { isSqliteLockError } from "./sqlite-error-diagnostics.js";
 import { assertSqliteSchemaContains } from "./sqlite-schema-contract.js";
 import { extractSqliteTableSchema } from "./sqlite-schema-sql.js";
@@ -43,6 +43,7 @@ import {
 } from "./update-run-record.js";
 import { isUpdateRecoveryPending } from "./update-run-recovery-schema.js";
 import { inspectRecoveryRows } from "./update-run-recovery-store.js";
+import { upsertStep } from "./update-run-step-upsert.js";
 import { recordUpdateRunVerificationRecord } from "./update-run-verification.js";
 import {
   applyUpdateRunPhase,
@@ -53,7 +54,6 @@ import {
   persistRun,
   UPDATE_RUN_BOOKKEEPING_TIMEOUT_MS,
   updateRunLedgerSchema as schema,
-  upsertStep,
 } from "./update-run-write.js";
 
 export {
@@ -80,9 +80,10 @@ export function createUpdateRun(
   assertCurrent?: (stage: "transaction" | "commit") => void,
 ): UpdateRunRecord {
   const now = Date.now();
+  const createdAtMs = input.accepted?.startedAtMs ?? now;
   const initial: UpdateRunRecord = {
     runId: input.runId ?? randomUUID(),
-    createdAtMs: now,
+    createdAtMs,
     updatedAtMs: now,
     trigger: input.trigger,
     phase: "requested",
@@ -91,8 +92,8 @@ export function createUpdateRun(
     origin: input.origin ?? {},
     target: input.target ?? {},
     before: input.before ?? {},
-    after: {},
-    steps: [{ step: "requested", status: "in_progress", startedAtMs: now }],
+    after: input.after ?? {},
+    steps: [{ step: "requested", status: "in_progress", startedAtMs: createdAtMs }],
     verification: {},
     repair: [],
     confirmedAtMs: null,
@@ -107,6 +108,9 @@ export function createUpdateRun(
       detail: input.settlement.detail,
     });
     finishUpdateRunRecord(initial, { status: "succeeded", reason: input.settlement.reason });
+  }
+  if (input.accepted) {
+    finishUpdateRunRecord(initial, { status: "succeeded" });
   }
   const row = encodeRun(initial, options);
   return runUpdateRunAdmission(
@@ -430,7 +434,7 @@ export function reconcilePackageOwnerRefusal(
 }
 
 function finishInterruptedRunInTransaction(
-  db: DatabaseSync,
+  db: EngineConnection,
   expected: UpdateRunRecord,
   status: "skipped" | "failed",
   options: LedgerOptions,

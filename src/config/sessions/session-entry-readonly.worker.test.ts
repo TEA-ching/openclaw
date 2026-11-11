@@ -45,7 +45,7 @@ import {
   readSessionEntryReadOnlyInWorker,
   withSessionEntryReadOnlyInWorker,
 } from "./session-entry-read-runtime.js";
-import { readSessionEntryWorkerRequest } from "./session-entry-read.worker.js";
+import { readSessionRuntimeTargetWorkerRequest } from "./session-runtime-target-read.worker.js";
 import { readSessionStoreTargetResult } from "./session-store-target-inventory.js";
 import { targetDiscoveryLane } from "./session-transcript-worker-resources.js";
 
@@ -62,6 +62,29 @@ function createEntryFixture(env: NodeJS.ProcessEnv) {
   };
   return { database, scope };
 }
+
+it("hydrates only selected entries in a worker listing", () =>
+  withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
+    const { database, scope } = createEntryFixture(env);
+    for (let index = 0; index < 32; index++) {
+      writeSessionEntry(database, `agent:main:unrelated-${index}`, {
+        sessionId: `unrelated-${index}`,
+        updatedAt: 1,
+      });
+    }
+    using parsed = vi.spyOn(JSON, "parse");
+    const result = readSessionEntryList({
+      kind: "session-entry-list",
+      database: { agentId: database.agentId, path: database.path },
+      scope: { ...scope, sessionKeys: [scope.sessionKey], projection: "full" },
+    });
+    expect(result.entries).toMatchObject([
+      { sessionKey: scope.sessionKey, entry: { sessionId: "original", updatedAt: 1 } },
+    ]);
+    expect(
+      parsed.mock.calls.filter(([json]) => json.includes('"sessionId":"unrelated-')),
+    ).toHaveLength(0);
+  }));
 
 it("reuses listing revisions without payload scans and invalidates sibling edits and reopened readers", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
@@ -166,7 +189,7 @@ it("resolves runtime targets through an admitted reader without freshness probes
     const sessionKey = "agent:main:persisted-target";
     replaceSessionEntrySync({ agentId: "main", env, sessionKey }, { sessionId, updatedAt: 1 });
     const read = () =>
-      readSessionEntryWorkerRequest({
+      readSessionRuntimeTargetWorkerRequest({
         kind: "session-runtime-target",
         database: { agentId: database.agentId, path: database.path },
         scope: {

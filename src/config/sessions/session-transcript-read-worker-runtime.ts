@@ -1,5 +1,4 @@
 import path from "node:path";
-import { runWithSqliteDatabaseAdmissionTurn } from "../../infra/sqlite-database-admission-turn.js";
 import {
   resolveWorkerPoolSize,
   SESSION_TRANSCRIPT_FOREGROUND_WORKERS,
@@ -17,6 +16,7 @@ import { createSessionTranscriptReadPool } from "./session-transcript-read-pools
 import type {
   SessionEntryWorkerInput,
   SessionEntriesWorkerInput,
+  SessionEntriesWorkerResult,
   SessionResetRecallWorkerInput,
   SessionModelContextWorkerInput,
   SessionSqliteTargetWorkerInput,
@@ -44,13 +44,13 @@ export async function readSessionTranscriptModelContextInWorker(
 ): Promise<ReturnType<typeof readSessionTranscriptModelContext>> {
   signal?.throwIfAborted();
   const value = unwrapSessionTranscriptWorkerReply(
-    await runWithSqliteDatabaseAdmissionTurn(
-      [resolveUnsuffixedSqliteTargetFromSessionStorePath(target.storePath).path],
-      () =>
-        modelContextReads.run(
-          { kind: "model-context", target, admission, through, limits, expectedIdentity },
-          { timeoutMs: 60_000, signal },
-        ),
+    await modelContextReads.run(
+      { kind: "model-context", target, admission, through, limits, expectedIdentity },
+      { timeoutMs: 60_000, signal },
+      {
+        storePaths: [target.storePath],
+        admissionPaths: [resolveUnsuffixedSqliteTargetFromSessionStorePath(target.storePath).path],
+      },
     ),
   );
   if (!("events" in value)) {
@@ -66,14 +66,14 @@ export async function resolveSessionSqliteTargetInWorker(
   signal?.throwIfAborted();
   const target = resolveUnsuffixedSqliteTargetFromSessionStorePath(input.storePath);
   const value = unwrapSessionTranscriptWorkerReply(
-    await runWithSqliteDatabaseAdmissionTurn(
-      listSqliteTargetCandidatePathsForSessionStorePath(input.storePath),
-      () =>
-        modelContextReads.run(
-          { kind: "sqlite-target", ...input },
-          { inputBytes: JSON.stringify(input).length * 2, timeoutMs: 60_000, signal },
-        ),
-      target.agentId || target.shared ? [] : [path.dirname(target.path)],
+    await modelContextReads.run(
+      { kind: "sqlite-target", ...input },
+      { inputBytes: JSON.stringify(input).length * 2, timeoutMs: 60_000, signal },
+      {
+        storePaths: [input.storePath],
+        admissionPaths: listSqliteTargetCandidatePathsForSessionStorePath(input.storePath),
+        families: target.agentId || target.shared ? [] : [path.dirname(target.path)],
+      },
     ),
   );
   if (!("target" in value)) {
@@ -90,13 +90,13 @@ export async function readSessionTranscriptContextMessagesInWorker(
 ) {
   signal?.throwIfAborted();
   const value = unwrapSessionTranscriptWorkerReply(
-    await runWithSqliteDatabaseAdmissionTurn(
-      [resolveUnsuffixedSqliteTargetFromSessionStorePath(target.storePath).path],
-      () =>
-        modelContextReads.run(
-          { kind: "context-messages", target, admission, expectedIdentity },
-          { timeoutMs: 60_000, signal },
-        ),
+    await modelContextReads.run(
+      { kind: "context-messages", target, admission, expectedIdentity },
+      { timeoutMs: 60_000, signal },
+      {
+        storePaths: [target.storePath],
+        admissionPaths: [resolveUnsuffixedSqliteTargetFromSessionStorePath(target.storePath).path],
+      },
     ),
   );
   if (!("messages" in value)) {
@@ -121,35 +121,62 @@ export async function prepareSessionEntryInWorker(
 }
 
 export async function prepareSessionEntriesInWorker(entries: SessionEntriesWorkerInput["entries"]) {
+  const prepared: SessionEntriesWorkerResult["entries"] = [];
+  let received = 0;
   const result = unwrapSessionTranscriptWorkerReply<
     "session-entry" | "session-entries" | "session-reset-recall"
   >(
-    await runWithSqliteDatabaseAdmissionTurn(
-      [
-        ...new Set(
-          entries.map(
-            ({ options }) =>
-              resolveUnsuffixedSqliteTargetFromSessionStorePath(options.storePath).path,
+    await sessionEntries.run(
+      {
+        kind: "session-entries",
+        entries: entries.map((entry) => {
+          const receipt = resolveSessionTranscriptReadFence(entry.options);
+          return { ...entry, ...(receipt ? { admission: { ...receipt } } : {}) };
+        }),
+      },
+      {
+        inputBytes: JSON.stringify(entries).length * 2,
+        onRequest: async (progress) => {
+          // SAFETY: The paired worker publishes one complete entry before reading its next batch.
+          const update = progress as {
+            kind: "session-entries";
+            index: number;
+            value: SessionEntriesWorkerResult["entries"][number];
+          };
+          if (
+            update.kind !== "session-entries" ||
+            !Number.isInteger(update.index) ||
+            update.index < 0 ||
+            update.index >= entries.length ||
+            update.index in prepared
+          ) {
+            throw new Error("Invalid session export delivery");
+          }
+          prepared[update.index] = update.value;
+          received++;
+          return { input: undefined, timeoutMs: 60_000 };
+        },
+      },
+      {
+        storePaths: entries.map(({ options }) => options.storePath),
+        admissionPaths: [
+          ...new Set(
+            entries.map(
+              ({ options }) =>
+                resolveUnsuffixedSqliteTargetFromSessionStorePath(options.storePath).path,
+            ),
           ),
-        ),
-      ],
-      () =>
-        sessionEntries.run(
-          {
-            kind: "session-entries",
-            entries: entries.map((entry) => {
-              const receipt = resolveSessionTranscriptReadFence(entry.options);
-              return { ...entry, ...(receipt ? { admission: { ...receipt } } : {}) };
-            }),
-          },
-          { inputBytes: JSON.stringify(entries).length * 2 },
-        ),
+        ],
+      },
     ),
   );
   if (!("entries" in result)) {
     throw new Error("Session transcript worker returned a single export instead of a batch");
   }
-  return result.entries;
+  if (received !== entries.length) {
+    throw new Error("Session transcript worker returned an incomplete export batch");
+  }
+  return prepared;
 }
 
 export async function readSessionEntrySnapshotInWorker(
@@ -176,24 +203,24 @@ async function readSessionEntryInWorker(input: SessionEntryWorkerInput) {
   const result = unwrapSessionTranscriptWorkerReply<
     "session-entry" | "session-entries" | "session-reset-recall"
   >(
-    await runWithSqliteDatabaseAdmissionTurn(
-      [resolveUnsuffixedSqliteTargetFromSessionStorePath(options.storePath).path],
-      () =>
-        sessionEntries.run(
-          {
-            ...input,
-            ...(receipt ? { admission: { ...receipt } } : {}),
-          },
-          {
-            inputBytes:
-              2 *
-              (absPath.length +
-                options.agentId.length +
-                options.sessionId.length +
-                options.storePath.length +
-                (options.sessionKey?.length ?? 0)),
-          },
-        ),
+    await sessionEntries.run(
+      {
+        ...input,
+        ...(receipt ? { admission: { ...receipt } } : {}),
+      },
+      {
+        inputBytes:
+          2 *
+          (absPath.length +
+            options.agentId.length +
+            options.sessionId.length +
+            options.storePath.length +
+            (options.sessionKey?.length ?? 0)),
+      },
+      {
+        storePaths: [options.storePath],
+        admissionPaths: [resolveUnsuffixedSqliteTargetFromSessionStorePath(options.storePath).path],
+      },
     ),
   );
   if (!("entry" in result) && !("snapshot" in result)) {
@@ -209,17 +236,17 @@ export async function readSessionResetRecallCutoffInWorker(
   const result = unwrapSessionTranscriptWorkerReply<
     "session-entry" | "session-entries" | "session-reset-recall"
   >(
-    await runWithSqliteDatabaseAdmissionTurn(
-      [resolveUnsuffixedSqliteTargetFromSessionStorePath(scope.storePath).path],
-      () =>
-        sessionEntries.run(
-          {
-            kind: "session-reset-recall",
-            scope,
-            ...(receipt ? { admission: { ...receipt } } : {}),
-          },
-          { inputBytes: JSON.stringify(scope).length * 2 },
-        ),
+    await sessionEntries.run(
+      {
+        kind: "session-reset-recall",
+        scope,
+        ...(receipt ? { admission: { ...receipt } } : {}),
+      },
+      { inputBytes: JSON.stringify(scope).length * 2 },
+      {
+        storePaths: [scope.storePath],
+        admissionPaths: [resolveUnsuffixedSqliteTargetFromSessionStorePath(scope.storePath).path],
+      },
     ),
   );
   if (!("cutoff" in result)) {

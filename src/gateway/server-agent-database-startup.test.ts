@@ -14,6 +14,7 @@ import {
   markPreparedModelRuntimeSnapshotsStale,
   refreshPreparedModelRuntimeSnapshots,
 } from "../agents/prepared-model-runtime.js";
+import * as subagents from "../agents/subagents/registry/subagent-registry.js";
 import { getRuntimeConfig } from "../config/io.js";
 import { resolveStateDir } from "../config/paths.js";
 import {
@@ -60,7 +61,10 @@ import {
 import { assertOpenClawDatabasesReady } from "../state/openclaw-database-preflight.js";
 import { closeStateDatabaseForTest } from "../test-utils/database-cleanup.js";
 import { acquireTestPortBlock, type TestPortClaim } from "../test-utils/port-claims.js";
+// Keep cold module evaluation outside the lifecycle and RPC behavior deadlines.
+import * as early from "./server-startup-early.js";
 import { loadGatewayTestConfig } from "./test-helpers.config-runtime.js";
+import "./server-methods/chat-send-external-entry.js";
 import { gatewayReplyMock, testState } from "./test-helpers.runtime-state.js";
 import {
   connectWebchatClient,
@@ -116,9 +120,15 @@ const markers = preparation ? ${JSON.stringify(preparationEnteredPaths)} : ${JSO
 const release = preparation ? ${JSON.stringify(preparationReleasePath)} : ${JSON.stringify(releasePath)};
 const releases = preparation ? ${JSON.stringify(preparationReleasePaths)} : ${JSON.stringify(releasePaths)};
 let startupInspection = false;
-process.on('message', (request) => {
-  startupInspection = request?.type === 'inspect' && request.input?.requireStartupMigrationReadiness === true;
-});
+// A preload listener starts IPC delivery before the worker registers its handler.
+const emit = process.emit;
+process.emit = function(event, ...args) {
+  if (event === 'message') {
+    const request = args[0];
+    startupInspection = request?.type === 'inspect' && request.input?.requireStartupMigrationReadiness === true;
+  }
+  return emit.call(this, event, ...args);
+};
 const prepare = DatabaseSync.prototype.prepare;
 DatabaseSync.prototype.prepare = function(sql) {
   const location = this.location();
@@ -181,13 +191,11 @@ it.for([
     let bootstrapSecrets: ReturnType<typeof getActiveSecretsRuntimeSnapshot> | undefined;
     if (holdSubagentRestoration) {
       vi.stubEnv("OPENCLAW_TEST_MINIMAL_GATEWAY", undefined);
-      const early = await import("./server-startup-early.js");
       const startEarly = early.startGatewayEarlyRuntime;
       vi.spyOn(early, "startGatewayEarlyRuntime").mockImplementation((params) => {
         bootstrapSecrets = getActiveSecretsRuntimeSnapshot();
         return startEarly(params);
       });
-      const subagents = await import("../agents/subagents/registry/subagent-registry.js");
       vi.spyOn(subagents, "activateSubagentRegistry").mockImplementation(async () => {
         restorationEntered.resolve();
         await restorationRelease.promise;
@@ -463,11 +471,7 @@ it.for([
         },
         () => {},
       );
-      if (holdSubagentRestoration) {
-        await withinTest(restorationEntered.promise, signal);
-      } else {
-        await server.startupSettled;
-      }
+      await server.startupSettled;
       if (brokerExpected) {
         expect(brokerPid).toBeTypeOf("number");
       }
@@ -694,6 +698,8 @@ it.for([
           expect(hostJournalReads).toBe(0);
         }
         if (holdSubagentRestoration) {
+          // Restored work starts after reader preparation, independently of readiness.
+          await withinTest(restorationEntered.promise, signal);
           expect(startupSettled).toBe(true);
           restorationRelease.resolve();
           await server.startupSettled;

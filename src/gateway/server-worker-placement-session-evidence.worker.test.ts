@@ -4,6 +4,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, it, vi } from "vitest";
 import * as configEnv from "../config/config-env-vars.js";
 import { setRuntimeConfigSnapshot } from "../config/config.js";
+import { upsertSessionEntryCore } from "../config/sessions/session-accessor.entry.js";
 import {
   readSessionIdentityEvidenceBatch,
   replaceSessionEntrySync,
@@ -219,14 +220,14 @@ it.each([false, true])(
   },
 );
 
-it("captures config, environment, cwd and placement identity before discovery yields", async () => {
+it("captures config, state directory and placement identity before discovery yields", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-    const store = path.relative(process.cwd(), state.statePath("captured.sqlite"));
+    const store = "captured.sqlite";
     const cfg: OpenClawConfig = { session: { store } };
     setRuntimeConfigSnapshot(cfg, cfg);
     const subject = await placement();
     replaceSessionEntrySync(
-      { ...subject, storePath: store },
+      { ...subject, storePath: state.statePath(store) },
       { sessionId: subject.sessionId, updatedAt: 1 },
     );
     const gate = pauseRegistry();
@@ -352,7 +353,7 @@ it("transfers a Windows-normalized environment through inventory and evidence wo
   });
 });
 
-it("rereads incognito absence when a row appears in the same native owner during disk work", async () => {
+it("reads memory evidence after an in-process write completes during disk work", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     setRuntimeConfigSnapshot({});
     const disk = await placement("disk-current");
@@ -362,7 +363,7 @@ it("rereads incognito absence when a row appears in the same native owner during
       "agent:main:dashboard:incognito-created",
     );
     replaceSessionEntrySync(disk, { sessionId: disk.sessionId, updatedAt: 1 });
-    replaceSessionEntrySync(
+    await upsertSessionEntryCore(
       { agentId: "main", sessionKey: "agent:main:dashboard:incognito-anchor" },
       {
         sessionId: "private-anchor",
@@ -373,7 +374,7 @@ it("rereads incognito absence when a row appears in the same native owner during
     boundary.afterReply = async (reply) => {
       if (isEvidenceReply(reply)) {
         boundary.afterReply = undefined;
-        replaceSessionEntrySync(incognito, { sessionId: incognito.sessionId, updatedAt: 2 });
+        await upsertSessionEntryCore(incognito, { sessionId: incognito.sessionId, updatedAt: 2 });
         wrote = true;
       }
     };

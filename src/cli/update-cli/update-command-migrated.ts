@@ -16,6 +16,7 @@ import {
   updateStateSchemaVersionsMatch,
 } from "../../infra/update-candidate-state.js";
 import { resolveUpdateFinalizationTimeoutMs } from "../../infra/update-finalization-budget.js";
+import { unsafeUpdateRecovery } from "../../infra/update-recovery.js";
 import type { UpdateRunStep } from "../../infra/update-run-record.js";
 import { isUpdateGatewayReadinessPending } from "../../infra/update-run-step.js";
 import { createUpdateTimeoutHandoff } from "../../infra/update-timeout-provenance.js";
@@ -61,6 +62,7 @@ export async function inspectActivatedUpdateState(
   if (!schemaVersions) {
     return undefined;
   }
+  let blocked: FinishUpdateParams["rollbackBlockedReason"];
   try {
     const current = await readUpdateStateSchemaVersions({
       stateDir: resolveStateDir(env),
@@ -108,7 +110,7 @@ export async function inspectActivatedUpdateState(
         ].join("\n"),
       });
     }
-    return updateStateSchemaVersionsMatch(schemaVersions, current, {
+    blocked = updateStateSchemaVersionsMatch(schemaVersions, current, {
       sharedPath: resolveOpenClawStateSqlitePath(env),
       candidateSchemaVersions,
     })
@@ -125,8 +127,12 @@ export async function inspectActivatedUpdateState(
       exitCode: 1,
       stderrTail: formatErrorMessage(error),
     });
-    return "rollback-state-unverified";
+    blocked = "rollback-state-unverified";
   }
+  if (blocked && result.status === "error") {
+    result.recovery = unsafeUpdateRecovery(result.recovery, blocked);
+  }
+  return blocked;
 }
 
 /** After migration, only candidate code may reopen state or finish the run. */
@@ -134,10 +140,9 @@ export async function continueMigratedUpdateInFreshProcess(
   params: FinishUpdateParams,
   bufferedSteps: UpdateRunStep[],
 ): Promise<
-  Pick<
-    MigratedUpdateFinalizationResult,
-    "result" | "exitCode" | "automaticTriage" | "candidateStartAttempted"
-  > & { databaseRollbackAvailable?: true }
+  Pick<MigratedUpdateFinalizationResult, "result" | "exitCode" | "candidateStartAttempted"> & {
+    databaseRollbackAvailable?: true;
+  }
 > {
   if (params.opts.recovery) {
     throw new UpdateCommandRecoveryPendingError("Full-state checkpoint recovery is deferred.");
@@ -329,7 +334,6 @@ export async function continueMigratedUpdateInFreshProcess(
     const finalization = {
       result: response.result,
       exitCode: response.exitCode,
-      automaticTriage: response.automaticTriage,
       candidateStartAttempted: response.candidateStartAttempted,
     };
     const restoreDatabases =

@@ -33,6 +33,7 @@ import {
 } from "./doctor-config-analysis.js";
 import { runDoctorConfigPreflight } from "./doctor-config-preflight.js";
 import type { DoctorOptions, DoctorPrompter } from "./doctor-prompter.js";
+import { resolveDoctorRepairMode } from "./doctor-repair-mode.js";
 import { createWorkspaceAliasMigrationRepair } from "./doctor-workspace-alias.js";
 import { createDoctorChangesPanelSink } from "./doctor/changes-panel-sink.js";
 import { cronCodexRuntimePolicyTargetKey } from "./doctor/cron/store-migration.js";
@@ -79,7 +80,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   prompter?: DoctorPrompter;
 }) {
   await using preparingResources = new AsyncDisposableStack();
-  const shouldRepair = params.options.repair === true || params.options.yes === true;
+  const { shouldRepair, nonInteractive } = resolveDoctorRepairMode(params.options);
   const preflight = await withProgress(
     {
       label: "Checking OpenClaw state…",
@@ -94,6 +95,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
         invocationPurpose: "doctor",
         repairPrefixedConfig: shouldRepair,
         doctorOnlyStateMigrations: shouldRepair,
+        deferPluginPackageRepair: nonInteractive && !shouldRepair,
         preparePluginMetadataSnapshot: true,
         agentDatabaseMigrationDiscovery: params.agentDatabaseMigrationDiscovery,
         beforeWorkspaceStateMigration: createWorkspaceAliasMigrationRepair(
@@ -128,6 +130,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   const runWithPluginMetadataSnapshot = pluginMetadataSnapshotScope.run;
   const invalidatePluginMetadataSnapshot = () => {
     // Filesystem/install repairs replace the authoritative plugin generation.
+    delete configResult.preflightLegacyStateConfig;
     pluginMetadataSnapshotState.current = undefined;
     pluginMetadataSnapshotScope.invalidate();
   };
@@ -154,7 +157,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   let retiredModelRefConfig: Pick<OpenClawConfig, "agents" | "models"> | undefined;
   const doctorFixCommand = formatCliCommand("openclaw doctor --fix");
   const changesPanelSink = createDoctorChangesPanelSink(shouldRepair);
-  const configRepairWarnings: string[] = [];
+  const configRepairWarnings: string[] = [...(preflight.warnings ?? [])];
   const applyConfigMutation = (
     mutation: DoctorConfigMutationResult & { warnings?: string[] },
     fixHint: string,
@@ -510,6 +513,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
         : {}),
     });
     state = repairSequence.state;
+    configRepairWarnings.push(...repairSequence.warningNotes);
     if (referenceSource) {
       referenceSource.installedPluginIdRecovery = new Map([
         ...installedPluginRecovery.recovery,
@@ -643,7 +647,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   // Later Doctor contributions and service finalization consume these callbacks.
   const resources = preparingResources.move();
 
-  return {
+  const configResult = {
     [Symbol.asyncDispose]: () => resources.disposeAsync(),
     ...finalized,
     ...(shouldWriteConfig && sessionStoreOwnerRecovery.changes.length > 0
@@ -686,4 +690,5 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
     runWithPluginMetadataSnapshot,
     invalidatePluginMetadataSnapshot,
   };
+  return configResult;
 }

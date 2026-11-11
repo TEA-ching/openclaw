@@ -11,15 +11,18 @@ import {
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost, resolveAiTransportHeaderSentinels } from "../host.js";
 import { calculateCost } from "../model-utils.js";
+import { resolveProviderContext, PROVIDER_MODEL_INPUT } from "../provider-types.js";
 import { buildGuardedModelFetch } from "../transports/host-policy.js";
 import { parseJsonPreservingUnsafeIntegers } from "../transports/json-unsafe-integers.js";
 import {
   failTransportStream,
+  mergeTransportHeaders,
   notifyProviderHttpResponse,
   notifyProviderStreamOpened,
   parseTerminalToolCallArguments,
   transportAbortError,
 } from "../transports/transport-stream-shared.js";
+import { streamFragmentError } from "../transports/transport-utils.js";
 import type {
   AssistantMessage,
   Context,
@@ -32,13 +35,19 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import {
   buildGoogleInteractionsParams,
   resolveGoogleApiClientHeaders,
+  type GoogleInteractionsOptions,
   type GoogleInteractionsRequestBody,
 } from "./google-interactions-request.js";
-import type { GoogleApiType, GoogleProviderOptions } from "./google-shared.js";
+import type { GoogleApiType } from "./google-shared.js";
+import {
+  GOOGLE_VIDEO_SLOT_OMISSION,
+  materializeGoogleVideoSlots,
+  type GoogleVideoSlots,
+} from "./google-video-slots.js";
 
 export function resolveGoogleInteractionsApiKey<T extends GoogleApiType>(
   model: Model<T>,
-  options?: GoogleProviderOptions,
+  options?: GoogleInteractionsOptions,
 ): string {
   return (
     options?.apiKey ||
@@ -76,7 +85,7 @@ export async function runGoogleInteractionsLifecycle<T extends GoogleApiType>(pa
   stream: AssistantMessageEventStream;
   model: Model<T>;
   output: AssistantMessage;
-  options?: GoogleProviderOptions;
+  options?: GoogleInteractionsOptions;
   context: Context;
   nextToolCallId: (name: string) => string;
 }): Promise<void> {
@@ -90,7 +99,12 @@ export async function runGoogleInteractionsLifecycle<T extends GoogleApiType>(pa
     if (!apiKey.trim()) {
       throw new Error(`No API key for provider: ${model.provider}`);
     }
-    let body = buildGoogleInteractionsParams(model, context, options);
+    const providerInput = options?.[PROVIDER_MODEL_INPUT] ?? model.input;
+    const providerContext = providerInput.includes("video")
+      ? await resolveProviderContext(context, options)
+      : context;
+    const videoSlots: GoogleVideoSlots = new Map();
+    let body = buildGoogleInteractionsParams(model, providerContext, options, videoSlots);
     const nextBody = await options?.onPayload?.(body, model);
     if (nextBody !== undefined) {
       if (!isGoogleInteractionsRequestBody(nextBody)) {
@@ -98,6 +112,40 @@ export async function runGoogleInteractionsLifecycle<T extends GoogleApiType>(pa
       }
       body = nextBody;
     }
+
+    const optionRecord = asRecord(options);
+    const metadata = asRecord(optionRecord.videoMetadata ?? optionRecord.video_metadata);
+    const processing: Record<string, unknown> = {};
+    for (const [camel, snake] of [
+      ["startOffset", "start_offset"],
+      ["endOffset", "end_offset"],
+      ["fps", "fps"],
+    ] as const) {
+      const value = metadata[camel] ?? metadata[snake];
+      if (value !== undefined) {
+        processing[snake] = value;
+      }
+    }
+    materializeGoogleVideoSlots(
+      body,
+      videoSlots,
+      (slot, video) => {
+        Object.assign(slot, {
+          type: "video",
+          mime_type: video.mimeType,
+          data: video.data,
+          ...(Object.keys(processing).length > 0
+            ? { processing: { type: "static", ...processing } }
+            : {}),
+        });
+      },
+      (part) => {
+        if (part.type === "video") {
+          Object.keys(part).forEach((key) => Reflect.deleteProperty(part, key));
+          Object.assign(part, { type: "text", text: GOOGLE_VIDEO_SLOT_OMISSION });
+        }
+      },
+    );
 
     let baseUrl = (model.baseUrl || "https://generativelanguage.googleapis.com/v1beta")
       .trim()
@@ -113,14 +161,23 @@ export async function runGoogleInteractionsLifecycle<T extends GoogleApiType>(pa
       model,
     });
 
-    const headers = resolveAiTransportHeaderSentinels({
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
-      "Api-Revision": "2026-05-20",
-      ...googleClientHeaders,
-      ...model.headers,
-      ...options?.headers,
-    }) ?? { "Content-Type": "application/json", "x-goog-api-key": apiKey };
+    const headers = resolveAiTransportHeaderSentinels(
+      mergeTransportHeaders(
+        {
+          "Content-Type": "application/json",
+          ...(apiKey.trimStart().startsWith("{") &&
+          Object.keys({ ...model.headers, ...options?.headers }).some(
+            (name) => name.toLowerCase() === "authorization",
+          )
+            ? {}
+            : { "x-goog-api-key": apiKey }),
+          "Api-Revision": "2026-05-20",
+        },
+        googleClientHeaders,
+        model.headers,
+        options?.headers,
+      ),
+    ) ?? { "Content-Type": "application/json", "x-goog-api-key": apiKey };
 
     logGoogleInteractionsDebug("request", {
       method: "POST",
@@ -278,20 +335,27 @@ export async function runGoogleInteractionsLifecycle<T extends GoogleApiType>(pa
     let sawCompletion = false;
     while (!streamDone) {
       const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const frames = buffer.split(/(?:\r\n|\r(?!\n)|\n)(?:\r\n|\r(?!\n)|\n)/);
+      buffer = frames.pop() ?? "";
       if (done) {
-        break;
+        // Preserve the existing newline-terminated final event at EOF.
+        if (/[\r\n]$/.test(buffer)) {
+          frames.push(buffer);
+        }
+        streamDone = true;
       }
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data:")) {
+      for (const frame of frames) {
+        const dataStr = frame
+          .split(/\r\n|\r|\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5))
+          .join("\n")
+          .trim();
+        if (!dataStr) {
           continue;
         }
-        const dataStr = trimmed.slice(5).trim();
         if (dataStr === "[DONE]") {
           streamDone = true;
           break;
@@ -300,8 +364,8 @@ export async function runGoogleInteractionsLifecycle<T extends GoogleApiType>(pa
         let event: Record<string, unknown>;
         try {
           event = asRecord(parseJsonPreservingUnsafeIntegers(dataStr));
-        } catch {
-          continue;
+        } catch (error) {
+          throw streamFragmentError(error);
         }
 
         const eventType = event.event_type || event.type;

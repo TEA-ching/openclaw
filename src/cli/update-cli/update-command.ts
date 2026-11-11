@@ -265,6 +265,7 @@ async function updateCommandInternal(
       const failure = createUpdateConfigFailure(configSnapshot);
       return await refuseUpdate(failure.reason, failure.message, failure.failureFacts);
     }
+    await target.assertPackageRuntimeCurrent?.();
     const schemaPreflight = await preflightUpdateCommandSchemas({
       ...target,
       callerLegacyConfigPlan: initialization?.callerLegacyConfigPlan,
@@ -573,9 +574,7 @@ async function updateCommandInternal(
       recoveryState.ledgerHandoffCompleted = true;
       opts.onResult?.(continued.result);
       if (continued.exitCode !== 0) {
-        throw new UpdateCommandFailure(continued.result, continued.exitCode, undefined, {
-          automaticTriage: continued.automaticTriage,
-        });
+        throw new UpdateCommandFailure(continued.result, continued.exitCode);
       }
       return;
     }

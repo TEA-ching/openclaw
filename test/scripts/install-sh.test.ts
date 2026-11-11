@@ -664,7 +664,7 @@ NODE
     expect(result.stdout).not.toContain("Installing Node.js via NodeSource");
   });
 
-  it.each(["v24.16.0", "v21.7.3"])("handles Alpine nodejs-current %s", (version) => {
+  it.each(["v24.22.1", "v21.7.3"])("handles Alpine nodejs-current %s", (version) => {
     const result = runInstallShell(`
       set -euo pipefail
       source "${SCRIPT_PATH}"
@@ -693,7 +693,7 @@ NODE
         fi
       }
       promote_supported_node_binary() { :; }
-      if [[ "${version}" == v24.16.0 ]]; then
+      if [[ "${version}" == v24.22.1 ]]; then
         finish_linux_node_install() { printf 'finish-linux-node\\n'; }
       else
         ui_error() { printf 'error:%s\\n' "$*"; }
@@ -701,20 +701,20 @@ NODE
       install_node
     `);
 
-    expect(result.status).toBe(version === "v24.16.0" ? 0 : 1);
+    expect(result.status).toBe(version === "v24.22.1" ? 0 : 1);
     expect(result.stdout).toContain("step:Installing Node.js|apk add --no-cache nodejs npm");
     expect(result.stdout).toContain("warn:Alpine nodejs package installed v20.15.1");
     expect(result.stdout).toContain(
       "step:Installing nodejs-current|apk add --no-cache nodejs-current npm",
     );
-    if (version === "v24.16.0") {
+    if (version === "v24.22.1") {
       expect(result.stdout).toContain("finish-linux-node");
     } else {
       expect(result.stdout).toContain(
         "error:Alpine apk repositories did not provide Node.js with WAL-reset-safe SQLite",
       );
       expect(result.stdout).toContain(
-        "Use an official node:26-alpine container or a glibc-based host",
+        "Use an official node:26.12.1-alpine container or a glibc-based host",
       );
     }
   });
@@ -728,7 +728,7 @@ NODE
       install_build_tools_linux() { return 0; }
       dnf() { printf 'unexpected-dnf:%s\n' "$*"; return 99; }
       node() {
-        if [[ "\${1:-}" == "-v" ]]; then printf 'v24.18.0\n'; return 0; fi
+        if [[ "\${1:-}" == "-v" ]]; then printf 'v24.22.1\n'; return 0; fi
         if [[ "\${1:-}" == "-e" ]]; then return 1; fi
         return 1
       }
@@ -754,16 +754,16 @@ NODE
       [
         "#!/usr/bin/env bash",
         'PREFIX="${OPENCLAW_PREFIX:?}"',
-        "node_dir() { printf '%s/tools/node-v24.19.0\\n' \"$PREFIX\"; }",
+        "node_dir() { printf '%s/tools/node-v24.22.1\\n' \"$PREFIX\"; }",
         "os_detect() { printf 'linux\\n'; }",
         "arch_detect() { printf 'x64\\n'; }",
         "install_node() {",
-        '  local dir="$PREFIX/tools/node-v24.19.0"',
+        '  local dir="$PREFIX/tools/node-v24.22.1"',
         '  local bin="$dir/bin"',
         '  mkdir -p "$bin"',
         "  cat > \"$bin/node\" <<'EOF'",
         "#!/usr/bin/env bash",
-        "if [[ \"${1:-}\" == '-v' ]]; then printf 'v24.19.0\\n'; exit 0; fi",
+        "if [[ \"${1:-}\" == '-v' ]]; then printf 'v24.22.1\\n'; exit 0; fi",
         "if [[ \"${1:-}\" == '-e' ]]; then exit 0; fi",
         "exit 1",
         "EOF",
@@ -1876,10 +1876,10 @@ EOF
   );
 
   it.each([
-    { os: "linux", active: "v26.8.2", managed: "v24.14.1", location: "env", expected: "system" },
-    { os: "macos", active: "v20.20.0", managed: "v24.16.0", location: "home", expected: "managed" },
+    { os: "linux", active: "v26.12.1", managed: "v24.14.1", location: "env", expected: "system" },
+    { os: "macos", active: "v20.20.0", managed: "v24.22.1", location: "home", expected: "managed" },
     { os: "linux", active: "v20.20.0", managed: "v24.14.1", location: "env", expected: "refuse" },
-    { os: "linux", active: "v20.20.0", managed: "v24.16.0", location: "hook", expected: "refuse" },
+    { os: "linux", active: "v20.20.0", managed: "v24.22.1", location: "hook", expected: "refuse" },
     {
       os: "linux",
       active: "v20.20.0",
@@ -1926,7 +1926,7 @@ EOF
     {
       os: "linux",
       active: "v20.20.0",
-      managed: "v24.16.0",
+      managed: "v24.22.1",
       location: "env",
       expected: "refuse",
       unsafeSqlite: true,
@@ -1976,7 +1976,7 @@ EOF
         case "$1" in
           use)
             version="${managed}"
-            if [ "\${3:-}" = 26 ]; then version=v26.8.2; fi
+            if [ "\${3:-}" = 26 ]; then version=v26.12.1; fi
             export PATH="$NVM_DIR/versions/node/$version/bin:$PATH"
             ;;
           version)
@@ -1984,7 +1984,7 @@ EOF
             case "$value" in
               'lts/*')
                 if [ -e "$NVM_DIR/remote-updated" ]; then echo N/A; else echo v24.14.1; fi ;;
-              26) echo v26.8.2 ;;
+              26) echo v26.12.1 ;;
               '') echo N/A ;;
               *) echo "$value" ;;
             esac
@@ -1994,9 +1994,9 @@ EOF
             touch "$NVM_DIR/remote-updated"
             ${installFails ? "return 42" : ""}
             if [ ! -e "$NVM_DIR/alias/default" ]; then printf '26\\n' > "$NVM_DIR/alias/default"; fi
-            mkdir -p "$NVM_DIR/versions/node/v26.8.2/bin"
-            printf '#!/bin/sh\\nif [ "$1" = "-v" ]; then echo v26.8.2; fi\\n' > "$NVM_DIR/versions/node/v26.8.2/bin/node"
-            chmod +x "$NVM_DIR/versions/node/v26.8.2/bin/node"
+            mkdir -p "$NVM_DIR/versions/node/v26.12.1/bin"
+            printf '#!/bin/sh\\nif [ "$1" = "-v" ]; then echo v26.12.1; fi\\n' > "$NVM_DIR/versions/node/v26.12.1/bin/node"
+            chmod +x "$NVM_DIR/versions/node/v26.12.1/bin/node"
             ;;
           *) return 1 ;;
         esac
@@ -2046,7 +2046,7 @@ EOF
       } else {
         const selectedBin =
           expected === "installed"
-            ? join(nvmDir, "versions/node/v26.8.2/bin")
+            ? join(nvmDir, "versions/node/v26.12.1/bin")
             : expected === "system"
               ? systemBin
               : nvmBin;
@@ -2104,61 +2104,49 @@ EOF
     );
   });
 
-  it("mirrors the canonical support policy for Node release labels", () => {
-    const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
-      engines?: { node?: string };
-    };
-    expect(pkg.engines?.node).toBe(">=24.16.0 <25 || >=26.1.0");
-
-    const tmp = tempDirs.make("openclaw-install-node-floor-");
-    const bin = join(tmp, "bin");
-    mkdirSync(bin, { recursive: true });
-
-    const nodePath = join(bin, "node");
-    writeFileSync(
-      nodePath,
-      ["#!/bin/sh", 'printf "%s\\n" "${FAKE_NODE_VERSION:-v0.0.0}"', ""].join("\n"),
-    );
-    chmodSync(nodePath, 0o755);
-
-    const result = runInstallShell(
-      [
-        `cd ${JSON.stringify(process.cwd())}`,
-        `source ${JSON.stringify(SCRIPT_PATH)}`,
-        "set +e",
-        `PATH=${JSON.stringify(`${bin}:/usr/bin:/bin`)}`,
-        "export PATH",
-        "unset -f node 2>/dev/null || true",
-        "unalias node 2>/dev/null || true",
-        'node() { printf "%s\\n" "${FAKE_NODE_VERSION:-v0.0.0}"; }',
-        ...NODE_RELEASE_VERSION_CASES.flatMap((version, index) => [
-          `FAKE_NODE_VERSION=${JSON.stringify(version)}`,
-          "export FAKE_NODE_VERSION",
-          "node_version_is_supported",
-          `printf '${index}=%s\\n' "$?"`,
-        ]),
-        "exit 0",
-      ].join("\n"),
-      {
-        PATH: `${bin}:/usr/bin:/bin`,
-        TERM: "dumb",
-      },
-    );
-
-    expect(result.status).toBe(0);
-    for (const [index, version] of NODE_RELEASE_VERSION_CASES.entries()) {
-      const expectedStatus = isSupportedOpenClawNodeVersion(version) ? 0 : 1;
-      expect(result.stdout, version).toContain(`${index}=${expectedStatus}`);
-    }
-  });
+  it.each(["install.sh", "install-cli.sh"])(
+    "checks canonical Node release labels in %s",
+    (installer) => {
+      const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
+        engines?: { node?: string };
+      };
+      expect(pkg.engines?.node).toBe(">=24.16.0 <25 || >=26.1.0");
+      const result = runInstallShell(
+        [
+          `source "scripts/${installer}"`,
+          "set +e",
+          'node() { printf "%s\\n" "$FAKE_NODE_VERSION"; }',
+          ...NODE_RELEASE_VERSION_CASES.flatMap((version, index) => [
+            `FAKE_NODE_VERSION=${JSON.stringify(version)}`,
+            installer === "install.sh"
+              ? "node_version_is_supported"
+              : 'node_release_version_is_supported "$FAKE_NODE_VERSION"',
+            `printf '${index}=%s\\n' "$?"`,
+          ]),
+          "exit 0",
+        ].join("\n"),
+        { TERM: "dumb", OPENCLAW_INSTALL_CLI_SH_NO_RUN: "1" },
+      );
+      expect(result.status).toBe(0);
+      for (const [index, version] of NODE_RELEASE_VERSION_CASES.entries()) {
+        expect(result.stdout, version).toContain(
+          `${index}=${isSupportedOpenClawNodeVersion(version) ? 0 : 1}`,
+        );
+      }
+    },
+  );
 
   it.each(
     [
-      { version: "24.19.0", defect: "none", expected: 0 },
-      { version: "24.19.0", defect: "text", expected: 1 },
+      { version: "24.22.1", defect: "none", expected: 0 },
+      { version: "24.22.1", defect: "text", expected: 1 },
+      { version: "24.16.0+vendor.1", defect: "none", expected: 0 },
+      { version: "26.1.0", defect: "none", expected: 0 },
+      { version: "24.16.0", defect: "text", expected: 1 },
       { version: "24.15.0+vendor.1", defect: "none", expected: 1 },
-      { version: "24.19.0", defect: "blob", expected: 1 },
-      { version: "24.19.0", defect: "json", expected: 1 },
+      { version: "26.0.0+vendor.1", defect: "none", expected: 1 },
+      { version: "24.22.1", defect: "blob", expected: 1 },
+      { version: "24.22.1", defect: "json", expected: 1 },
     ].flatMap(({ version, defect, expected }) =>
       ["install.sh", "install-cli.sh"].map((installer) => ({
         version,
@@ -2281,7 +2269,7 @@ EOF
       [
         "#!/usr/bin/env bash",
         'if [[ "${1:-}" == "-p" ]]; then echo "24 15"; exit 0; fi',
-        'if [[ "${1:-}" == "-v" ]]; then echo "v24.16.0"; exit 0; fi',
+        'if [[ "${1:-}" == "-v" ]]; then echo "v24.22.1"; exit 0; fi',
         "",
       ].join("\n"),
     );
@@ -3074,6 +3062,22 @@ describe("install.sh macOS Homebrew Node behavior", () => {
     );
     expect(result.stdout).not.toContain("brew:link");
     expect(result.stdout).not.toContain("ensure-called");
+  });
+
+  it("falls back to a managed runtime when Homebrew is below the security floor", () => {
+    const result = runInstallShell(`
+      set -euo pipefail
+      source "${SCRIPT_PATH}"
+      OS=macos
+      run_quiet_step() { return 0; }
+      brew() { return 0; }
+      ensure_macos_default_node_active() { return 1; }
+      install_node_with_user_prefix() { echo "managed-runtime-installed"; }
+      install_node
+    `);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("managed-runtime-installed");
   });
 
   it("does not print PATH advice when Homebrew node is missing at runtime", () => {

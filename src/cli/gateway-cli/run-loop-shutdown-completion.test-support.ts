@@ -48,6 +48,7 @@ export function registerGracefulGatewayShutdownTests({
   flushLogger,
   requestGatewayRestartWithSignalAdmission,
   armShutdownHardExitWatchdog,
+  requestSettledExitWatchdog,
 }: UpdateRespawnFixtures): void {
   registerTimedOutGatewayStopTests({
     createSignaledLoopHarness,
@@ -168,6 +169,7 @@ export function registerGracefulGatewayShutdownTests({
           expect(flushLogger).toHaveBeenCalledOnce();
           expect(restartGatewayProcessWithFreshPid).not.toHaveBeenCalled();
           expect(respawnGatewayProcessForUpdate).not.toHaveBeenCalled();
+          expect(requestSettledExitWatchdog).toHaveBeenCalledExactlyOnceWith(10_000);
         });
       } finally {
         closed.resolve();
@@ -298,7 +300,7 @@ export function registerGracefulGatewayShutdownTests({
       captureSignal("SIGTERM")();
 
       await expect(exited).resolves.toBe(0);
-      expect(waitForGatewayActiveWork).toHaveBeenCalledWith(315_000, {
+      expect(waitForGatewayActiveWork).toHaveBeenCalledWith(20_000, {
         onSnapshot: expect.any(Function),
       });
       expect(close).toHaveBeenCalledWith({
@@ -329,6 +331,7 @@ export function registerShutdownCompletionTests({
   gatewayLog,
   armShutdownHardExitWatchdog,
   cancelShutdownHardExitWatchdog,
+  requestSettledExitWatchdog,
   writeDiagnosticStabilityBundleForFailureSync,
 }: UpdateRespawnFixtures): void {
   async function withShutdownClock(
@@ -392,6 +395,7 @@ export function registerShutdownCompletionTests({
           expect(runtime.exit).not.toHaveBeenCalled();
           await vi.advanceTimersByTimeAsync(2_000);
           expect(runtime.exit).toHaveBeenCalledExactlyOnceWith(1);
+          expect(requestSettledExitWatchdog).not.toHaveBeenCalled();
           if (closeFails) {
             expect(writeDiagnosticStabilityBundleForFailureSync).toHaveBeenLastCalledWith(
               "gateway.stop_shutdown_timeout",

@@ -136,7 +136,7 @@ export abstract class MemorySearchOrchestration extends MemoryKeywordRetrieval {
     const database = this.publishedDatabase;
     const assertReadOwner = () => {
       opts?.signal?.throwIfAborted();
-      if (database.closed || !database.db.isOpen || this.publishedDatabase !== database) {
+      if (!database.isOpen || this.publishedDatabase !== database) {
         throw new Error("Memory retrieval changed its captured database owner");
       }
     };
@@ -510,6 +510,11 @@ export abstract class MemorySearchOrchestration extends MemoryKeywordRetrieval {
         }
       }
       const hasVector = queryVec.some((v) => v !== 0);
+      if (!hasVector) {
+        log.warn(
+          `memory search: query embedding from ${semanticProvider.id} is all zeros; vector recall skipped; check the embedding service and retry`,
+        );
+      }
       const vector = hasVector
         ? await this.searchVector(
             queryVec,

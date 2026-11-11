@@ -40,7 +40,7 @@ import {
   readUpdateStateDatabaseSizes,
   readUpdateStateDatabaseSizesInProcess,
 } from "./update-candidate-state.sizes.js";
-import { readUpdateDatabaseGenerations } from "./update-database-generations.js";
+import { readUpdatePhysicalDatabaseGenerations } from "./update-physical-database-generations.js";
 import type { UpdateRecoveryCaptureAcquisition } from "./update-recovery-capture-acquisition.js";
 
 export const UpdateDatabaseBackupSchema = z.object({
@@ -52,6 +52,10 @@ export const UpdateDatabaseBackupSchema = z.object({
       userVersion: z.number().int().nonnegative(),
       sha256: z.string().regex(/^[a-f0-9]{64}$/u),
       sizeBytes: z.number().int().nonnegative(),
+      engine: z.literal("postgres").optional(),
+      storeId: z.string().uuid().optional(),
+      namespace: z.string().optional(),
+      exportDirectory: z.string().optional(),
     }),
   ),
   missingPaths: z.array(z.string()),
@@ -82,8 +86,24 @@ type BackupInput = {
   preserveSourceArtifacts?: boolean;
   /** Native migration owns the stopped Gateway until Doctor takes custody. */
   stopped?: boolean;
+  postgresOffline?: boolean;
 };
 type InspectionPlan = z.infer<typeof UpdateStateSchemaInspectionPlanSchema>;
+
+async function loadUpdateDatabaseBackupRuntime() {
+  const [{ discoverBackupDatabasePaths }, { readBackupEngine }] = await Promise.all([
+    import("./backup-sqlite-snapshot.js"),
+    import("../snapshot/database-backup.js"),
+  ]);
+  return { discoverBackupDatabasePaths, readBackupEngine };
+}
+
+let backupRuntime: ReturnType<typeof loadUpdateDatabaseBackupRuntime> | undefined;
+
+/** Resolve the backup's lazy modules before an updater replaces its own dist tree. */
+export function prepareUpdateDatabaseBackupRuntime() {
+  return (backupRuntime ??= loadUpdateDatabaseBackupRuntime());
+}
 
 async function inspectRestorableDatabaseFiles(
   databases: readonly string[],
@@ -92,7 +112,8 @@ async function inspectRestorableDatabaseFiles(
 ) {
   const identities = new Map<string, BigIntStats>();
   for (const database of databases) {
-    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    // Readers rebuild the transient WAL index; only durable files fence capture.
+    for (const suffix of ["", "-wal", "-journal"]) {
       const file = `${database}${suffix}`;
       let info;
       try {
@@ -107,6 +128,10 @@ async function inspectRestorableDatabaseFiles(
         throw new Error(
           `Update database rollback requires a regular file with one link: ${file}. Resolve database aliases before retrying; the databases have not been migrated.`,
         );
+      }
+      // A reader-created empty WAL carries no durable changes.
+      if (suffix === "-wal" && info.size === 0n) {
+        continue;
       }
       const before = previous?.get(file);
       if (
@@ -124,7 +149,10 @@ async function inspectRestorableDatabaseFiles(
     (identities.size !== previous.size ||
       [...identities.keys()].some((file) => !previous.has(file)))
   ) {
-    throw new Error("Update database journal state changed during stopped backup.");
+    const changed = [...new Set([...identities.keys(), ...previous.keys()])].find(
+      (file) => identities.has(file) !== previous.has(file),
+    );
+    throw new Error(`Update database journal state changed during stopped backup: ${changed}.`);
   }
   return identities;
 }
@@ -284,13 +312,14 @@ export async function createUpdateDatabaseBackupInProcess(
   const { buildBackupArchivePath } = await import("../commands/backup-shared.js");
   const { createStoppedSqliteSnapshot, createVerifiedSqliteSnapshot } =
     await import("./sqlite-snapshot.js");
+  const { AGENT_FTS_SCHEMAS } = await import("../state/openclaw-agent-fts-schema.js");
   const databases: UpdateDatabaseBackup["databases"] = [];
   const sourceGenerations: UpdateDatabaseBackup["sourceGenerations"] = Object.fromEntries(
     inventory.missing.map((file) => [file, null]),
   );
-  const readGeneration = (file: string) => {
+  const readGeneration = async (file: string) => {
     try {
-      return readUpdateDatabaseGenerations([file])[file] ?? undefined;
+      return (await readUpdatePhysicalDatabaseGenerations([file]))[file] ?? undefined;
     } catch (error) {
       warnings.push(
         `Database write generation unavailable for ${file}: ${formatErrorMessageWithCode(error)}`,
@@ -298,6 +327,18 @@ export async function createUpdateDatabaseBackupInProcess(
       return undefined;
     }
   };
+  const { readBackupEngine, capturePostgresBackup } =
+    await import("../snapshot/database-backup.js");
+  const engines = new Map(inventory.present.map((file) => [file, readBackupEngine(file)]));
+  if (
+    [...engines.values()].some((engine) => engine.engine === "postgres") &&
+    !input.postgresOffline &&
+    !input.stopped
+  ) {
+    throw new Error(
+      "PostgreSQL update capture requires exclusive ownership; stop through the service owner, then rerun.",
+    );
+  }
   for (const sourcePath of inventory.present) {
     input.onProgress?.({ phase: "pre-migration database backup", path: sourcePath });
     const archivePath = buildBackupArchivePath("", sourcePath);
@@ -311,7 +352,7 @@ export async function createUpdateDatabaseBackupInProcess(
       input.stopped &&
       !identities.has(`${sourcePath}-journal`) &&
       (identities.get(`${sourcePath}-wal`)?.size ?? 0n) === 0n;
-    const before = input.stopped ? undefined : readGeneration(sourcePath);
+    const before = input.stopped ? undefined : await readGeneration(sourcePath);
     const snapshot = stopped
       ? await createStoppedSqliteSnapshot({
           sourcePath,
@@ -328,10 +369,15 @@ export async function createUpdateDatabaseBackupInProcess(
           },
           preserveRowIds: true,
           requireNonEmptySource: true,
+          integrity: inventory.databaseOwners?.some(
+            (owner) => owner.path === sourcePath && owner.role === "agent",
+          )
+            ? { ftsSchemas: AGENT_FTS_SCHEMAS }
+            : undefined,
         });
     // Native restore uses its supervisor's stopped-state fence, not live-writer generations.
     if (!input.stopped) {
-      const after = readGeneration(sourcePath);
+      const after = await readGeneration(sourcePath);
       if (after !== undefined && before === after) {
         sourceGenerations[sourcePath] = after;
       } else {
@@ -340,12 +386,26 @@ export async function createUpdateDatabaseBackupInProcess(
         );
       }
     }
+    const engine = engines.get(sourcePath)!;
+    let postgres;
+    if (engine.engine === "postgres") {
+      const exportDirectory = `${snapshotPath}.postgres`;
+      await capturePostgresBackup({
+        sourcePath,
+        directory: exportDirectory,
+        profile: "exact",
+        config: input.config,
+        assertCurrent: () => {},
+      });
+      postgres = { ...engine, exportDirectory };
+    }
     databases.push({
       path: sourcePath,
       snapshotPath,
       userVersion: snapshot.userVersion,
       sha256: snapshot.sha256,
       sizeBytes: snapshot.sizeBytes,
+      ...postgres,
     });
   }
   const current = await inventoryFor(
@@ -376,6 +436,7 @@ export async function createUpdateDatabaseBackup({
   timeoutMs,
   signal: callerSignal,
   rehearsal,
+  retryAdvice,
   ...input
 }: BackupInput & {
   acquisition?: UpdateRecoveryCaptureAcquisition;
@@ -383,9 +444,17 @@ export async function createUpdateDatabaseBackup({
   timeoutMs?: number;
   signal?: AbortSignal;
   rehearsal?: DoctorRehearsalDatabaseCoverage;
+  retryAdvice?: boolean;
 }): Promise<UpdateDatabaseBackup> {
   const controller = new AbortController();
-  const additionalPaths = input.additionalPaths?.map((file) => path.resolve(file));
+  const { discoverBackupDatabasePaths, readBackupEngine } =
+    await prepareUpdateDatabaseBackupRuntime();
+  const postgresPaths = (await discoverBackupDatabasePaths(input)).filter(
+    (file) => readBackupEngine(file).engine === "postgres",
+  );
+  const additionalPaths = [...(input.additionalPaths ?? []), ...postgresPaths].map((file) =>
+    path.resolve(file),
+  );
   const additionalFiles = input.additionalFiles?.map((file) => path.resolve(file));
   const signal = callerSignal
     ? AbortSignal.any([callerSignal, controller.signal])
@@ -424,6 +493,7 @@ export async function createUpdateDatabaseBackup({
           : parseUpdateStateInspectionWorker(
               await runUpdateStateInspectionWorker({
                 ...worker,
+                retryAdvice,
                 input: { ...workerInput, mode: "discover" },
                 databases: custody
                   ? await readUpdateStateDatabaseSizesInProcess([shared], signal)
@@ -445,6 +515,7 @@ export async function createUpdateDatabaseBackup({
       const backup = parseUpdateStateInspectionWorker(
         await runUpdateStateInspectionWorker({
           ...worker,
+          retryAdvice,
           input: { ...capturedInput, mode: "database-backup", inspectionPlan },
           ...(custody ? { ioBudget: "deadline" as const } : {}),
           databases: custody

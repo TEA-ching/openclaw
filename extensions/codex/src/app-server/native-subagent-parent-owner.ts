@@ -34,6 +34,7 @@ export type NativeParentRegistration = Pick<
     ParentOwner,
     | "requesterTurnRunId"
     | "requestCustody"
+    | "cancelChildProcesses"
     | "claimDirectChild"
     | "rejectPendingDirectChild"
     | "onDirectChildAccepted"
@@ -154,6 +155,7 @@ export async function registerNativeSubagentParent(
   const registrationSettled = createDeferred<void>();
   let owner: ParentOwner = {
     requestCustody: params.requestCustody,
+    cancelChildProcesses: params.cancelChildProcesses,
     requesterAgentId: params.agentId,
     requesterSessionKey: params.requesterSessionKey,
     requesterTurnRunId: params.requesterTurnRunId,
@@ -261,7 +263,10 @@ export async function registerNativeSubagentParent(
   }
   const ready = dependencies.submissions
     .restore(state, owner)
-    .then(() => dependencies.assignments.restore(state, owner));
+    .then(() => dependencies.submissions.drain(registeredState))
+    .then(() => dependencies.assignments.restore(state, owner))
+    // Recovery can enqueue binding writes; settle them before the caller's effect guard.
+    .then(() => dependencies.assignments.drain(registeredState));
   let registered = true;
   let settlement: Promise<void> | undefined;
   return {

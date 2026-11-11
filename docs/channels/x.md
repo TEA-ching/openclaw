@@ -290,11 +290,9 @@ send messages, or inspect unrelated sessions. The optional `guests.tools.allow`
 can narrow the five default tools; an empty array disables all tools.
 `guests.tools.deny` takes precedence. Neither setting can add stronger tools.
 
-Hidden helpers require a host that advertises enforcement of these restrictions.
-Older hosts keep the `read` and `ls` defaults, even when they report the same
-OpenClaw version. The X replies settings page shows upgrade guidance when helper
-support is missing. Explicitly selecting only helper tools on an older host
-disables all guest tools; it does not restore the default read tools.
+The bundled X plugin uses the current host's enforcement of these restrictions.
+Core authorizes hidden helpers and preserves the guest's restricted tool surface
+and repository root.
 
 Each guest mention gets a separate channel session and the quoted X thread
 context. It does not reuse a maintainer's conversation history, permission mode,
@@ -413,7 +411,10 @@ keep-alives and intentionally ignored event types do not count toward this
 warning. It includes the event type and top-level keys, without post content.
 The next parseable mention event clears the warning.
 
-In `auto` mode, any subscription setup failure switches to polling. In `stream`
+Stopping or reloading an account cancels subscription setup and event reception
+cleanly, without reporting caller cancellation as a transport failure.
+
+In `auto` mode, subscription setup failures switch to polling. In `stream`
 mode, subscription HTTP `403` switches to polling; other setup errors stop the
 event source. A stream HTTP `401` or `403` switches either mode to polling. The
 channel status `message` includes the failed endpoint, HTTP status, and first X

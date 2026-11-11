@@ -357,12 +357,18 @@ describe("runWithModelFallback + runEmbeddedAgent failover behavior", () => {
     });
   });
 
-  it.each(["thrown", "assistant"] as const)(
-    "does not replay %s transcript turn assertions through retries or model fallback",
-    async (surface) => {
+  it.each(
+    [
+      "Session transcript keyed user is outside the current turn: old-input",
+      'Transcript idempotency key "channel-user:v1:conflicting-input" conflicts with the admitted message.',
+    ].flatMap((errorMessage) =>
+      (["thrown", "assistant"] as const).map((surface) => ({ surface, errorMessage })),
+    ),
+  )(
+    "does not replay $surface transcript turn assertions: $errorMessage",
+    async ({ surface, errorMessage }) => {
       await withModelFallbackWorkspace(async ({ agentDir, workspaceDir }) => {
         await writeFallbackAuthStore(agentDir);
-        const errorMessage = "Session transcript keyed user is outside the current turn: old-input";
         runEmbeddedAttemptMock.mockImplementation(async (params) => {
           if (surface === "thrown") {
             throw new Error(errorMessage);
@@ -419,10 +425,12 @@ describe("runWithModelFallback + runEmbeddedAgent failover behavior", () => {
 
       await expect(run).rejects.toMatchObject({
         name: "FailoverError",
-        message: "⚠️ The AI service needs a short break. Please try again in a few minutes.",
+        message:
+          "Rate-limit recovery stopped after 3 automatic retries without a completed model response. Check completed work before trying again.",
         reason: "rate_limit",
         provider: "openai",
         model: "mock-1",
+        rateLimitRetriesExhausted: 3,
         suspend: true,
       });
       // Pre-fix the bogus escalation fired after two primary attempts; the
@@ -598,6 +606,68 @@ describe("runWithModelFallback + runEmbeddedAgent failover behavior", () => {
       ).toBeNull();
     });
   });
+
+  it.each(["assistant", "prompt"] as const)(
+    "falls back immediately on organization TPM exhaustion from %s and records a primary cooldown",
+    async (source) => {
+      await withModelFallbackWorkspace(async ({ agentDir, workspaceDir }) => {
+        await writeFallbackAuthStore(agentDir);
+        const message =
+          "429 Rate limit reached for mock-1 in organization org-example on tokens per min (TPM): Limit 10000, Used 9900, Requested 200. Please try again in 90s.";
+        const config = makeModelFallbackConfig();
+        config.agents!.defaults!.model = { primary: "openai/mock-1", fallbacks: ["openai/mock-2"] };
+        runEmbeddedAttemptMock.mockImplementation(async (params) => {
+          const { modelId } = params as EmbeddedAttemptParams;
+          const failed = modelId === "mock-1";
+          return makeEmbeddedRunnerAttempt({
+            assistantTexts: failed ? [] : ["fallback ok"],
+            ...(failed && source === "prompt"
+              ? { terminal: { kind: "failed", source: "prompt", error: new Error(message) } }
+              : {
+                  lastAssistant: buildEmbeddedRunnerAssistant({
+                    provider: "openai",
+                    model: modelId ?? "mock-1",
+                    stopReason: failed ? "error" : "stop",
+                    ...(failed
+                      ? { errorMessage: message }
+                      : { content: [{ type: "text", text: "fallback ok" }] }),
+                  }),
+                }),
+          });
+        });
+        const run = (turn: string) =>
+          runEmbeddedFallback({
+            agentDir,
+            workspaceDir,
+            config,
+            sessionKey: `agent:test:organization-tpm:${source}:${turn}`,
+            runId: `run:organization-tpm:${source}:${turn}`,
+          });
+        const result = await run("first");
+        expect(result.result.payloads?.[0]?.text).toContain("fallback ok");
+        expect(
+          runEmbeddedAttemptMock.mock.calls.map(
+            ([params]) => (params as EmbeddedAttemptParams).modelId,
+          ),
+        ).toEqual(["mock-1", "mock-2"]);
+        expect(sleepWithAbortMock).not.toHaveBeenCalled();
+        const stats = (await readFallbackUsageStats(agentDir))["openai:p1"];
+        expect(stats?.cooldownReason).toBe("rate_limit");
+        expect(stats?.cooldownModel).toBe("mock-1");
+        expect(stats?.lastFailureAt).toBeUndefined();
+        expect((stats?.cooldownUntil ?? 0) - (stats?.lastRateLimitAt ?? 0)).toBe(90_000);
+
+        runEmbeddedAttemptMock.mockClear();
+        const next = await run("during-cooldown");
+        expect(next.result.payloads?.[0]?.text).toContain("fallback ok");
+        expect(
+          runEmbeddedAttemptMock.mock.calls.map(
+            ([params]) => (params as EmbeddedAttemptParams).modelId,
+          ),
+        ).toEqual(["mock-2"]);
+      });
+    },
+  );
 
   const assistantFailures: Array<{
     name: string;
@@ -970,10 +1040,9 @@ describe("runWithModelFallback + runEmbeddedAgent failover behavior", () => {
               "openai:p1",
               "openai:p2",
             ]);
-            expect(primaryCalls.map((params) => params.modelId)).toStrictEqual([
-              "mock-1",
-              "mock-1",
-            ]);
+            expect(primaryCalls.map((params) => params.modelId)).toStrictEqual(
+              Array(2).fill("mock-1"),
+            );
           }
         }
       });
@@ -991,9 +1060,7 @@ describe("runWithModelFallback + runEmbeddedAgent failover behavior", () => {
         workspaceDir,
         sessionKey: "agent:test:rate-limit-retry-limit-fallback",
         runId: "run:rate-limit-retry-limit-fallback",
-        config: {
-          ...makeModelFallbackConfig(),
-        },
+        config: makeModelFallbackConfig(),
       });
 
       expect(result.provider).toBe("openai");

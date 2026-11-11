@@ -102,8 +102,8 @@ export function ChatThread(input: {
           height: CHAT_HISTORY_BOUNDARY_HEIGHT_PX,
         }
       : null;
-  const sentinel = () =>
-    input.props.historyPagination ? <div class="chat-history-sentinel" /> : undefined;
+  const historySentinel = <div class="chat-history-sentinel" />;
+  const sentinel = () => (input.props.historyPagination ? historySentinel : undefined);
   const contents = createMemo(() => {
     if (routeLoading()) {
       return <LoadingState />;
@@ -154,6 +154,7 @@ export function ChatThread(input: {
           },
         ]}
         role="log"
+        aria-label={t("chat.sidePanel.conversation")}
         aria-live="off"
         aria-relevant="additions"
         tabindex={0}

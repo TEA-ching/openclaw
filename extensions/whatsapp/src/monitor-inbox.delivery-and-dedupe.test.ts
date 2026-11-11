@@ -1,4 +1,5 @@
 // WhatsApp monitor inbox behavior split by ownership.
+import { WAMessageStubType } from "baileys";
 import { observeChannelIngressQueueWrite } from "openclaw/plugin-sdk/channel-ingress-test-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,9 +22,11 @@ import {
 import {
   buildNotifyMessageUpsert,
   DEFAULT_ACCOUNT_ID,
+  mockLoadConfig,
   resetWebInboundDedupeForTests,
   settleInboundWork,
   startInboxMonitor,
+  upsertPairingRequestMock,
   waitForMessageCalls,
   waitForInboundWorkDrained,
   type InboxOnMessage,
@@ -91,6 +94,106 @@ describe("web monitor inbox delivery and dedupe", () => {
     clearWhatsAppApprovalReactionTargetsForTest();
     approvalResolver.mockReset();
   });
+
+  it.each([
+    { domain: "lid", phone: "999" },
+    { domain: "hosted.lid", phone: "999" },
+    { domain: "lid", phone: "888" },
+    { domain: "hosted.lid", phone: "888" },
+  ])("retries unresolved @$domain DMs and authorizes mapped +$phone", ({ domain, phone }) =>
+    withRetryClock(async () => {
+      mockLoadConfig.mockReturnValue({
+        channels: { whatsapp: { dmPolicy: "allowlist", allowFrom: ["+999"] } },
+      });
+      const onMessage = vi.fn();
+      const queue = createWhatsAppDurableInboundQueue(DEFAULT_ACCOUNT_ID);
+      const { listener, sock } = await startInboxMonitor(onMessage, { durableInboundQueue: queue });
+      const mapping = sock.signalRepository.lidMapping.getPNForLID;
+      const upsert = buildNotifyMessageUpsert({
+        id: nextMessageId("unresolved-lid"),
+        remoteJid: `12345@${domain}`,
+        text: "late identity",
+        timestamp: 1_700_000_000,
+      });
+      try {
+        sock.ev.emit("messages.upsert", upsert);
+        await waitForInboundWorkDrained();
+        expect(await queue.listPending({ limit: "all" })).toMatchObject([{ attempts: 1 }]);
+        expect(onMessage).not.toHaveBeenCalled();
+        expect(sock.readMessages).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+
+        mapping.mockResolvedValue(`${phone}@s.whatsapp.net`);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await waitForInboundWorkDrained();
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+        expect(onMessage.mock.calls.map(([msg]) => msg.payload.body)).toEqual(
+          phone === "999" ? ["late identity"] : [],
+        );
+        if (phone === "999") {
+          expect(inboundMessage(onMessage).admission?.conversation.id).toBe("+999");
+        }
+
+        // A completed redelivery with a lost mapping must not abort its batch sibling.
+        mapping.mockResolvedValue(null);
+        sock.ev.emit("messages.upsert", {
+          type: "notify",
+          messages: [
+            ...upsert.messages,
+            ...dmUpsert(nextMessageId("lid-sibling"), "sibling").messages,
+          ],
+        });
+        await waitForInboundWorkDrained();
+        expect(onMessage.mock.calls.map(([msg]) => msg.payload.body)).toEqual(
+          phone === "999" ? ["late identity", "sibling"] : ["sibling"],
+        );
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+      } finally {
+        await listener.close();
+      }
+    }),
+  );
+
+  it("dead-letters permanently unresolved LID DMs across monitor restarts", () =>
+    withRetryClock(async () => {
+      const onMessage = vi.fn();
+      const queue = createWhatsAppDurableInboundQueue(DEFAULT_ACCOUNT_ID);
+      let { listener, sock } = await startInboxMonitor(onMessage, { durableInboundQueue: queue });
+      const receivedAt = Date.now();
+      try {
+        sock.ev.emit(
+          "messages.upsert",
+          buildNotifyMessageUpsert({
+            id: nextMessageId("permanent-lid"),
+            remoteJid: "12345@hosted.lid",
+            text: "unmapped",
+            timestamp: 1_700_000_000,
+          }),
+        );
+        await waitForInboundWorkDrained();
+        expect(await queue.listPending({ limit: "all" })).toMatchObject([{ attempts: 1 }]);
+        for (let attempt = 2; attempt <= 8; attempt += 1) {
+          // Closing joins worker settlement before the next monitor recovers the row.
+          await listener.close();
+          await vi.advanceTimersByTimeAsync(3 * 60_000);
+          ({ listener, sock } = await startInboxMonitor(onMessage, { durableInboundQueue: queue }));
+          await waitForInboundWorkDrained();
+          expect(await queue.listPending({ limit: "all" })).toMatchObject([{ attempts: attempt }]);
+        }
+        await listener.close();
+        vi.setSystemTime(receivedAt + 24 * 60 * 60_000);
+        ({ listener, sock } = await startInboxMonitor(onMessage, { durableInboundQueue: queue }));
+        await waitForInboundWorkDrained();
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+        expect(await queue.listFailed?.()).toMatchObject([{ reason: "retry-limit-exceeded" }]);
+        expect(onMessage).not.toHaveBeenCalled();
+        expect(sock.readMessages).not.toHaveBeenCalled();
+        expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+      } finally {
+        await listener.close();
+      }
+    }));
 
   it("replays approval reactions after Gateway loss without losing batch siblings", () =>
     withRetryClock(async () => {
@@ -227,12 +330,18 @@ describe("web monitor inbox delivery and dedupe", () => {
     ]);
     expect(sock.sendPresenceUpdate).toHaveBeenCalledWith("available");
     expect(sock.sendPresenceUpdate).toHaveBeenCalledWith("composing", "999@s.whatsapp.net");
-    expect(sock.sendMessage).toHaveBeenNthCalledWith(1, "999@s.whatsapp.net", {
-      text: "nested reply works",
-    });
-    expect(sock.sendMessage).toHaveBeenNthCalledWith(2, "999@s.whatsapp.net", {
-      text: "nested media works",
-    });
+    expect(sock.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      "999@s.whatsapp.net",
+      { text: "nested reply works" },
+      expect.objectContaining({ messageId: expect.any(String) }),
+    );
+    expect(sock.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      "999@s.whatsapp.net",
+      { text: "nested media works" },
+      expect.objectContaining({ messageId: expect.any(String) }),
+    );
 
     await listener.close();
   });
@@ -360,6 +469,35 @@ describe("web monitor inbox delivery and dedupe", () => {
     await vi.waitFor(() => expect(sock.readMessages).toHaveBeenCalledTimes(1));
 
     expect(onMessage).toHaveBeenCalledTimes(1);
+    await listener.close();
+  });
+
+  it("delivery coordinator delivers a decrypted message after its ciphertext stub", async () => {
+    const onMessage = vi.fn(async () => undefined);
+    const { listener, sock } = await startInboxMonitor(onMessage as InboxOnMessage);
+    const messageId = nextMessageId("ciphertext-stub");
+    const upsert = dmUpsert(messageId, "decrypted");
+
+    sock.ev.emit("messages.upsert", {
+      type: "notify",
+      messages: [
+        {
+          key: { id: messageId, fromMe: false, remoteJid: "999@s.whatsapp.net" },
+          messageStubType: WAMessageStubType.CIPHERTEXT,
+          messageTimestamp: 1_700_000_000,
+        },
+      ],
+    });
+    await settleInboundWork();
+
+    sock.ev.emit("messages.upsert", upsert);
+    await waitForMessageCalls(onMessage, 1);
+
+    sock.ev.emit("messages.upsert", upsert);
+    await settleInboundWork();
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(inboundMessage(onMessage).payload.body).toBe("decrypted");
     await listener.close();
   });
 
@@ -620,18 +758,38 @@ describe("web monitor inbox delivery and dedupe", () => {
 
       expect(onMessage).toHaveBeenCalledTimes(2);
       expect(inboundMessage(onMessage, 1).payload.body).toBe("second");
-      expect(sock.sendMessage).toHaveBeenNthCalledWith(1, "999@s.whatsapp.net", {
-        text: "pong",
-      });
-      expect(sock.sendMessage).toHaveBeenNthCalledWith(2, "999@s.whatsapp.net", {
-        text: "media",
-      });
-      expect(sock.sendMessage).toHaveBeenNthCalledWith(3, "999@s.whatsapp.net", {
-        text: "pong",
-      });
-      expect(sock.sendMessage).toHaveBeenNthCalledWith(4, "999@s.whatsapp.net", {
-        text: "media",
-      });
+      expect(sock.sendMessage).toHaveBeenNthCalledWith(
+        1,
+        "999@s.whatsapp.net",
+        {
+          text: "pong",
+        },
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
+      expect(sock.sendMessage).toHaveBeenNthCalledWith(
+        2,
+        "999@s.whatsapp.net",
+        {
+          text: "media",
+        },
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
+      expect(sock.sendMessage).toHaveBeenNthCalledWith(
+        3,
+        "999@s.whatsapp.net",
+        {
+          text: "pong",
+        },
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
+      expect(sock.sendMessage).toHaveBeenNthCalledWith(
+        4,
+        "999@s.whatsapp.net",
+        {
+          text: "media",
+        },
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
       expect(sock.end).toHaveBeenCalledTimes(1);
       expect(sock.sendMessage.mock.invocationCallOrder.at(-1)).toBeLessThan(
         sock.end.mock.invocationCallOrder.at(0),
@@ -669,9 +827,11 @@ describe("web monitor inbox delivery and dedupe", () => {
     await closePromise;
 
     expect(onMessage).toHaveBeenCalledTimes(1);
-    expect(sock.sendMessage).toHaveBeenCalledWith("999@s.whatsapp.net", {
-      text: "pong",
-    });
+    expect(sock.sendMessage).toHaveBeenCalledWith(
+      "999@s.whatsapp.net",
+      { text: "pong" },
+      expect.objectContaining({ messageId: expect.any(String) }),
+    );
     expect(sock.end).toHaveBeenCalledTimes(1);
     expect(sock.sendMessage.mock.invocationCallOrder.at(0)).toBeLessThan(
       sock.end.mock.invocationCallOrder.at(0),

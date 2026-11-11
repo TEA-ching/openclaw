@@ -6,7 +6,7 @@ import {
   resolveAttemptFsWorkspaceOnly,
   setActiveEmbeddedRun,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
-import { createNativeSessionBindingAuthority } from "openclaw/plugin-sdk/agent-harness-session-runtime";
+import { createNativeSessionBindingScope } from "openclaw/plugin-sdk/agent-harness-session-runtime";
 import { getAgentScopedMediaLocalRoots } from "openclaw/plugin-sdk/media-local-roots";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 import {
@@ -341,7 +341,7 @@ export function activateCodexAttemptTurn(
     workspaceOnly,
     localRoots: workspaceOnly
       ? undefined
-      : getAgentScopedMediaLocalRoots(params.config ?? {}, sessionAgentId),
+      : getAgentScopedMediaLocalRoots(params.config ?? {}, sessionAgentId, params.workspaceDir),
     sandbox:
       connection.sandbox?.enabled && connection.sandbox.fsBridge
         ? { root: connection.sandbox.workspaceDir, bridge: connection.sandbox.fsBridge }
@@ -423,7 +423,7 @@ export function activateCodexAttemptTurn(
         await codexTranscriptMirrorRuntime.mirror({
           assertCurrent: composeSessionTranscriptWriteAssertion([
             connection.assertLegacyCurrent,
-            createNativeSessionBindingAuthority([], assertSteeringActive).assertLegacyCurrent,
+            createNativeSessionBindingScope(assertSteeringActive).assertLegacyCurrent,
           ]),
           agentId: sessionAgentId,
           sessionKey: contextSessionKey,
@@ -570,9 +570,7 @@ export function activateCodexAttemptTurn(
       deadlines.ownsExecutionWait() &&
       resourceState.turnRoute?.signal.aborted === false &&
       !state.completed &&
-      !state.terminalTurnNotificationQueued &&
-      state.activeAppServerTurnRequests === 0 &&
-      state.activeLocalProjections === 0,
+      !state.terminalTurnNotificationQueued,
     isAbortable: () =>
       !terminalState.terminalOutcomeFrozen || terminalState.sharedAbortAllowedAfterTerminalOutcome,
     isCompacting: () => projectorRef.current?.isCompacting() ?? false,

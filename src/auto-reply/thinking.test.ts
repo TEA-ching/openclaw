@@ -62,6 +62,38 @@ describe("prepared catalog identity", () => {
 });
 
 describe("provider profiles", () => {
+  it("retains medium defaults for Qwen chat-template models that declare efforts", () => {
+    mocks.profile.mockReturnValue(undefined);
+    const declaredCompat = {
+      thinkingFormat: "qwen-chat-template",
+      supportedReasoningEfforts: ["low", "medium", "xhigh"],
+    };
+    const catalog = [
+      { provider: "local-qwen", id: "qwen-template", reasoning: true, compat: declaredCompat },
+      {
+        provider: "local-qwen",
+        id: "qwen-template-no-high",
+        reasoning: true,
+        compat: declaredCompat,
+        thinkingLevelMap: { high: null },
+      },
+      {
+        provider: "local-qwen",
+        id: "qwen-template-undeclared",
+        reasoning: true,
+        compat: { thinkingFormat: "qwen-chat-template" },
+      },
+      { provider: "local-qwen", id: "generic", reasoning: true },
+    ];
+    const resolveDefault = (model: string) =>
+      resolveThinkingDefaultForModel({ provider: "local-qwen", model, catalog });
+
+    expect(resolveDefault("qwen-template")).toBe("medium");
+    expect(resolveDefault("qwen-template-no-high")).toBe("medium");
+    expect(resolveDefault("qwen-template-undeclared")).toBe("medium");
+    expect(resolveDefault("generic")).toBe("medium");
+  });
+
   it("uses base levels without a provider", () => {
     expect(listThinkingLevels()).toEqual(baseLevels);
   });
@@ -111,6 +143,27 @@ describe("provider profiles", () => {
       expect(resolveSupportedThinkingLevel({ ...params, level: "adaptive" })).toBe("low");
     },
   );
+
+  it("uses a catalog-owned default thinking level without consulting provider hooks", () => {
+    mocks.profile.mockReturnValue({ levels: [{ id: "off" }], defaultLevel: "off" });
+    const params = {
+      provider: "particle",
+      model: "particle-ai/particle-1",
+      catalog: [
+        {
+          provider: "particle",
+          id: "particle-ai/particle-1",
+          reasoning: true,
+          compat: {
+            defaultThinkingLevel: "high",
+            supportedReasoningEfforts: ["none", "low", "high", "max"],
+          },
+        },
+      ],
+    };
+    expect(resolveThinkingDefaultForModel(params)).toBe("high");
+    expect(mocks.profile).not.toHaveBeenCalled();
+  });
 
   it("keeps a configured catalog opt-out authoritative over runtime reasoning", () => {
     mocks.profile.mockReturnValue({ levels: [{ id: "off" }, { id: "low" }] });

@@ -1,9 +1,14 @@
+import { createHash } from "node:crypto";
 import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
 import {
   collectProviderApiKeysForExecution,
   executeWithApiKeyRotation,
 } from "openclaw/plugin-sdk/provider-auth-runtime";
-import { ProviderHttpError, readResponseTextLimited } from "openclaw/plugin-sdk/provider-http";
+import {
+  ProviderHttpError,
+  readProviderResponseErrorText,
+  redactProviderResponseErrorText,
+} from "openclaw/plugin-sdk/provider-http";
 import {
   buildSearchCacheKey,
   DEFAULT_SEARCH_COUNT,
@@ -49,8 +54,6 @@ type ExaConfig = {
 };
 
 type ExaFreshness = (typeof EXA_FRESHNESS_VALUES)[number];
-type ExaSearchType = (typeof EXA_SEARCH_TYPES)[number];
-type ExaSearchResult = Record<string, unknown>;
 
 type ExaTextContentsOption = boolean | { maxCharacters?: number };
 type ExaHighlightsContentsOption =
@@ -91,19 +94,14 @@ function normalizeExaFreshness(value: string | undefined): ExaFreshness | undefi
 function resolveExaApiKey(exa?: ExaConfig): string | undefined {
   return (
     readConfiguredSecretString(exa?.apiKey, "plugins.entries.exa.config.webSearch.apiKey") ??
-    readProviderEnvValue(["EXA_API_KEY"]) ??
-    // Pool-only deployments (EXA_API_KEYS, no singular EXA_API_KEY) still need
-    // one key here: this guard runs before collectProviderApiKeysForExecution
-    // ever sees the pool below, so without this fallback dispatch never
-    // starts. That call already parses/rotates the same pool afterward.
-    collectProviderApiKeysForExecution({ provider: "exa" })[0]
+    readProviderEnvValue(["EXA_API_KEY"])
   );
 }
 
-function invalidBaseUrlPayload(value: string) {
+function invalidBaseUrlPayload() {
   return {
     error: "invalid_base_url",
-    message: `plugins.entries.exa.config.webSearch.baseUrl must be a valid http(s) URL. Got: ${value}`,
+    message: "plugins.entries.exa.config.webSearch.baseUrl must be a valid http(s) URL.",
     docs: "https://docs.openclaw.ai/tools/exa-search",
   };
 }
@@ -117,17 +115,17 @@ function resolveExaSearchEndpoint(
   }
 
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(configured) && !/^https?:\/\//i.test(configured)) {
-    return invalidBaseUrlPayload(configured);
+    return invalidBaseUrlPayload();
   }
   const candidate = /^https?:\/\//i.test(configured) ? configured : `https://${configured}`;
   let parsed: URL;
   try {
     parsed = new URL(candidate);
   } catch {
-    return invalidBaseUrlPayload(configured);
+    return invalidBaseUrlPayload();
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return invalidBaseUrlPayload(configured);
+    return invalidBaseUrlPayload();
   }
 
   const pathname = parsed.pathname.replace(/\/+$/, "");
@@ -247,63 +245,6 @@ function resolveFreshnessStartDate(freshness: ExaFreshness): string {
   return now.toISOString();
 }
 
-async function runExaSearch(params: {
-  apiKey: string;
-  endpoint: string;
-  query: string;
-  count: number;
-  freshness?: ExaFreshness;
-  dateAfter?: string;
-  dateBefore?: string;
-  type: ExaSearchType;
-  contents?: ExaContentsArgs;
-  timeoutSeconds: number;
-  signal?: AbortSignal;
-}): Promise<ExaSearchResult[]> {
-  const body: Record<string, unknown> = {
-    query: params.query,
-    numResults: params.count,
-    type: params.type,
-    contents: params.contents ?? { highlights: true },
-  };
-
-  if (params.dateAfter) {
-    body.startPublishedDate = params.dateAfter;
-  } else if (params.freshness) {
-    body.startPublishedDate = resolveFreshnessStartDate(params.freshness);
-  }
-  if (params.dateBefore) {
-    body.endPublishedDate = params.dateBefore;
-  }
-
-  return withTrustedWebSearchEndpoint(
-    {
-      url: params.endpoint,
-      timeoutSeconds: params.timeoutSeconds,
-      signal: params.signal,
-      init: {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "x-api-key": params.apiKey,
-          "x-exa-integration": "openclaw",
-        },
-        body: JSON.stringify(body),
-      },
-    },
-    async (res) => {
-      if (!res.ok) {
-        const detail = await readResponseTextLimited(res, EXA_ERROR_BODY_LIMIT_BYTES);
-        throw new ProviderHttpError(`Exa API error (${res.status}): ${detail || res.statusText}`, {
-          status: res.status,
-        });
-      }
-      return (await readExaSearchResults(res)).slice(0, params.count);
-    },
-  );
-}
-
 export async function executeExaWebSearchProviderTool(
   ctx: { config?: Record<string, unknown>; searchConfig?: SearchConfigRecord },
   args: Record<string, unknown>,
@@ -387,6 +328,7 @@ export async function executeExaWebSearchProviderTool(
   );
   const cacheKey = buildSearchCacheKey([
     "exa",
+    createHash("sha256").update(apiKey).digest("hex"),
     endpoint,
     type,
     query,
@@ -403,21 +345,61 @@ export async function executeExaWebSearchProviderTool(
   }
 
   const start = Date.now();
+  const timeoutSeconds = resolveSearchTimeoutSeconds(searchConfig);
+  const body: Record<string, unknown> = {
+    query,
+    numResults: resolvedCount,
+    type,
+    contents: contents ?? { highlights: true },
+  };
+
+  if (dateAfter) {
+    body.startPublishedDate = dateAfter;
+  } else if (freshness) {
+    body.startPublishedDate = resolveFreshnessStartDate(freshness);
+  }
+  if (dateBefore) {
+    body.endPublishedDate = dateBefore;
+  }
+
+  const runSearchWithKey = async (searchApiKey: string) => {
+    const headers = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "x-api-key": searchApiKey,
+      "x-exa-integration": "openclaw",
+    };
+    return await withTrustedWebSearchEndpoint(
+      {
+        url: endpoint,
+        timeoutSeconds,
+        signal,
+        init: {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        },
+      },
+      async (res) => {
+        if (!res.ok) {
+          const detail = await readProviderResponseErrorText(
+            res,
+            EXA_ERROR_BODY_LIMIT_BYTES,
+            headers,
+            signal,
+          );
+          throw new ProviderHttpError(
+            `Exa API error (${res.status}): ${detail || redactProviderResponseErrorText(res.statusText, headers)}`,
+            {
+              status: res.status,
+            },
+          );
+        }
+        return (await readExaSearchResults(res)).slice(0, resolvedCount);
+      },
+    );
+  };
   const apiKeys = collectProviderApiKeysForExecution({ provider: "exa", primaryApiKey: apiKey });
-  const runSearchWithKey = (searchApiKey: string) =>
-    runExaSearch({
-      apiKey: searchApiKey,
-      endpoint,
-      query,
-      count: resolvedCount,
-      freshness,
-      dateAfter,
-      dateBefore,
-      type,
-      contents,
-      timeoutSeconds: resolveSearchTimeoutSeconds(searchConfig),
-      signal,
-    });
   const results =
     apiKeys.length > 1
       ? await executeWithApiKeyRotation({

@@ -17,6 +17,7 @@ import { defaultRuntime } from "../../runtime.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { registerMaintenanceCommands } from "../program/register.maintenance.js";
 import { registerCurrentCoreServiceReceiptTests } from "./update-command-current-core-service-receipt.test-support.js";
+import * as failureRecovery from "./update-command-failure-recovery.js";
 import {
   createManagedServiceIdentityFixture,
   registerServiceInstallationConvergenceTests,
@@ -28,11 +29,14 @@ import {
   programArguments,
   registerForegroundFinalizationTests,
   registerManagedInstallEnvironmentTest,
+  registerVerifiedActivationFailureTests,
   recordVerifiedGatewayRun,
   successfulPluginUpdate,
   taskRecovery,
   validConfigSnapshot,
 } from "./update-command-post-update.test-support.js";
+import * as serviceRecovery from "./update-command-service-recovery.js";
+import { registerWrapperRetirementFinalizationTests } from "./update-command-wrapper-finalization.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const mocks = vi.hoisted(() => ({
@@ -118,13 +122,12 @@ vi.mock("./update-command-result.js", async (importOriginal) => ({
   writeControlPlaneUpdateRestartSentinelBestEffort: mocks.writeSentinel,
 }));
 
+import { registerMaintenanceContentionTests } from "./update-command-maintenance-contention.test-support.js";
 import * as postCoreModule from "./update-command-post-core.js";
 import { registerBoundaryFinalizationControls } from "./update-command-post-update-boundary.test-support.js";
-import { finishUpdate } from "./update-command-post-update.js";
 import * as rollbackModule from "./update-command-rollback.js";
 import { registerStaleSessionReceiptUpdateTest } from "./update-command-stale-session-receipt.test-support.js";
 
-type FinishUpdateParams = Parameters<typeof finishUpdate>[0];
 const stdinIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 
 afterEach(() => {
@@ -170,6 +173,7 @@ describe("successful update finalization ordering", () => {
   });
 
   registerForegroundFinalizationTests({ tempDirs, mocks });
+  registerMaintenanceContentionTests(() => tempDirs.make("update-maintenance-contention-"), mocks);
   registerStaleSessionReceiptUpdateTest(mocks);
   registerCurrentCoreServiceReceiptTests({
     makeHome: () => tempDirs.make("current-core-service-receipt-"),
@@ -301,7 +305,8 @@ describe("successful update finalization ordering", () => {
         },
       );
       const recovery = taskRecovery((phase) => events.push(phase));
-      mocks.restartService.mockImplementationOnce(async () => {
+      mocks.restartService.mockImplementationOnce(async ({ onGatewayStartAttempted }) => {
+        onGatewayStartAttempted?.();
         events.push("start");
         return "ok";
       });
@@ -335,7 +340,7 @@ describe("successful update finalization ordering", () => {
       expect(events.indexOf("doctor")).toBeLessThan(events.indexOf("restore"));
       expect(events.indexOf("doctor")).toBeLessThan(events.indexOf("start"));
       expect(events.indexOf("doctor")).toBeLessThan(events.indexOf("activation-attempt"));
-      expect(events.indexOf("activation-attempt")).toBeLessThan(events.indexOf("restore"));
+      expect(events.indexOf("restore")).toBeLessThan(events.indexOf("activation-attempt"));
       expect(events.indexOf("activation-attempt")).toBeLessThan(events.indexOf("start"));
       expect(mocks.restartService).toHaveBeenCalledOnce();
       expect(mocks.stopService).not.toHaveBeenCalled();
@@ -359,6 +364,8 @@ describe("successful update finalization ordering", () => {
       mocks.checkCompletionStatus.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
   });
+
+  registerVerifiedActivationFailureTests({ tempDirs, mocks });
 
   it("restarts when completion cache refresh reports failure", async () => {
     const root = tempDirs.make("openclaw-completion-failure-");
@@ -441,75 +448,67 @@ describe("successful update finalization ordering", () => {
     );
   });
 
-  it.each([
-    { name: "retires the wrapper before persisting and printing success", denied: false },
-    {
-      name: "recovers and retains the package before reporting failed wrapper retirement",
-      denied: true,
+  it.each([false, true])(
+    "retains Windows recovery through final verification (settlement fails=%s)",
+    async (settlementFails) => {
+      const events: string[] = [];
+      const settlementError = new Error("late task settlement failed");
+      const recovery = taskRecovery();
+      recovery.complete.mockImplementation(async (safe?: boolean) => {
+        events.push("complete:" + safe);
+        if (safe && settlementFails) {
+          throw settlementError;
+        }
+      });
+      vi.spyOn(serviceRecovery, "admitInstalledGatewayRecovery").mockResolvedValue(false);
+      vi.spyOn(failureRecovery, "verifyUpdateFailureRecovery").mockImplementation(
+        async ({ result }) => {
+          events.push("verify");
+          return {
+            ...result,
+            recovery: { serviceRestartSafe: true, version: "1.0.0", service: "healthy" },
+          };
+        },
+      );
+      const failure = await finishSuccessfulPackageSwitch(
+        {
+          restartEnvironment: process.env,
+          windowsTaskAutoStartRecovery: recovery,
+        },
+        {
+          shouldRestart: false,
+          result: {
+            status: "error",
+            mode: "npm",
+            root: "/tmp/openclaw-update",
+            reason: "initiating-failure",
+            steps: [],
+            durationMs: 0,
+          },
+        },
+      ).catch((error: unknown) => error);
+      expect(failure).toMatchObject({ result: { status: "error", reason: "initiating-failure" } });
+      expect(events).toEqual(
+        settlementFails
+          ? ["verify", "complete:true", "complete:false"]
+          : ["verify", "complete:true"],
+      );
+      if (settlementFails) {
+        expect(failure).toMatchObject({
+          result: {
+            steps: expect.arrayContaining([
+              expect.objectContaining({
+                name: "windows-task-autostart-recovery",
+                stderrTail: settlementError.message,
+              }),
+            ]),
+          },
+        });
+      }
     },
-  ])("$name", async ({ denied }) => {
-    const home = tempDirs.make("openclaw-finalize-wrapper-");
-    const previousRoot = path.join(home, "old-root");
-    const wrapper = path.join(home, ".local", "bin", "openclaw");
-    await fs.mkdir(path.dirname(wrapper), { recursive: true });
-    await fs.writeFile(
-      wrapper,
-      `#!/usr/bin/env bash\nset -euo pipefail\nexec /usr/bin/node ${previousRoot}/dist/entry.js "$@"\n`,
-      { mode: 0o755 },
-    );
-    vi.stubEnv("PATH", path.dirname(wrapper));
-    const unlink = vi.spyOn(fs, "unlink");
-    if (denied) {
-      unlink.mockRejectedValueOnce(new Error("unlink denied"));
-    }
-    const rollback = vi
-      .spyOn(rollbackModule, "rollbackFailedUpdate")
-      .mockImplementationOnce(async ({ result }) => ({ result, rolledBack: false }));
-    const retained = {
-      name: "package backup retained",
-      command: "openclaw update",
-      cwd: previousRoot,
-      durationMs: 0,
-      exitCode: 0,
-      stderrTail: "Retained previous package for recovery.",
-    };
-    const complete = vi.fn<NonNullable<FinishUpdateParams["packageTransaction"]>["complete"]>(
-      async ({ activationVerified }) => (activationVerified ? undefined : retained),
-    );
-    const finishing = finishSuccessfulPackageSwitch(
-      { previousRoot, packageRoot: path.join(home, "package") },
-      { packageTransaction: { backupRoot: previousRoot, rollback: vi.fn(), complete } },
-    );
-    if (denied) {
-      await expectUpdateFailure(finishing, "wrapper-retirement-failed", {
-        detail: expect.stringContaining("unlink denied"),
-      });
-      expect(rollback).toHaveBeenCalledOnce();
-      expect(complete).toHaveBeenCalledExactlyOnceWith(
-        { activationVerified: false },
-        expect.any(Function),
-      );
-      expect(mocks.printResult).toHaveBeenCalledOnce();
-      expect(mocks.printResult.mock.lastCall?.[0]).toMatchObject({
-        status: "error",
-        steps: expect.arrayContaining([retained]),
-      });
-      expect(mocks.writeSentinel).toHaveBeenCalledOnce();
-      expectFailureReport(mocks.printResult, "wrapper-retirement-failed");
-      expect(mocks.markSentinelFailure).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: "wrapper-retirement-failed" }),
-      );
-    } else {
-      await finishing;
-      expect(mocks.writeSentinel).toHaveBeenCalledTimes(2);
-      expect(unlink.mock.invocationCallOrder[0]).toBeLessThan(
-        mocks.writeSentinel.mock.invocationCallOrder[1] ?? Number.POSITIVE_INFINITY,
-      );
-      expect(mocks.writeSentinel.mock.invocationCallOrder[1]).toBeLessThan(
-        mocks.printResult.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-      );
-    }
-  });
+  );
+
+  registerWrapperRetirementFinalizationTests({ tempDirs, mocks });
 
   registerManagedInstallEnvironmentTest({ tempDirs, mocks });
 
@@ -856,10 +855,18 @@ describe("successful update finalization ordering", () => {
       ready: true,
     },
     {
-      owner: "worker from a shipped updater",
+      owner: "unadopted worker from a shipped updater",
       candidateRuntime: true,
       marker: false,
       runs: false,
+      ready: true,
+    },
+    {
+      owner: "adopted worker from a shipped updater",
+      candidateRuntime: true,
+      adoptedFinalization: true as const,
+      marker: false,
+      runs: true,
       ready: true,
     },
     {
@@ -871,11 +878,11 @@ describe("successful update finalization ordering", () => {
     },
   ])(
     "runs deferred Doctor inspections after the restart for the $owner",
-    async ({ candidateRuntime, marker, runs, ready }) => {
+    async ({ candidateRuntime, adoptedFinalization, marker, runs, ready }) => {
       const root = tempDirs.make("post-activation-inspections-");
       const lintLog = path.join(root, "lint.json");
       const findings = [
-        ...(!candidateRuntime
+        ...(!candidateRuntime || adoptedFinalization
           ? [
               {
                 checkId: "core/doctor/runtime-tool-schemas",
@@ -949,7 +956,7 @@ process.exitCode = 1;
           result: { status: "ok", mode: "npm", root, steps: initialSteps, durationMs: 1 },
           packageUpdateNodeRunner: process.execPath,
         },
-        { candidateRuntime },
+        { candidateRuntime, adoptedFinalization },
       );
 
       expect(events).toEqual(["restart"]);
@@ -999,11 +1006,14 @@ process.exitCode = 1;
         expect.objectContaining({
           name: "post-activation doctor inspections",
           exitCode: 1,
-          ...(!candidateRuntime
+          ...(!candidateRuntime || adoptedFinalization
             ? { warnings: ["core/doctor/runtime-tool-schemas: Plugin drift."] }
             : {}),
           doctorLintFindings: findings,
-          advisory: expect.objectContaining({ kind: "recoverable-maintenance" }),
+          advisory: {
+            kind: "recoverable-maintenance",
+            message: expect.stringContaining("openclaw doctor --lint --all --severity-min info"),
+          },
         }),
       ]);
       expect(mocks.printResult.mock.lastCall?.[0].status).toBe("ok");

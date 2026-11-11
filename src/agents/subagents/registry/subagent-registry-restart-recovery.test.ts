@@ -318,9 +318,29 @@ describe("subagent registry restart recovery", () => {
       },
     );
 
+    it("reconciles an accepted child that never recorded a lifecycle run", async () => {
+      const entry = run();
+      entry.execution.lifecycleGeneration = getAgentEventLifecycleGeneration();
+      // Acceptance can persist before the child records its first lifecycle run.
+      Object.assign(mocks.entries[childSessionKey]!, {
+        status: undefined,
+        lifecycleRunId: undefined,
+        lastRunId: undefined,
+        abortedLastRun: false,
+      });
+      rotateAgentEventLifecycleGeneration();
+
+      expect(await recover(entry)).toMatchObject({
+        status: "terminal",
+        error: expect.stringContaining("Gateway restart"),
+      });
+      expect(dispatchAgent).not.toHaveBeenCalled();
+    });
+
     it.each([
       "current lifecycle",
       "different run",
+      "different last run",
       "completed session",
       "completed session with stale abort marker",
       "legacy completed session",
@@ -333,7 +353,13 @@ describe("subagent registry restart recovery", () => {
       }
       Object.assign(mocks.entries[childSessionKey]!, {
         status: scenario.includes("completed session") ? "done" : undefined,
-        lifecycleRunId: scenario === "different run" ? "newer-run" : entry.runId,
+        lifecycleRunId:
+          scenario === "different last run"
+            ? undefined
+            : scenario === "different run"
+              ? "newer-run"
+              : entry.runId,
+        lastRunId: scenario === "different last run" ? "newer-run" : undefined,
         abortedLastRun: scenario.endsWith("stale abort marker"),
       });
       expect(await recover(entry)).toEqual({ status: "ignored" });
@@ -635,7 +661,6 @@ describe("interrupted requester-settle continuation ownership", () => {
     "rearmed",
     "unstarted",
     "consumed",
-    "missing member",
     "different session",
     "different agent",
     "different store",
@@ -664,9 +689,6 @@ describe("interrupted requester-settle continuation ownership", () => {
     }
     if (scenario === "consumed") {
       child.requesterSettleWake = undefined;
-    }
-    if (scenario === "missing member") {
-      child.requesterSettleWake!.batchRunIds!.push("missing");
     }
     if (scenario === "different session") {
       child.completionRequesterSessionId = "replacement";
@@ -709,6 +731,33 @@ describe("interrupted requester-settle continuation ownership", () => {
       status: "terminal",
       error: expect.stringContaining("Gateway restart"),
     });
+  });
+
+  it.each(["running", "paused", "recovery-owned"] as const)(
+    "retains an interrupted requester while its incoming child is %s without dispatching it",
+    async (state) => {
+      const { child, worker } = cohort();
+      if (state === "running") {
+        child.execution.status = "running";
+        child.execution.endedAt = undefined;
+      } else if (state === "paused") {
+        child.pauseReason = "sessions_yield";
+      } else {
+        child.terminalOwner = "interrupted-recovery";
+      }
+      expect(await recover(worker)).toEqual({ status: "handled" });
+      expect(dispatchAgent).not.toHaveBeenCalled();
+      expect(mocks.applySessionEntryExactReplacements).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the dispatched surviving cohort owned after a member retires", async () => {
+    const { child, worker } = cohort();
+    child.requesterSettleWake!.batchRunIds!.push("retired-member");
+
+    expect(await recover(worker)).toEqual({ status: "handled" });
+    expect(dispatchAgent).not.toHaveBeenCalled();
+    expect(mocks.applySessionEntryExactReplacements).not.toHaveBeenCalled();
   });
 
   it.each(["yielded", "finished", "same-task replacement"] as const)(

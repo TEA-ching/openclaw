@@ -266,7 +266,9 @@ export async function streamAgentResponse(
       apiKey: resolvedApiKey,
       signal: executionSignal,
       onActiveResponse: steering.onActiveResponse,
-      asyncToolExecution: true,
+      // Async results reach the model only when it calls sessions_yield, the result
+      // collector. Without it (cron runs) the model would answer before any result.
+      asyncToolExecution: llmContext.tools?.some((tool) => tool.name === "sessions_yield") === true,
     });
 
     return await runAgentCoreStream(
@@ -286,18 +288,6 @@ export async function streamAgentResponse(
                 message,
                 message.content.slice(committedContentCount),
               );
-        const updatePartial = async (message: AssistantMessage) => {
-          const fragment = remainingFragment(message);
-          if (partialIndex === undefined) {
-            partialIndex = context.messages.length;
-            context.messages.push(fragment);
-            await emit({ type: "message_start", message: { ...fragment } });
-          } else {
-            context.messages[partialIndex] = fragment;
-          }
-          return fragment;
-        };
-
         const commitFragment = async (message: AssistantMessage) => {
           if (partialIndex === undefined) {
             context.messages.push(message);
@@ -316,7 +306,9 @@ export async function streamAgentResponse(
             case "start": {
               const message = event.partial;
               partialMessage = message;
-              await updatePartial(message);
+              partialIndex = context.messages.length;
+              context.messages.push(message);
+              await emit({ type: "message_start", message: { ...message } });
               break;
             }
 
@@ -335,7 +327,14 @@ export async function streamAgentResponse(
                 if (event.contentIndex < committedContentCount) {
                   break;
                 }
-                const fragment = await updatePartial(message);
+                const fragment = remainingFragment(message);
+                if (partialIndex === undefined) {
+                  partialIndex = context.messages.length;
+                  context.messages.push(fragment);
+                  await emit({ type: "message_start", message: { ...fragment } });
+                } else {
+                  context.messages[partialIndex] = fragment;
+                }
                 const fragmentEvent = {
                   ...event,
                   contentIndex: event.contentIndex - committedContentCount,
@@ -356,9 +355,14 @@ export async function streamAgentResponse(
                 ) {
                   const prefix = prepareAssistantMessage(
                     ensureToolTurnIdentity({
-                      ...replaceCompactionReplayOwnerContent(
-                        message,
-                        message.content.slice(committedContentCount, event.contentIndex + 1),
+                      // Persistence takes ownership and freezes nested values. Detach the
+                      // completed prefix from the provider's still-mutable stream, after
+                      // replay checkpoints have been reindexed using original block identity.
+                      ...structuredClone(
+                        replaceCompactionReplayOwnerContent(
+                          message,
+                          message.content.slice(committedContentCount, event.contentIndex + 1),
+                        ),
                       ),
                       ...(streamedTurnId ? { turnId: streamedTurnId } : {}),
                       stopReason: "toolUse",

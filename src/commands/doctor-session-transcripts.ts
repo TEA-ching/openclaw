@@ -24,6 +24,7 @@ import type {
   PreparedPostSessionPluginMigration,
 } from "../infra/state-migrations.types.js";
 import { repairCanonicalSessionKeys } from "./doctor-session-canonical-keys.js";
+import { repairLegacyDashboardChatTypes } from "./doctor-session-dashboard-chat-type.js";
 import {
   repairCanonicalSessionDeliveryStates,
   repairLegacySessionEntryStates,
@@ -250,6 +251,7 @@ export async function noteSessionTranscriptHealth(options?: {
     const reservedKeyReport = await repairReservedIncognitoSessionKeys(rowRepairParams);
     const deliveryReport = repairCanonicalSessionDeliveryStates(rowRepairParams);
     repairLegacySessionExecPolicy(rowRepairParams);
+    repairLegacyDashboardChatTypes(rowRepairParams);
     const acpKeyReport = await repairAcpSessionMetaKeysForDoctor({
       ...rowRepairParams,
       authority: maintenanceAuthority,
@@ -482,7 +484,9 @@ export async function noteSessionTranscriptHealth(options?: {
     `- Transcript events: imported=${report.totals.importedTranscriptEvents}; validated=${report.totals.validatedTranscriptEvents}.`,
   ];
   for (const target of informationalIndexes) {
-    lines.push(...target.issues.map((issue) => `- ${issue.message}`));
+    for (const issue of target.issues) {
+      lines.push(`- ${issue.message}`);
+    }
   }
   if (report.totals.archivedTranscriptFiles > 0) {
     lines.push(
@@ -497,7 +501,9 @@ export async function noteSessionTranscriptHealth(options?: {
   if (actionableIssues > 0) {
     const warnings = formatSessionSqliteMigrationWarnings(actionableTargets, params.env);
     params.onWarnings?.(warnings);
-    lines.push(...warnings.map((warning) => `- ${warning}`));
+    for (const warning of warnings) {
+      lines.push(`- ${warning}`);
+    }
     lines.push(
       `- Found ${actionableIssues} session SQLite issue(s). Inspect with "${formatCliCommand("openclaw doctor --session-sqlite dry-run --session-sqlite-all-agents", params.env)}".`,
     );

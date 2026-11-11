@@ -75,6 +75,46 @@ it.each(["config", "environment", "capture signal"])(
   },
 );
 
+it("expires a negative capture so a recovered login is observed", async () => {
+  vi.useFakeTimers();
+  const input = { config: {}, env: {}, provider: "claude-cli" };
+  probeClaudeCliAuthStatus
+    .mockResolvedValueOnce({ status: "missing" })
+    .mockResolvedValueOnce({ status: "available" });
+  expect(await provider.prepareSyntheticAuth!(input)).toBeUndefined();
+  expect(await provider.prepareSyntheticAuth!(input)).toBeUndefined();
+  expect(probeClaudeCliAuthStatus).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(await provider.prepareSyntheticAuth!(input)).toMatchObject({ mode: "oauth" });
+  expect(probeClaudeCliAuthStatus).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  ["timeout", true],
+  ["unreadable", true],
+  ["missing", false],
+  ["not-installed", false],
+])("auth probe: %s", async (status, authenticated) => {
+  probeClaudeCliAuthStatus.mockResolvedValue({ status });
+  const input = { config: {}, env: {}, provider: "claude-cli" };
+  const auth = await provider.prepareSyntheticAuth!(input);
+  expect(Boolean(auth?.apiKey)).toBe(authenticated);
+  if (!authenticated) {
+    expect(
+      await provider.catalog!.run({
+        ...input,
+        resolveProviderAuth: () => ({
+          apiKey: undefined,
+          mode: "none" as const,
+          source: "none" as const,
+        }),
+        resolveProviderApiKey: () => ({ apiKey: undefined }),
+      }),
+    ).toBeNull();
+    expect(discoverClaudeCliModels).not.toHaveBeenCalled();
+  }
+});
+
 it("joins one probe per cancellation scope and preserves a surviving capture", async () => {
   const config = {};
   const env = {};

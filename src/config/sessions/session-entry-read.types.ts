@@ -61,6 +61,10 @@ export type SessionEntryListWorkerResult = {
   source?: CapturedSessionEntryReadSource & { databaseIdentity: string };
   revision?: string;
   unchanged?: true;
+  /** Oldest cron run in the requested logical agent; null means no run rows. */
+  nextCronRunUpdatedAt?: number | null;
+  /** Last scanned cron key when another retention page may remain. */
+  nextCronRunSessionKey?: string | null;
 };
 
 export type SessionExactEntriesWorkerInput = {
@@ -100,7 +104,18 @@ export type SessionExactEntriesWorkerSelection =
       projection: "list";
     };
 
-export type SessionExactEntriesWorkerRequest = SessionExactEntriesWorkerSelection & {
+export type SessionExactEntriesWorkerRequest = (
+  | SessionExactEntriesWorkerSelection
+  | {
+      sessionKeys: readonly string[];
+      selection: {
+        kind: "transcript-aliases";
+        sessionIds: readonly string[];
+        sessionFiles?: readonly string[];
+      };
+      projection: "list";
+    }
+) & {
   /** Validate current entry and conversation predicates in one reader snapshot. */
   sourceChecks?: SessionSourcePredicate[];
   manualCompact?: { sessionId: string; sources: SessionSourcePredicate[] };

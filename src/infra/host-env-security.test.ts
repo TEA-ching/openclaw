@@ -15,6 +15,7 @@ import {
   sanitizeHostExecEnv,
   sanitizeHostExecEnvWithDiagnostics,
   sanitizeSystemRunEnvOverrides,
+  setGatewayCredentialEnvKeys,
 } from "./host-env-security.js";
 
 const OPENCLAW_CLI_ENV_VALUE = "1";
@@ -124,6 +125,45 @@ async function runGitCommandExitCode(
 }
 
 describe("sanitizeHostExecEnv", () => {
+  it("drops inherited node-service identity while keeping explicit overrides", () => {
+    const serviceEnv = {
+      OPENCLAW_SERVICE_MARKER: "openclaw",
+      OPENCLAW_SERVICE_KIND: "node",
+      OPENCLAW_LAUNCHD_LABEL: "ai.openclaw.node",
+      OPENCLAW_SYSTEMD_UNIT: "openclaw-node",
+      OPENCLAW_WINDOWS_TASK_NAME: "OpenClaw Node",
+      OPENCLAW_WINDOWS_TASK_HIDDEN_LAUNCHER: "1",
+      OPENCLAW_TASK_SCRIPT_NAME: "node.cmd",
+      OPENCLAW_LOG_PREFIX: "node",
+      OPENCLAW_GATEWAY_SERVICE_PID: "12345",
+    };
+    expect(
+      sanitizeHostExecEnv({
+        baseEnv: { ...serviceEnv, OPENCLAW_PROFILE: "node-proof" },
+        overrides: { OPENCLAW_SYSTEMD_UNIT: "custom-gateway.service" },
+      }),
+    ).toEqual({
+      OPENCLAW_PROFILE: "node-proof",
+      OPENCLAW_SYSTEMD_UNIT: "custom-gateway.service",
+      OPENCLAW_CLI: OPENCLAW_CLI_ENV_VALUE,
+    });
+  });
+
+  it("preserves Gateway identity for child commands that need their custom service", () => {
+    const serviceEnv = {
+      OPENCLAW_SERVICE_KIND: "gateway",
+      OPENCLAW_SERVICE_MARKER: "openclaw",
+      OPENCLAW_LAUNCHD_LABEL: "ai.openclaw.custom",
+      OPENCLAW_SYSTEMD_UNIT: "custom-gateway.service",
+      OPENCLAW_WINDOWS_TASK_NAME: "Custom Gateway",
+      OPENCLAW_GATEWAY_SERVICE_PID: "12345",
+    };
+    expect(sanitizeHostExecEnv({ baseEnv: serviceEnv })).toEqual({
+      ...serviceEnv,
+      OPENCLAW_CLI: OPENCLAW_CLI_ENV_VALUE,
+    });
+  });
+
   it("removes dangerous inherited keys while preserving PATH", () => {
     const env = sanitizeHostExecEnv({
       baseEnv: envRecord(`PATH=/usr/bin:/bin | BASH_ENV=/tmp/pwn.sh | BROWSER=/tmp/pwn-browser
@@ -164,6 +204,39 @@ RUSTUP_DIST_ROOT=https://mirror.example.test/deprecated-dist
 RUSTUP_DIST_SERVER=https://mirror.example.test | RUSTUP_HOME=/tmp/rustup-home
 RUSTUP_TOOLCHAIN=/tmp/rustup-toolchain | RUSTUP_UPDATE_ROOT=https://mirror.example.test/rustup | OK=1`),
     );
+  });
+
+  it("withholds the env sources of Gateway credentials from inherited host exec env", () => {
+    const baseEnv = {
+      PATH: "/usr/bin:/bin",
+      OPENCLAW_HOOK_TOKEN: "synthetic-hook-token",
+      OK: "1",
+    };
+    try {
+      setGatewayCredentialEnvKeys("test", ["openclaw_hook_token"]);
+      expect(sanitizeHostExecEnv({ baseEnv })).toEqual({
+        PATH: "/usr/bin:/bin",
+        OK: "1",
+        OPENCLAW_CLI: OPENCLAW_CLI_ENV_VALUE,
+      });
+      // A command's own requested value is not the Gateway credential and still applies.
+      expect(
+        sanitizeHostExecEnv({ baseEnv, overrides: { OPENCLAW_HOOK_TOKEN: "requested" } })
+          .OPENCLAW_HOOK_TOKEN,
+      ).toBe("requested");
+      // Owners publish independently; clearing one keeps the other withheld.
+      setGatewayCredentialEnvKeys("other", ["OK"]);
+      setGatewayCredentialEnvKeys("test", []);
+      expect(sanitizeHostExecEnv({ baseEnv })).toEqual({
+        PATH: "/usr/bin:/bin",
+        OPENCLAW_HOOK_TOKEN: "synthetic-hook-token",
+        OPENCLAW_CLI: OPENCLAW_CLI_ENV_VALUE,
+      });
+    } finally {
+      setGatewayCredentialEnvKeys("test", []);
+      setGatewayCredentialEnvKeys("other", []);
+    }
+    expect(sanitizeHostExecEnv({ baseEnv }).OPENCLAW_HOOK_TOKEN).toBe("synthetic-hook-token");
   });
 
   it("drops non-string inherited values while preserving non-portable inherited keys", () => {

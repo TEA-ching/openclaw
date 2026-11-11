@@ -14,6 +14,7 @@ import { readCronRunRecordsForTests } from "../cron/run-history.test-support.js"
 import { loadCronStore, saveCronStore } from "../cron/store.js";
 import { resolveCronJobsStorePathFromConfigAsync } from "../cron/store/paths.js";
 import type { GuardedFetchOptions } from "../infra/net/fetch-guard.js";
+import { getGatewayContextResolver } from "../plugins/runtime/gateway-context-binding.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { createPluginRuntime } from "../plugins/runtime/index.js";
 import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission.js";
@@ -31,6 +32,7 @@ import {
 } from "./server-cron.events.test-support.js";
 import type { GatewayCronState } from "./server-cron.js";
 import type { GatewayClient } from "./server-methods/types.js";
+import { expectCronJobIdFromResponse } from "./server.cron.assertions.test-support.js";
 import {
   agentCommandMock,
   connectOk,
@@ -273,14 +275,6 @@ async function directCronReq(
     });
   }
   return expectDefined(result, `${method} did not respond`);
-}
-
-function expectCronJobIdFromResponse(response: { ok?: unknown; payload?: unknown }) {
-  expect(response.ok, JSON.stringify((response as { error?: unknown }).error ?? null)).toBe(true);
-  const value = (response.payload as { id?: unknown } | null)?.id;
-  const id = typeof value === "string" ? value : "";
-  expect(id.length > 0).toBe(true);
-  return id;
 }
 
 async function addWebhookCronJob(params: {
@@ -799,6 +793,12 @@ describe("gateway server cron", () => {
     await setupCronTestRun();
 
     const ws = await startCronClient();
+
+    // Minimal Gateway startup skips cron recovery; finish it before the timed requests.
+    const { getGatewayRecoveryRuntime } = await import("./server-recovery-runtime-context.js");
+    const runtime = expectDefined(getGatewayRecoveryRuntime(), "Gateway runtime");
+    const resolveContext = expectDefined(getGatewayContextResolver(runtime), "Gateway context");
+    await expectDefined(resolveContext(), "Gateway context").cron.start();
 
     const jobId = await addWebhookCronJob({
       ws,

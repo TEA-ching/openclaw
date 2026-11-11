@@ -175,6 +175,11 @@ export function createFixture(groups: readonly string[], root: string) {
     '{"name":"sdk-declaration-fixture","version":"0.0.0","private":true,"type":"module"}',
   );
   write("pnpm-workspace.yaml", "packages: []\n");
+  // Standalone package builds pass this path to declaration builds as compiler configuration.
+  write(
+    "tsconfig.packages.json",
+    fs.readFileSync(path.join(sourceRoot, "tsconfig.packages.json"), "utf8"),
+  );
   write("tsdown.config.ts", fs.readFileSync(path.join(sourceRoot, "tsdown.config.ts"), "utf8"));
   fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
   fs.mkdirSync(path.join(root, "extensions"));
@@ -204,6 +209,7 @@ export function createFixture(groups: readonly string[], root: string) {
   // Plain paths are deliberate: owner edits do not select these suites in product PRs
   // (see "Declaration-fixture owner selection" in .agents/skills/openclaw-ci-limits).
   const runtimeEntryOwners = new Set([
+    "node-runtime-env.mjs",
     ...Object.values(runtimeProcessDeclarationEntries),
     "scripts/lib/managed-windows-job-launcher.mts",
     "src/process/exec-result.ts",
@@ -223,6 +229,7 @@ export function createFixture(groups: readonly string[], root: string) {
     "src/infra/format-time/format-duration-internal.ts",
     "src/infra/node-runtime-executable.ts",
     "src/infra/runtime-dependency-ownership.ts",
+    "src/infra/runtime-process-manifest.ts",
     "src/shared/non-packaged-plugin-dirs.ts",
     "src/infra/package-update-activation-runtime-assets.ts",
     "packages/normalization-core/src/error-coercion.ts",

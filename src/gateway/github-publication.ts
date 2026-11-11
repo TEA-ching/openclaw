@@ -8,7 +8,10 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { warnPluginSdkDeprecation } from "../plugins/sdk-deprecation.js";
 import { getOrCreatePromise } from "../shared/lazy-promise.js";
 import type { GitHubPublicationRow as PublicationRow } from "../state/github-publication-read.types.js";
-import { readGitHubPublicationSessionLifecycleInWorker } from "../state/github-publication-session-lifecycles.js";
+import {
+  prepareGitHubPublicationSessionLifecycle,
+  readGitHubPublicationSessionLifecycleInWorker,
+} from "../state/github-publication-session-lifecycles.js";
 import { createGitHubPublicationWorkerScope } from "../state/github-publication-worker.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { createPersonalGitHubPublicationCoordinator } from "./github-personal-publication.js";
@@ -48,6 +51,7 @@ import {
   createGitHubPublicationExecutionStoreAsync,
   deferGitHubPublicationRequestsAsync,
   readGitHubPublicationRequestAsync,
+  readRepositoryGitHubPublicationAsync,
   runGitHubPublicationMaintenanceAsync,
 } from "./github-publication-store-async.js";
 import { assertGitHubPublicationWorkflowChangesAllowed } from "./github-publication-workflows.js";
@@ -117,12 +121,11 @@ export function createGitHubPublicationCoordinator(params: {
     ) {
       throw new Error("GitHub publication session identity changed.");
     }
-    const admitted = await readGitHubPublicationWorktreeOwner({
+    using admitted = await readGitHubPublicationWorktreeOwner({
       sessionId: request.claim.sessionId,
       sessionKey: request.sessionKey,
       agentId: request.agentId,
     });
-    using _ = { [Symbol.dispose]: () => admitted.release() };
 
     assertRequester();
     const identity = await prepareCurrentGitHubPublicationIdentity(request.agentId);
@@ -451,7 +454,7 @@ export function createGitHubPublicationCoordinator(params: {
   return {
     ...methods,
     ...personal,
-    /** @deprecated Use requestForClaimV2; removed in the next Plugin SDK major. */
+    /** @deprecated Use requestForClaimV2; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     requestForClaim: async (
       _request: GitHubPublicationClaimRequest,
     ): Promise<SessionGitHubPublicationResult> => {
@@ -481,14 +484,14 @@ export function createGitHubPublicationCoordinator(params: {
       );
       await repository.prepareClaimWorkspace(claim);
     },
-    /** @deprecated Use deferClaimPreparationAsync; removed in the next Plugin SDK major. */
+    /** @deprecated Use deferClaimPreparationAsync; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     deferClaimPreparation(_claim: WorkerSessionTurnClaim): void {
       return refuseLegacyPublication("deferClaimPreparation", "deferClaimPreparationAsync");
     },
     async deferClaimPreparationAsync(claim: WorkerSessionTurnClaim) {
       await runGitHubPublicationMaintenanceAsync({ operation: "deferClaim", claim }, assertCurrent);
     },
-    /** @deprecated Use requestForSessionV2; removed in the next Plugin SDK major. */
+    /** @deprecated Use requestForSessionV2; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     async requestForSession(
       _input: GitHubPublicationSessionRequest,
     ): Promise<SessionGitHubPublicationResult> {
@@ -516,7 +519,7 @@ export function createGitHubPublicationCoordinator(params: {
         ? repository.requestForSessionV2(input)
         : methods.requestForSessionV2(input);
     },
-    /** @deprecated Use requestPersonalForSessionV2; removed in the next Plugin SDK major. */
+    /** @deprecated Use requestPersonalForSessionV2; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     async requestPersonalForSession(
       ..._args: Parameters<typeof personal.requestPersonalForSession>
     ): Promise<SessionGitHubPublicationResult> {
@@ -532,12 +535,6 @@ export function createGitHubPublicationCoordinator(params: {
       return (await hasGitHubPublicationRepositoryWorkspace(args[1]))
         ? repository.requestPersonalForSessionV2(...args)
         : personal.requestPersonalForSessionV2(...args);
-    },
-    async sharedStatus(...args: Parameters<typeof methods.sharedStatus>) {
-      return (await repository.sharedStatus(...args)) ?? (await methods.sharedStatus(...args));
-    },
-    async latestShared(...args: Parameters<typeof methods.latestShared>) {
-      return (await repository.latestShared(...args)) ?? (await methods.latestShared(...args));
     },
     preparePersonalStatus: repository.preparePersonalStatus,
     /** @deprecated Use personalStatusAsync and await completion. */
@@ -555,7 +552,7 @@ export function createGitHubPublicationCoordinator(params: {
     async personalPending(...args: Parameters<typeof personal.personalPending>) {
       return (await repository.personalPending(...args)) ?? personal.personalPending(...args);
     },
-    /** @deprecated Use confirmPersonalV2; removed in the next Plugin SDK major. */
+    /** @deprecated Use confirmPersonalV2; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     confirmPersonal(
       ..._args: Parameters<typeof personal.confirmPersonal>
     ): Promise<SessionGitHubPublicationResult> {
@@ -591,7 +588,7 @@ export function createGitHubPublicationCoordinator(params: {
         );
       }
     },
-    /** @deprecated Use deferOrphanedRequestsAsync; removed in the next Plugin SDK major. */
+    /** @deprecated Use deferOrphanedRequestsAsync; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     deferOrphanedRequests(): void {
       return refuseLegacyPublication("deferOrphanedRequests", "deferOrphanedRequestsAsync");
     },
@@ -599,7 +596,7 @@ export function createGitHubPublicationCoordinator(params: {
       await methods.deferOrphanedRequestsAsync();
       await repository.deferOrphanedRequestsAsync();
     },
-    /** @deprecated Use listUnreportedResultsAsync; removed in the next Plugin SDK major. */
+    /** @deprecated Use listUnreportedResultsAsync; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     listUnreportedResults(): Array<{
       sessionId: string;
       sessionKey: string;
@@ -621,7 +618,30 @@ export function createGitHubPublicationCoordinator(params: {
     async readAsync(requestId: string) {
       return (await repository.readAsync(requestId)) ?? methods.readAsync(requestId);
     },
-    /** @deprecated Use markReportedAsync; removed in the next Plugin SDK major. */
+    async readReportLifecycleAsync(report: {
+      sessionId: string;
+      sessionKey: string;
+      agentId: string;
+      result: SessionGitHubPublicationResult;
+    }) {
+      const requestId = report.result.requestId;
+      const row = await readRepositoryGitHubPublicationAsync(requestId);
+      assertCurrent();
+      if (row) {
+        return row.session_lifecycle_revision;
+      }
+      const lifecycle = await prepareGitHubPublicationSessionLifecycle({
+        publicationKind: report.result.publisher?.source === "personal" ? "personal" : "shared",
+        requestId,
+      });
+      assertCurrent();
+      const binding = lifecycle.readCurrent();
+      if (!binding) {
+        throw new Error("GitHub publication transcript lifecycle is unavailable.");
+      }
+      return binding.lifecycle_revision;
+    },
+    /** @deprecated Use markReportedAsync; final compatibility day: 2026-12-31; removal in the first January 2027 stable release. */
     markReported(_requestId: string): void {
       return refuseLegacyPublication("markReported", "markReportedAsync");
     },

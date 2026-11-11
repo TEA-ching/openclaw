@@ -75,7 +75,7 @@ describe("package runtime compatibility guidance", () => {
   beforeEach(() => {
     vi.mocked(resolveBunRuntimeInfo).mockResolvedValue({
       status: "supported",
-      version: "1.4.3",
+      version: "1.4.4",
       sqliteVersion: "3.51.3",
       nodeSharedSqlite: false,
       sqliteProbe: { available: true, version: "3.51.3", text: true, blob: true, json: true },
@@ -83,7 +83,7 @@ describe("package runtime compatibility guidance", () => {
     vi.stubGlobal("process", {
       ...process,
       execPath: path.resolve("/fixture/node"),
-      versions: { ...process.versions, node: "24.16.0", bun: undefined },
+      versions: { ...process.versions, node: "24.22.1", bun: undefined },
     });
   });
   afterEach(() => {
@@ -129,7 +129,7 @@ describe("package runtime compatibility guidance", () => {
         ...process,
         env: current ? serviceEnv : processEnv,
         execPath: path.resolve("/fixture/app-runtime"),
-        versions: { ...process.versions, bun: "1.4.3", node: "24.3.0" },
+        versions: { ...process.versions, bun: "1.4.4", node: "24.3.0" },
       });
       if (!current && !homebrew) {
         vi.mocked(resolveNodeRuntimeInfo).mockResolvedValue({
@@ -143,7 +143,7 @@ describe("package runtime compatibility guidance", () => {
       if (!supported) {
         vi.mocked(resolveBunRuntimeInfo).mockResolvedValue({
           status: "probe-failed",
-          error: new Error("Bun 1.4+ with WAL-reset-safe node:sqlite is required."),
+          error: new Error("Bun 1.4.4+ with WAL-reset-safe node:sqlite is required."),
         });
       }
       const result = await resolvePackageRuntimePreflight({
@@ -169,7 +169,7 @@ describe("package runtime compatibility guidance", () => {
                 },
               },
             }
-          : { ok: false, error: "Bun 1.4+ with WAL-reset-safe node:sqlite is required." },
+          : { ok: false, error: "Bun 1.4.4+ with WAL-reset-safe node:sqlite is required." },
       );
       expect(resolveBunRuntimeInfo).toHaveBeenCalledWith(executable, undefined, runtimeEnv);
       expect(resolveNodeRuntimeInfo).not.toHaveBeenCalled();
@@ -185,12 +185,22 @@ describe("package runtime compatibility guidance", () => {
     vi.stubGlobal("process", {
       ...process,
       execPath: path.resolve("/fixture/app-runtime"),
-      versions: { ...process.versions, bun: "1.4.3" },
+      versions: { ...process.versions, bun: "1.4.4" },
     });
-    vi.mocked(resolveNodeRuntimeInfo).mockResolvedValue(unsupportedServiceRuntimeFixture);
+    vi.mocked(resolveNodeRuntimeInfo).mockImplementation(async (runner) =>
+      runner === "/recovered/node"
+        ? {
+            status: "supported",
+            version: "24.22.1",
+            sqliteVersion: "3.53.0",
+            nodeSharedSqlite: false,
+            sqliteProbe: { available: true, version: "3.53.0", text: true, blob: true, json: true },
+          }
+        : unsupportedServiceRuntimeFixture,
+    );
     vi.mocked(resolveTargetNodeRuntime).mockResolvedValue("/recovered/node");
     const result = await resolvePackageRuntimePreflight({
-      target: { version: "2027.1.0", nodeEngine: ">=24.16.0" },
+      target: { version: "2027.1.0", nodeEngine: ">=24.22.1" },
       nodeRunner: "/old/node",
       shouldRestart: true,
       alreadyCurrent: true,
@@ -212,15 +222,45 @@ describe("package runtime compatibility guidance", () => {
     });
     expect(vi.mocked(resolveNodeRuntimeInfo).mock.calls.map(([runner]) => runner)).toEqual([
       "/old/node",
+      "/recovered/node",
     ]);
+    expect(resolveBunRuntimeInfo).not.toHaveBeenCalled();
+    expect(resolveTargetNodeRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a recovered Node that still fails its capability probe", async () => {
+    vi.stubGlobal("process", {
+      ...process,
+      execPath: path.resolve("/fixture/app-runtime"),
+      versions: { ...process.versions, bun: "1.4.4" },
+    });
+    vi.mocked(resolveNodeRuntimeInfo).mockResolvedValue(unsupportedServiceRuntimeFixture);
+    vi.mocked(resolveTargetNodeRuntime).mockResolvedValue("/recovered/node");
+    const result = await resolvePackageRuntimePreflight({
+      target: { version: "2027.1.0", nodeEngine: ">=24.22.1" },
+      nodeRunner: "/old/node",
+      shouldRestart: true,
+      alreadyCurrent: true,
+      service: refreshableService,
+      runtimeRecovery: { env: {} },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.failureFacts).toEqual([
+      expect.objectContaining({ check: "node-runtime", code: "node-runtime-preflight" }),
+    ]);
+    expect(vi.mocked(resolveNodeRuntimeInfo).mock.calls.map(([runner]) => runner)).toEqual([
+      "/old/node",
+      "/recovered/node",
+    ]);
+    expect(resolveBunRuntimeInfo).not.toHaveBeenCalled();
   });
 
   it.each([
-    [">=24.16.0 <25 || >=26.1.0", "24.16.0", "2026.9.4", "2026.9.4"],
+    [">=24.22.1 <25 || >=26.12.1", "24.22.1", "2026.9.4", "2026.9.4"],
     [null, "unspecified", "2026.9.4", "2026.9.4"],
     ["invalid", "unspecified", "2026.9.4", "2026.9.4"],
-    [">=24.16.0", "24.16.0", "2026.9.4-beta.1", "2026.9.4-beta.1"],
-    [">=24.16.0", "24.16.0", "2026.9.4-private-customer", "[redacted-version]"],
+    [">=24.22.1", "24.22.1", "2026.9.4-beta.1", "2026.9.4-beta.1"],
+    [">=24.22.1", "24.22.1", "2026.9.4-private-customer", "[redacted-version]"],
   ] as const)(
     "records inspected runtime facts for public refusal reports: %s / %s / %s",
     async (nodeEngine, _floor, version, publicVersion) => {
@@ -282,19 +322,19 @@ describe("package runtime compatibility guidance", () => {
   it.each([
     [
       "/home/operator/.nvm/versions/node/v22.23.2/bin/node",
-      "nvm install 24.16.0 && nvm use 24.16.0",
+      "nvm install 24.22.1 && nvm use 24.22.1",
     ],
     ["/usr/bin/node", null],
     ["/source/node", null, "/fixture"],
     ["/home/operator/.nvm/../system/bin/node", null],
     [
       "/home/operator/.local/share/fnm/node-versions/v22.23.2/installation/bin/node",
-      "fnm install 24.16.0 && fnm use 24.16.0",
+      "fnm install 24.22.1 && fnm use 24.22.1",
     ],
-    ["/home/operator/.volta/tools/image/node/22.23.2/bin/node", "volta install node@24.16.0"],
+    ["/home/operator/.volta/tools/image/node/22.23.2/bin/node", "volta install node@24.22.1"],
     [
       "/custom/node-manager/versions/node/v22.23.2/bin/node",
-      "nvm install 24.16.0 && nvm use 24.16.0",
+      "nvm install 24.22.1 && nvm use 24.22.1",
     ],
   ])(
     "keeps the CLI and owned service reachable after switching %s",
@@ -307,7 +347,7 @@ describe("package runtime compatibility guidance", () => {
         sqliteProbe: { available: true, version: "3.51.3", text: true, blob: true, json: true },
       });
       const result = await resolvePackageRuntimePreflight({
-        target: { version: "2026.9.4", nodeEngine: ">=24.16.0" },
+        target: { version: "2026.9.4", nodeEngine: ">=24.22.1" },
         nodeRunner,
         sourceRoot,
         root: sourceRoot ?? "/fixture",
@@ -317,7 +357,7 @@ describe("package runtime compatibility guidance", () => {
           serviceEnv: { OPENCLAW_PROFILE: "work", NVM_DIR: "/custom/node-manager" },
         },
       });
-      const prefix = command === "volta install node@24.16.0" ? "volta run --node 24.16.0 " : "";
+      const prefix = command === "volta install node@24.22.1" ? "volta run --node 24.22.1 " : "";
       const sourceEntry = path.join(sourceRoot ?? "/fixture", "openclaw.mjs");
       const cli = sourceEntry
         ? `node ${process.platform === "win32" ? quotePowerShellArg(sourceEntry) : quoteCliArg(sourceEntry)}`
@@ -342,15 +382,15 @@ describe("package runtime compatibility guidance", () => {
             ? {
                 kind: "select-runtime",
                 command: command.startsWith("nvm")
-                  ? expectedRuntimeSelectionCommand("nvm", "24.16.0")
+                  ? expectedRuntimeSelectionCommand("nvm", "24.22.1")
                   : command.startsWith("fnm")
-                    ? expectedRuntimeSelectionCommand("fnm", "24.16.0")
+                    ? expectedRuntimeSelectionCommand("fnm", "24.22.1")
                     : command,
               }
             : {
                 kind: "select-runtime",
                 instruction:
-                  "Install and select Node 24.16.0 using your system package manager or https://nodejs.org/en/download.",
+                  "Install and select Node 24.22.1 using your system package manager or https://nodejs.org/en/download.",
               },
           {
             kind: "continue-update",
@@ -372,7 +412,7 @@ describe("package runtime compatibility guidance", () => {
         sqliteProbe: { available: true, version: "3.51.3", text: true, blob: true, json: true },
       });
       const result = await resolvePackageRuntimePreflight({
-        target: { version: "2026.9.4", nodeEngine: ">=24.16.0" },
+        target: { version: "2026.9.4", nodeEngine: ">=24.22.1" },
         nodeRunner: "/usr/bin/node",
         invocationCwd: "/service-launch",
         service: {
@@ -415,12 +455,12 @@ describe("package runtime compatibility guidance", () => {
       const launcher = path.join(alias, "node");
       vi.mocked(resolveNodeRuntimeInfo).mockResolvedValue(unsupportedServiceRuntimeFixture);
       const result = await resolvePackageRuntimePreflight({
-        target: { version: "2026.9.4", nodeEngine: ">=24.16.0" },
+        target: { version: "2026.9.4", nodeEngine: ">=24.22.1" },
         nodeRunner: launcher,
       });
       expect(result.recoverySteps?.[1]).toEqual({
         kind: "select-runtime",
-        command: expectedRuntimeSelectionCommand("fnm", "24.16.0"),
+        command: expectedRuntimeSelectionCommand("fnm", "24.22.1"),
       });
     });
   });
@@ -475,7 +515,7 @@ describe("package runtime compatibility guidance", () => {
 
   it.each([
     {
-      version: "26.8.1",
+      version: "26.12.1",
       restart: false,
       oldNode: "22.23.1",
       runner: "/old/node",
@@ -483,7 +523,7 @@ describe("package runtime compatibility guidance", () => {
       error: "detected: Node 22.23.1 at /old/node",
     },
     {
-      version: "26.8.1",
+      version: "26.12.1",
       restart: true,
       oldNode: "22.23.1",
       runner: "/old/node",
@@ -493,15 +533,15 @@ describe("package runtime compatibility guidance", () => {
     {
       version: "24.15.0+vendor.1",
       restart: true,
-      oldNode: "24.16.0",
+      oldNode: "24.22.1",
       runner: "/fixture/old/node",
       target: "2026.9.3",
-      error: "Node >=24.16.0 <25 || >=26.1.0",
+      error: "Node >=24.22.1 <25 || >=26.12.1",
     },
     {
-      version: "24.19.0",
+      version: "24.22.1",
       restart: true,
-      oldNode: "24.16.0",
+      oldNode: "24.22.1",
       runner: "/fixture/old/node",
       target: "2026.9.3",
       error: null,
@@ -533,7 +573,7 @@ describe("package runtime compatibility guidance", () => {
           sqliteProbe,
         });
       const result = await resolvePackageRuntimePreflight({
-        target: { version: target, nodeEngine: ">=24.16.0 <25 || >=26.1.0" },
+        target: { version: target, nodeEngine: ">=24.22.1 <25 || >=26.12.1" },
         nodeRunner: runner,
         shouldRestart: restart,
         alreadyCurrent: true,
@@ -581,7 +621,7 @@ describe("package runtime compatibility guidance", () => {
       execPath: path.resolve("/fixture/node"),
       versions: { ...process.versions, node },
     });
-    const engine = ">=24.16.0 <25 || >=26.1.0";
+    const engine = ">=24.22.1 <25 || >=26.12.1";
     const result = await resolvePackageRuntimePreflight({
       target: { version: "2026.9.3", nodeEngine: engine },
       root: path.resolve("/fixture/cli"),
@@ -622,7 +662,7 @@ describe("package runtime compatibility guidance", () => {
       error: expect.stringContaining(
         [
           `Node ${node}: node:sqlite truncates TEXT at embedded NUL (nodejs/node#61954); use 24.16+/26.1+ or a build with the fix`,
-          expectedPlainRecovery("2026.9.3", "24.16.0", "refresh", "", path.resolve("/fixture/cli")),
+          expectedPlainRecovery("2026.9.3", "24.22.1", "refresh", "", path.resolve("/fixture/cli")),
         ].join("\n"),
       ),
     });
@@ -708,8 +748,8 @@ describe("package runtime compatibility guidance", () => {
   }
 
   it.each([
-    ["24.16.0", false, "nodejs/node#61954"],
-    ["24.15.0+vendor.1", true, "Node >=24.16.0 <25 || >=26.1.0"],
+    ["24.22.1", false, "nodejs/node#61954"],
+    ["24.15.0+vendor.1", true, "Node >=24.22.1 <25 || >=26.12.1"],
   ] as const)(
     "requires target engines and SQLite capabilities for Node %s",
     async (node, text, error) => {
@@ -718,7 +758,7 @@ describe("package runtime compatibility guidance", () => {
       const result = await resolvePackageRuntimePreflight({
         target: {
           version: "2026.9.3",
-          nodeEngine: ">=24.16.0 <25 || >=26.1.0",
+          nodeEngine: ">=24.22.1 <25 || >=26.12.1",
         },
       });
       expect(result.ok).toBe(error === null);
@@ -764,7 +804,7 @@ describe("package runtime compatibility guidance", () => {
           ? { status: "probe-failed", error: new Error("runtime startup timed out") }
           : {
               status: "supported",
-              version: "24.19.0",
+              version: "24.22.1",
               sqliteVersion: "3.51.3",
               nodeSharedSqlite: false,
               sqliteProbe: {
@@ -777,7 +817,7 @@ describe("package runtime compatibility guidance", () => {
             };
       });
       const pending = resolvePackageRuntimePreflight({
-        target: { version: "2026.9.4", nodeEngine: ">=24.16.0" },
+        target: { version: "2026.9.4", nodeEngine: ">=24.22.1" },
         nodeRunner: "/fixture/bin/node",
         timeoutMs,
       });

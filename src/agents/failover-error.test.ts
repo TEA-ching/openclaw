@@ -40,6 +40,20 @@ function expectReason(error: unknown, reason: FailoverReason | null) {
 }
 
 describe("failover-error", () => {
+  it("preserves transcript admission conflicts through error wrappers", () => {
+    const conflict = new Error(
+      'Transcript idempotency key "channel-user:v1:conflicting-input" conflicts with the admitted message.',
+    );
+    for (const error of [
+      conflict,
+      new Error("preparation failed", { cause: conflict }),
+      new AggregateError([conflict], "run failed"),
+    ]) {
+      expect(resolveModelFallbackError(error)).toEqual({ kind: "terminal", error });
+      expect(coerceToFailoverError(error)).toBeNull();
+    }
+  });
+
   it("preserves an Ollama model-retirement error instead of coercing it to a timeout", () => {
     const body = JSON.stringify({
       error: "glm-5.1 was retired at 2026-09-25 00:00:00 -0700 PDT (ref: synthetic-retirement)",
@@ -281,6 +295,34 @@ describe("failover-error", () => {
     expectReason(err, "rate_limit");
     expect(coerceToFailoverError(err)?.reason).toBe("rate_limit");
   });
+
+  it.each([undefined, "429 raw provider detail. Retry in 221ms."])(
+    "preserves provider text when enriching exhaustion (rawError=%s)",
+    (rawError) => {
+      const message = "429 rate limit exceeded. Retry in 221ms.";
+      const cause = new Error("provider request failed");
+      const original = new FailoverError(message, {
+        reason: "rate_limit",
+        status: 429,
+        code: "rate_limit_exceeded",
+        rawError,
+        cause,
+      });
+      const enriched = coerceToFailoverError(original, { rateLimitRetriesExhausted: 9 });
+      expect(enriched?.message).toContain("9 automatic retries");
+      expect(describeFailoverError(enriched)).toMatchObject({
+        rawError: rawError ?? message,
+        status: 429,
+        code: "rate_limit_exceeded",
+        reason: "rate_limit",
+        rateLimitRetriesExhausted: 9,
+      });
+      expect(enriched?.cause).toBe(cause);
+      expect(original.message).toBe(message);
+      expect(original.rawError).toBe(rawError);
+      expect(original.rateLimitRetriesExhausted).toBeUndefined();
+    },
+  );
 
   it("preserves typed failure facts and diagnostics when adding the active auth mode", () => {
     const cause = Object.assign(new Error("socket closed"), { code: "ECONNRESET" });

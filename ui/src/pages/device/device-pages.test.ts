@@ -224,9 +224,11 @@ describe("native device settings pages", () => {
       expect.any(Function),
     );
     flush();
-    expect(hosting.querySelector<HTMLInputElement>("input.settings-toggle__input")!.disabled).toBe(
-      true,
-    );
+    expect(
+      hosting
+        .querySelector<HTMLInputElement>("input.settings-toggle__input")!
+        .hasAttribute("aria-disabled"),
+    ).toBe(true);
     const saved = createNativeDeviceSettingsSnapshot();
     saved.app.keepGatewayRunning = true;
     native.settle(0, saved);
@@ -251,9 +253,11 @@ describe("native device settings pages", () => {
     saved.app.keepGatewayRunningAvailable = false;
     native.publish(saved);
     flush();
-    expect(hosting.querySelector<HTMLInputElement>("input.settings-toggle__input")!.disabled).toBe(
-      true,
-    );
+    expect(
+      hosting
+        .querySelector<HTMLInputElement>("input.settings-toggle__input")!
+        .hasAttribute("aria-disabled"),
+    ).toBe(true);
     native.capability.set.mockClear();
     hosting.click();
     expect(native.capability.set).not.toHaveBeenCalled();
@@ -299,26 +303,22 @@ describe("native device settings pages", () => {
     expect(page.textContent).not.toContain("Keep computer awake");
   });
 
-  it("inspects Chrome on entry and focus without installing, and keeps explicit refresh", async () => {
+  it("leaves Chrome data untouched on entry and focus until explicit refresh", async () => {
     const { capability } = createCapability();
     const page = await mount("openclaw-device-page", capability);
     const setup = page.querySelector<DevicePageElement>("openclaw-native-chrome-setup")!;
     await setup.updateComplete;
-    await vi.waitFor(() => expect(setup.textContent).toContain("Setup required on this device"));
-    expect(capability.setupChromeExtension).toHaveBeenCalledExactlyOnceWith("inspect");
+    expect(capability.setupChromeExtension).not.toHaveBeenCalled();
     window.dispatchEvent(new Event("focus"));
-    await vi.waitFor(() => expect(capability.setupChromeExtension).toHaveBeenCalledTimes(2));
+    flush();
     await setup.updateComplete;
+    expect(capability.setupChromeExtension).not.toHaveBeenCalled();
     const refresh = [...setup.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === "Refresh setup status",
     )!;
     refresh.click();
     await vi.waitFor(() => expect(setup.textContent).toContain("Setup required on this device"));
-    expect(capability.setupChromeExtension.mock.calls).toEqual([
-      ["inspect"],
-      ["inspect"],
-      ["inspect"],
-    ]);
+    expect(capability.setupChromeExtension).toHaveBeenCalledExactlyOnceWith("inspect");
     expect(capability.installChromeExtension).not.toHaveBeenCalled();
   });
   it.each(["openclaw-device-page", "openclaw-device-permissions-page"] as const)(
@@ -360,8 +360,9 @@ describe("native device settings pages", () => {
     iconStyles.dispatchEvent(new Event("change", { bubbles: true }));
     expect(capability.set).toHaveBeenCalledWith("app.iconStyle", "origami");
     expect(
-      row(page, "Launch at login").querySelector<HTMLInputElement>("input.settings-toggle__input")!
-        .disabled,
+      row(page, "Launch at login")
+        .querySelector<HTMLInputElement>("input.settings-toggle__input")!
+        .hasAttribute("aria-disabled"),
     ).toBe(true);
     expect(row(page, "Launch at login").textContent).toContain("requires a bundled app");
     expect(
@@ -412,9 +413,9 @@ describe("native device settings pages", () => {
         .checked,
     ).toBe(false);
     expect(
-      row(page, "Enable Peekaboo Bridge").querySelector<HTMLInputElement>(
-        "input.settings-toggle__input",
-      )!.disabled,
+      row(page, "Enable Peekaboo Bridge")
+        .querySelector<HTMLInputElement>("input.settings-toggle__input")!
+        .hasAttribute("aria-disabled"),
     ).toBe(true);
     expect(page.querySelector('[aria-label="Computer Control provider"]')).toBeNull();
     expect(page.querySelector('[aria-label="Dock icon"]')).toBeNull();
@@ -818,8 +819,9 @@ describe("native device settings pages", () => {
     const native = createCapability();
     const page = await mount("openclaw-device-permissions-page", native.capability);
     expect(
-      row(page, "Precise location").querySelector<HTMLInputElement>("input.settings-toggle__input")!
-        .disabled,
+      row(page, "Precise location")
+        .querySelector<HTMLInputElement>("input.settings-toggle__input")!
+        .hasAttribute("aria-disabled"),
     ).toBe(true);
     row(page, "Location access")
       .querySelector<HTMLInputElement>('input.settings-segmented__input[value="whileUsing"]')!
@@ -830,8 +832,9 @@ describe("native device settings pages", () => {
     native.publish(next);
     flush();
     expect(
-      row(page, "Precise location").querySelector<HTMLInputElement>("input.settings-toggle__input")!
-        .disabled,
+      row(page, "Precise location")
+        .querySelector<HTMLInputElement>("input.settings-toggle__input")!
+        .hasAttribute("aria-disabled"),
     ).toBe(false);
     toggle(page, "Precise location", true);
     expect(native.capability.set).toHaveBeenCalledWith("permissions.location.precise", true);

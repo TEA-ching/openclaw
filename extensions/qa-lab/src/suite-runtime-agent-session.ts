@@ -1,7 +1,7 @@
 import path from "node:path";
 import { buildSessionEntry } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import {
-  listSessionEntries,
+  listSessionEntriesAsync,
   loadTranscriptEvents,
   resolveStorePath,
   type SessionEntry,
@@ -25,13 +25,19 @@ type QaGatewayCallEnv = Pick<
   "gateway" | "primaryModel" | "alternateModel" | "providerMode"
 >;
 
+type QaSessionTranscriptSeedMessage =
+  | {
+      role: "assistant" | "user";
+      text: string;
+      timestamp: number;
+      // Assistant tool calls let seeds carry paired tool results for compaction flows.
+      toolCalls?: readonly { id: string; name: string }[];
+    }
+  | { role: "toolResult"; toolCallId: string; toolName: string; text: string; timestamp: number };
+
 type QaSessionTranscriptSeedParams = {
   label?: string;
-  messages: readonly {
-    role: "assistant" | "user";
-    text: string;
-    timestamp: number;
-  }[];
+  messages: readonly QaSessionTranscriptSeedMessage[];
   sessionId: string;
   sessionKey: string;
   updatedAt: number;
@@ -337,7 +343,7 @@ function qaSessionRuntimeEnv(tempRoot: string): NodeJS.ProcessEnv {
 }
 
 async function seedQaSessionEntries(
-  env: Pick<QaSuiteRuntimeEnv, "gateway">,
+  env: { gateway: Pick<QaSuiteRuntimeEnv["gateway"], "tempRoot"> },
   entries: readonly QaSessionEntrySeed[],
 ): Promise<void> {
   const runtimeEnv = qaSessionRuntimeEnv(env.gateway.tempRoot);
@@ -355,6 +361,33 @@ async function seedQaSessionEntries(
       entry: seed.entry,
     });
   }
+}
+
+function buildSeedTranscriptMessage(seed: QaSessionTranscriptSeedMessage) {
+  if (seed.role === "toolResult") {
+    return {
+      role: seed.role,
+      toolCallId: seed.toolCallId,
+      toolName: seed.toolName,
+      isError: false,
+      timestamp: seed.timestamp,
+      content: [{ type: "text" as const, text: seed.text }],
+    };
+  }
+  const toolCalls = seed.role === "assistant" ? (seed.toolCalls ?? []) : [];
+  return {
+    role: seed.role,
+    timestamp: seed.timestamp,
+    content: [
+      ...(seed.text ? [{ type: "text" as const, text: seed.text }] : []),
+      ...toolCalls.map((call) => ({
+        type: "toolCall" as const,
+        id: call.id,
+        name: call.name,
+        arguments: {},
+      })),
+    ],
+  };
 }
 
 async function seedQaSessionTranscript(
@@ -396,11 +429,7 @@ async function seedQaSessionTranscript(
       sessionKey,
       storePath,
       now: seed.timestamp,
-      message: {
-        role: seed.role,
-        timestamp: seed.timestamp,
-        content: [{ type: "text", text: seed.text }],
-      },
+      message: buildSeedTranscriptMessage(seed),
     });
     if (!appended?.appended) {
       throw new Error(`failed to seed QA session transcript for ${sessionKey}`);
@@ -416,12 +445,13 @@ async function readRawQaSessionStore(
 ): Promise<Record<string, SessionEntry>> {
   const runtimeEnv = qaSessionRuntimeEnv(env.gateway.tempRoot);
   const agentId = readNonEmptyString(options.agentId) ?? "qa";
-  return Object.fromEntries(
-    listSessionEntries({ agentId, env: runtimeEnv }).map(({ sessionKey, entry }) => [
-      sessionKey,
-      entry,
-    ]),
-  );
+  // The harness reads a separate Gateway process and does not receive its write receipts.
+  const entries = await listSessionEntriesAsync({
+    agentId,
+    env: runtimeEnv,
+    readConsistency: "latest",
+  });
+  return Object.fromEntries(entries.map(({ sessionKey, entry }) => [sessionKey, entry]));
 }
 
 async function readQaSessionTranscriptEvents(

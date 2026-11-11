@@ -430,12 +430,12 @@ describe("update status Node runtime findings", () => {
   );
 
   it.each([
-    { source: "gateway-service", version: "24.15.0", state: "admitted" },
+    { source: "gateway-service", version: "24.22.1", state: "admitted" },
     { source: "gateway-service", version: "26.0.0", state: "unsupported" },
   ])("reports $state $source Node $version", async ({ source, version, state }) => {
     vi.stubGlobal("process", {
       ...process,
-      versions: { ...process.versions, node: "26.8.1" },
+      versions: { ...process.versions, node: "26.12.1" },
     });
     service.readCommand.mockResolvedValue({
       programArguments: ["/fixture/node", "openclaw.mjs", "gateway"],
@@ -445,9 +445,6 @@ describe("update status Node runtime findings", () => {
       version,
       sqliteVersion: state === "unsupported" ? "3.50.2" : "3.53.0",
       nodeSharedSqlite: false,
-      ...(state === "admitted"
-        ? { note: "Node 24.15.0: unsupported version, capability check passed." }
-        : {}),
     });
     if (state === "unsupported") {
       await updateStatusCommand({ json: true });
@@ -466,8 +463,7 @@ describe("update status Node runtime findings", () => {
     }
     await updateStatusCommand({});
     if (state === "admitted") {
-      expect(runtime.log).toHaveBeenCalledWith(expect.stringContaining("capability check passed"));
-      expect(runtime.log).not.toHaveBeenCalledWith(undefined);
+      expect(runtime.log).not.toHaveBeenCalledWith(expect.stringContaining("nvm install 26"));
     } else {
       const output = runtime.log.mock.calls.map(([line]) => String(line)).join("\n");
       expect(output).toContain(version);
@@ -704,29 +700,36 @@ describe("update status abandoned-run reporting", () => {
     expect(() => listUpdateRuns({ limit: 1 })).toThrow();
   });
 
-  it("reports abandoned history read-only when its driver died", async () => {
-    const now = Date.now();
-    const lastActivity = now - ABANDONED_UPDATE_RUN_MS - 10;
-    const driver = readUpdateRunDriver();
-    if (!driver) {
-      throw new Error("Test process identity is unavailable");
-    }
-    vi.spyOn(Date, "now").mockReturnValue(lastActivity);
-    const created = createUpdateRun({
-      trigger: "control-ui",
-      before: { version: "2026.9.2" },
-      origin: {
-        driver: { ...driver, startIdentity: String(Number(driver.startIdentity) + 1) },
-      },
-    });
-    const recorded = recordUpdateRunPhase(created.runId, "staging");
-    vi.mocked(Date.now).mockReturnValue(now);
-    await updateStatusCommand({});
-    expect(getUpdateRun(created.runId)).toEqual(recorded);
-    const output = runtime.log.mock.calls.map(([line]) => String(line)).join("\n");
-    expect(output).not.toContain("update in progress:");
-    expect(output).toContain("Abandoned update detected;");
-    expect(output).toContain("openclaw update repair");
-    expect(output).not.toContain("update failed:");
-  });
+  it.each([undefined, "work"])(
+    "reports abandoned history read-only when its driver died (profile=%s)",
+    async (profile) => {
+      vi.stubEnv("OPENCLAW_PROFILE", profile);
+      const now = Date.now();
+      const lastActivity = now - ABANDONED_UPDATE_RUN_MS - 10;
+      const driver = readUpdateRunDriver();
+      if (!driver) {
+        throw new Error("Test process identity is unavailable");
+      }
+      vi.spyOn(Date, "now").mockReturnValue(lastActivity);
+      const created = createUpdateRun({
+        trigger: "control-ui",
+        before: { version: "2026.9.2" },
+        origin: {
+          driver: { ...driver, startIdentity: String(Number(driver.startIdentity) + 1) },
+        },
+      });
+      const recorded = recordUpdateRunPhase(created.runId, "staging");
+      vi.mocked(Date.now).mockReturnValue(now);
+      await updateStatusCommand({});
+      expect(getUpdateRun(created.runId)).toEqual(recorded);
+      const output = runtime.log.mock.calls.map(([line]) => String(line)).join("\n");
+      expect(output).not.toContain("update in progress:");
+      expect(output).toContain("Abandoned update detected;");
+      expect(output).toContain(
+        `Stop the Gateway first (openclaw${profile ? " --profile work" : ""} gateway stop)`,
+      );
+      expect(output).toContain(`openclaw${profile ? " --profile work" : ""} update repair`);
+      expect(output).not.toContain("update failed:");
+    },
+  );
 });

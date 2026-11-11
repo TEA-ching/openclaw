@@ -46,6 +46,7 @@ import {
   codexDynamicToolsFingerprint,
   codexLegacyDynamicToolsFingerprint,
 } from "./thread-fingerprints.js";
+import { createThreadLifecycleAppServerOptions } from "./thread-lifecycle-options.test-support.js";
 import {
   createLeasedCodexLifecycleHarness,
   createThreadRequestAppServerOptions as createAppServerOptions,
@@ -372,32 +373,12 @@ function createThreadLifecycleParams(
     modelId: "gpt-5.4-codex",
     model: createCodexTestModel("codex"),
     thinkLevel: "medium",
-    disableTools: true,
+    disableTools: false,
     timeoutMs: 5_000,
     authStorage: {} as never,
     authProfileStore: { version: 1, profiles: {} },
     modelRegistry: {} as never,
   } as EmbeddedRunAttemptParams;
-}
-
-function createThreadLifecycleAppServerOptions(): Parameters<
-  typeof startOrResumeThread
->[0]["appServer"] {
-  return {
-    start: {
-      transport: "stdio",
-      command: "codex",
-      args: ["app-server"],
-      headers: {},
-    },
-    codeModeOnly: false,
-    loopDetectionPreToolUseRelay: true,
-    requestTimeoutMs: 60_000,
-    approvalPolicy: "never",
-    approvalsReviewer: "user",
-    sandbox: "workspace-write",
-    connectionClass: "local-loopback",
-  };
 }
 
 function createProvisionalPluginThreadConfigProvider(appId: string) {
@@ -795,6 +776,7 @@ describe("Codex app-server native code mode config", () => {
         "features.code_mode": true,
         "features.code_mode_only": false,
         "features.goals": false,
+        "features.reasoning_effort_override": true,
         "tools.update_plan.enabled": false,
         "features.shell_tool": true,
         "features.apply_patch_streaming_events": true,
@@ -963,6 +945,7 @@ describe("Codex app-server turn params", () => {
           "features.code_mode": true,
           "features.code_mode_only": false,
           "features.goals": false,
+          "features.reasoning_effort_override": true,
           "tools.update_plan.enabled": false,
           "features.shell_tool": true,
           "features.apply_patch_streaming_events": true,
@@ -1921,6 +1904,8 @@ describe("Codex app-server supervised branch lifecycle", () => {
       appServer: createThreadLifecycleAppServerOptions(),
       nativeCodeModeEnabled: false,
       userMcpServersEnabled: false,
+      webSearchAllowed: false,
+      persistentWebSearchAllowed: false,
       hostSystemAgentActive: true,
     };
 

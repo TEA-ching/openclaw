@@ -36,8 +36,10 @@ import { resolveEnvironmentValue } from "./process-env.js";
 import { throwSqliteLifecycleErrors } from "./sqlite-lifecycle-errors.js";
 import { stopSupervisedPredecessorGateway } from "./update-candidate-predecessor-stop.js";
 import { UPDATE_RUN_ID_ENV } from "./update-control-plane-sentinel.js";
+import { createDoctorServiceInspectionBudget } from "./update-doctor-deadline.js";
 import {
   UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV,
+  createUpdateDoctorDatabaseWriteCapture,
   recordUpdateDoctorConfigWriteRefusal,
   writeUpdatePostInstallDoctorResult,
 } from "./update-doctor-result.js";
@@ -218,7 +220,6 @@ async function finalizeMigratedUpdate(): Promise<void> {
       ? { restartRunId: terminal.runId }
       : { terminalRunId: terminal.runId }),
     executorDelegation: "pid-start-v1",
-    automaticTriage: finalized.automaticTriage,
   };
   // Private response publication follows executor settlement and terminal history.
   await fs.writeFile(input.resultPath, JSON.stringify(response), { mode: 0o600 });
@@ -279,6 +280,7 @@ async function runDelegatedPostCore(input: UpdatePostCoreInput): Promise<void> {
 }
 
 async function runDelegatedDoctor(input: UpdateDoctorInput): Promise<void> {
+  const remaining = createDoctorServiceInspectionBudget(input.serviceInspectionDeadlineAtMs);
   const resultPath = process.env[UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV]?.trim();
   if (!resultPath || !input.executor) {
     throw new Error("Update Doctor requires its delegated executor and result path.");
@@ -326,12 +328,28 @@ async function runDelegatedDoctor(input: UpdateDoctorInput): Promise<void> {
       }
       const { runDoctorHealthFlow } = await import("../flows/doctor-health.js");
       assertCurrent();
+      remaining();
+      const databaseWriteCapture = createUpdateDoctorDatabaseWriteCapture(
+        input.databaseGenerations,
+        {
+          env: process.env,
+          root: input.root,
+          signal: new AbortController().signal,
+          assertCurrent,
+          warn: (message) => process.stderr.write(message + "\n"),
+        },
+      );
+      await databaseWriteCapture?.admit();
+      assertCurrent();
       await stopSupervisedPredecessorGateway(input, {
+        databaseWriteCapture,
         root: input.root,
         assertCurrent,
+        serviceInspectionBudget: remaining,
         warn: (message) => process.stderr.write(`${message}\n`),
       });
       assertCurrent();
+      const doctorBudget = remaining();
       await runDoctorHealthFlow(
         {
           ...defaultRuntime,
@@ -348,6 +366,7 @@ async function runDelegatedDoctor(input: UpdateDoctorInput): Promise<void> {
             : {}),
         },
         {
+          databaseWriteCapture,
           inputHash: input.configInputHash,
           assertCurrent,
           commandAuthority,
@@ -357,6 +376,8 @@ async function runDelegatedDoctor(input: UpdateDoctorInput): Promise<void> {
             ref: input.originalRecoveryCapture,
           },
           ...(input.databaseGenerations ? { databaseGenerations: input.databaseGenerations } : {}),
+          serviceInspectionDeadlineAtMs:
+            doctorBudget === undefined ? undefined : Date.now() + doctorBudget,
           ...(input.postCoreSchemaRepair === true
             ? { postCoreSchemaRepair: { runId: input.runId, assertCurrent } }
             : {}),
@@ -494,7 +515,6 @@ async function finalizeInput(
   let result;
   let exitCode = 0;
   let candidateStartAttempted = false;
-  let automaticTriage: MigratedUpdateFinalizationResult["automaticTriage"];
   try {
     // This worker already loaded the candidate; the local flag conveys no authority.
     result = await finishUpdate(
@@ -508,6 +528,7 @@ async function finalizeInput(
       },
       {
         candidateRuntime: true,
+        adoptedFinalization: true,
         onGatewayStartAttempted: () => {
           candidateStartAttempted = true;
         },
@@ -519,7 +540,6 @@ async function finalizeInput(
     }
     result = error.result;
     exitCode = error.exitCode;
-    automaticTriage = error.automaticTriage;
   } finally {
     await windowsRecovery?.complete(
       result?.status === "ok" ||
@@ -527,7 +547,7 @@ async function finalizeInput(
     );
   }
   executorFence.assertCurrent();
-  return { run, result, exitCode, automaticTriage, candidateStartAttempted };
+  return { run, result, exitCode, candidateStartAttempted };
 }
 
 void (async () => {

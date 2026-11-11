@@ -411,7 +411,9 @@ export function dispatchAgentRunFromGateway(params: {
         endedAt: terminalOutcome.endedAt ?? Date.now(),
         yielded: result?.meta?.yielded === true,
         terminalReply,
-        ...(terminalReply?.disposition === "visible" ? { replyText: terminalReply.text } : {}),
+        ...(terminalReply?.disposition === "visible"
+          ? { replyText: result?.meta?.finalAssistantVisibleText ?? terminalReply.text }
+          : {}),
         ...(receipt?.runId === params.runId && receipt.sourceReplyDelivered
           ? { sourceReplyDelivered: true as const }
           : {}),
@@ -478,7 +480,7 @@ export function dispatchAgentRunFromGateway(params: {
       const error = errorShapeFromError(ErrorCodes.UNAVAILABLE, cause);
       const renderedErr = error.message;
       const stopReason = aborted
-        ? resolveGatewayAgentAbortStopReason(params.abortController.signal)
+        ? resolveGatewayAgentAbortStopReason(params.abortController.signal, cause)
         : isAbortError(cause)
           ? "aborted"
           : undefined;

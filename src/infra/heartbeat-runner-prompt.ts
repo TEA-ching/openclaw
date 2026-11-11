@@ -8,7 +8,7 @@ import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { readCronScratchSnapshot } from "../cron/scratch-read.js";
-import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
+import { resolveCronJobsStorePathFromConfigAsync } from "../cron/store.js";
 import { channelRouteTargetsMatchExact } from "../plugin-sdk/channel-route.js";
 import { SESSION_CREATED_NOTICE_CONTEXT_PREFIX } from "../sessions/session-state-event-kinds.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
@@ -35,12 +35,14 @@ import {
   resolveHeartbeatSessionSelection,
 } from "./heartbeat-runner-session.js";
 import {
+  isTargetedUnscheduledWake,
   resolveHeartbeatWakePayloadFlags,
   type HeartbeatWakePayloadFlags,
 } from "./heartbeat-wake-policy.js";
 import {
   HEARTBEAT_SKIP_NO_PENDING_EVENT,
   type HeartbeatScheduledTask,
+  type HeartbeatWakeIntent,
   type HeartbeatWakeSource,
 } from "./heartbeat-wake.js";
 import { heartbeatExecRouteKey } from "./outbound/heartbeat-route-context.js";
@@ -125,15 +127,19 @@ export async function resolveHeartbeatPreflight(params: {
   sessionKey?: string;
   reason?: string;
   source?: HeartbeatWakeSource;
+  intent?: HeartbeatWakeIntent;
   scheduledEveryMs?: number;
   scheduledTasks?: readonly HeartbeatScheduledTask[];
 }): Promise<HeartbeatPreflight> {
   let monitorScratch: Awaited<ReturnType<typeof readCronScratchSnapshot>>;
   try {
-    monitorScratch = await readCronScratchSnapshot(resolveCronJobsStorePathFromConfig(params.cfg), {
-      kind: "heartbeat",
-      agentId: params.agentId,
-    });
+    monitorScratch = await readCronScratchSnapshot(
+      await resolveCronJobsStorePathFromConfigAsync(params.cfg),
+      {
+        kind: "heartbeat",
+        agentId: params.agentId,
+      },
+    );
   } catch (error) {
     log.warn(`heartbeat: scratch read failed: ${formatErrorMessage(error)}`);
   }
@@ -172,15 +178,17 @@ export async function resolveHeartbeatPreflight(params: {
         false,
       )
     : heartbeatSession;
+  // Targeted system events keep their queue even when execution uses an isolated session.
+  session.inspectsRunQueue ||=
+    (params.source === "manual" || params.source === "notifications-event") &&
+    isTargetedUnscheduledWake(params);
   const hasTaggedCronEvents = pendingEventEntries.some((event) =>
     event.contextKey?.startsWith("cron:"),
   );
-  // The selected queue follows isolated execution into reply admission; the base queue does not.
-  const shouldInspectWakePendingEvents = wakeFlags.isWakePayload && session.inspectsRunQueue;
   const shouldInspectPendingEvents =
     wakeFlags.isExecEventWake ||
     wakeFlags.isCronWake ||
-    shouldInspectWakePendingEvents ||
+    (wakeFlags.isWakePayload && session.inspectsRunQueue) ||
     hasTaggedCronEvents;
   const firstExec =
     !params.scheduledTasks?.length && shouldInspectPendingEvents

@@ -16,6 +16,7 @@ import {
   subagentRuns,
 } from "./subagent-registry-memory.js";
 import { publishSubagentRunChanges } from "./subagent-registry-publication.js";
+import { countActiveRunsForSessionFromRuns } from "./subagent-registry-queries.js";
 import {
   consumeFreshSubagentRuns,
   getSessionListLookup,
@@ -23,6 +24,7 @@ import {
   indexedSnapshotRows,
   getPersistedSubagentRunsSnapshot,
   loadPersistedSubagentRunsForRead,
+  mergeSelectedFullRuns,
   prepareSubagentRunsCache,
   readCompactSubagentRuns,
   rememberSubagentRunsSnapshot,
@@ -41,6 +43,7 @@ import {
 } from "./subagent-registry-read-snapshot.js";
 import { resolveControllerSessionKey } from "./subagent-registry-read-topology.js";
 import type { SubagentRunReadRecord } from "./subagent-registry-read.types.js";
+import { readAllSubagentRunsInWorker } from "./subagent-registry.store.read.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 const persistedSubagentRunsReadCache: SubagentRunsCache<SubagentRunRecord> = {
@@ -275,6 +278,28 @@ export function consumeFreshSubagentRegistryRows<T>(
   return consumeFreshSubagentRuns(persistedSubagentRunsReadCache, context, consume);
 }
 
+/** Registration shares the loaded registry; committed receipts keep retained generations current. */
+export async function prepareSubagentRegistrationRows(
+  childSessionKey: string,
+  selectedRunIds: readonly string[],
+  context: OpenClawStateWorkerContext,
+): Promise<() => ReadonlyMap<string, SubagentRunRecord>> {
+  const prepared = await prepareSubagentRunsCache(
+    persistedSubagentRunsReadCache,
+    readAllSubagentRunsInWorker,
+    context,
+  );
+  const runIds = new Set(selectedRunIds);
+  return () =>
+    mergeSelectedFullRuns(
+      persistedSubagentRunsReadCache,
+      subagentRuns,
+      prepared,
+      (entry) => runIds.has(entry.runId) || entry.childSessionKey.trim() === childSessionKey,
+      { context },
+    );
+}
+
 export function getSubagentRunsSnapshotForRead(
   inMemoryRuns: Map<string, SubagentRunRecord>,
 ): Map<string, SubagentRunRecord> {
@@ -387,6 +412,23 @@ export async function prepareSubagentRunsSnapshotForRunIds(
       });
     },
   };
+}
+
+/** Admission needs current raw owners, not newly projected session-list rows. */
+export function countActiveSubagentRunsForSession(
+  inMemoryRuns: Map<string, SubagentRunRecord>,
+  requesterSessionKey: string,
+  options?: { collect?: boolean; requesterAgentId?: string },
+): number {
+  const runs = new Map<string, SubagentRunReadRecord>(
+    shouldReadPersistedSubagentRuns()
+      ? loadPersistedSubagentRunsForRead(persistedSubagentSessionListRunsReadCache)
+      : undefined,
+  );
+  for (const [runId, entry] of inMemoryRuns) {
+    runs.set(runId, entry);
+  }
+  return countActiveRunsForSessionFromRuns(runs, requesterSessionKey, options);
 }
 
 export function getSubagentSessionListRunsSnapshotForRead(

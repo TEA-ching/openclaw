@@ -34,6 +34,7 @@ async function buildCliTurnAppendContext(
     runtimeContextFragments?: RunCliAgentParams["runtimeContextFragments"];
     sessionTarget?: RunCliAgentParams["sessionTarget"];
     thinkLevel?: ThinkLevel;
+    nativeDelegationTools?: readonly string[];
     requesterProfileId?: string;
     configuredTimezone?: string;
   },
@@ -60,6 +61,7 @@ async function buildCliTurnAppendContext(
     buildProactiveSubagentOrchestrationSection({
       enabled: params.thinkLevel === "ultra",
       hasSessionsSpawn: params.capabilityToolNames.has("sessions_spawn"),
+      nativeDelegationTools: params.nativeDelegationTools,
     }).join("\n"),
     interruptedInputContext
       ? labelRuntimeContextText(projectRuntimeContextFragments([interruptedInputContext]))
@@ -202,14 +204,17 @@ export async function prepareCliSystemPrompt(
   });
 }
 
-function prependCliSessionDriftUserContext(
+function prependCliSessionResumeUserContext(
   context: RunCliAgentParams["currentInboundContext"],
   reusableCliSession: CliReusableSession,
 ): RunCliAgentParams["currentInboundContext"] {
-  if (reusableCliSession.mode !== "reuse-with-drift") {
+  const note =
+    reusableCliSession.mode === "reuse-with-drift"
+      ? buildCliSessionDriftNote(reusableCliSession.drift.reasons)
+      : undefined;
+  if (!note) {
     return context;
   }
-  const note = buildCliSessionDriftNote(reusableCliSession.drift.reasons);
   if (!context) {
     return { text: note };
   }
@@ -223,9 +228,11 @@ function prependCliSessionDriftUserContext(
 export function createCliCurrentPromptRenderer(
   params: Pick<RunCliAgentParams, "currentInboundContext" | "inputProvenance">,
   reusableCliSession: CliReusableSession,
-  inlineContext?: string,
+  notes: {
+    sessionGapContext?: string;
+  } = {},
 ) {
-  const context = prependCliSessionDriftUserContext(
+  const context = prependCliSessionResumeUserContext(
     params.currentInboundContext,
     reusableCliSession,
   );
@@ -235,6 +242,6 @@ export function createCliCurrentPromptRenderer(
         buildCurrentInboundPrompt({ context, prompt, preferResumableText }),
         params.inputProvenance,
       ),
-      { prependContext: inlineContext },
+      { prependContext: notes.sessionGapContext },
     );
 }

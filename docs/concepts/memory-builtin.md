@@ -158,8 +158,12 @@ which support selective deletion after promotion. For coverage and limits, see
   See [provider selection](/reference/memory-config#provider-selection).
 - **Reindex on demand:** `openclaw memory index --force --agent <id>`
 
-When Memory Core owns the memory slot, its Gateway service schedules each configured
-agent's memory manager to open at startup and after plugin replacement. This
+When Memory Core owns the memory slot, a fresh Gateway start opens an agent's
+memory manager on its first memory search, flush, or turn that needs it, so an
+idle Gateway does not start index and transcript workers for every agent. Once a
+manager has run in the Gateway process, the Memory Core service schedules each
+configured agent's memory manager to open again whenever the service restarts,
+including after plugin replacement and memory or agent configuration changes. This
 background activation waits for that agent's database preparation, including
 after an upgrade or restart, without delaying Gateway readiness. Failed
 preparation reports the database's repair guidance. Watched file changes can
@@ -190,8 +194,9 @@ current bounded group and resumes after the next quiet period.
 
 Failed session passes, including handled embedding-provider fallback failures,
 retain their pending work and retry after 1, 5, and 15 minutes, subject to the same
-idle gate. After those automatic retries, another transcript change or turn
-activity can start a new retry series. A running turn can extend either delay.
+idle gate. The last automatic retry also waits for any full-rebuild cooldown to
+end. After those automatic retries, another transcript change or turn activity
+can start a new retry series. A running turn can extend either delay.
 
 New session content becomes searchable after that delay. The current turn already
 has its own content in context; `memory_search` does not force a transcript flush.
@@ -237,9 +242,13 @@ bounded batches, yielding between batches while preserving the existing cache ca
 
 Full reindexes build a replacement in a temporary database and publish the
 memory tables atomically. Concurrent searches and status reads keep using the
-published index; a failed rebuild leaves that index intact. The embedding cache
-is bounded before publication, not after copying excess entries into the
-shared database.
+published index; a failed rebuild leaves that index intact. Full rebuild cache
+writes may temporarily use up to twice the configured row cap so early misses
+do not evict cached vectors needed by later files. If the rebuild writes cache
+entries, success or abort recounts and trims the cache to its normal cap.
+All-cache-hit rebuilds and preflight failures leave the cache untouched.
+Incremental writes retain their normal pre-insertion cap. A process crash can
+leave temporary excess until the next cache write enforces its capacity budget.
 
 Other agent state, including sessions and transcripts in the same database,
 is retained. Use the [memory index command](/cli/memory#memory-index) for

@@ -239,6 +239,43 @@ function gateFirstCertificationPerTask() {
   };
 }
 
+it("preserves native lock classification after canonical worker cleanup", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const { agentIds, cfg } = seedFleet(state.env);
+    const agentId = agentIds[0]!;
+    const pathname = openOpenClawAgentDatabase({ agentId, env: state.env }).path;
+    closeOpenClawAgentDatabasesForTest(state.env.OPENCLAW_STATE_DIR);
+    const preload = state.path("canonical-lock.cjs");
+    writeFileSync(
+      preload,
+      `
+      const { DatabaseSync } = require('node:sqlite');
+      const exec = DatabaseSync.prototype.exec;
+      DatabaseSync.prototype.exec = function(sql) {
+        if (this.location() === ${JSON.stringify(pathname)} && /^\\s*BEGIN\\b/i.test(sql)) {
+          throw Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+        }
+        return exec.call(this, sql);
+      };
+      `,
+    );
+    observer.beforeCreate = (_filename, options) => ({
+      ...options,
+      execArgv: [...(options.execArgv ?? []), "--require", preload],
+    });
+    await expect(
+      runSessionStartupMigration({
+        cfg,
+        env: state.env,
+        agentIds: new Set([agentId]),
+        log: { info: vi.fn(), warn: vi.fn() },
+      }),
+    ).rejects.toMatchObject({ errcode: 5 });
+    expect([...observer.workers].every((worker) => worker.threadId === -1)).toBe(true);
+    expect(() => assertNoOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).not.toThrow();
+  });
+});
+
 it("reuses two workers while closing each database task before runtime handoff", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
     const { agentIds, cfg } = seedFleet(state.env);
@@ -343,10 +380,66 @@ it("reuses two workers while closing each database task before runtime handoff",
   });
 });
 
+it("drains sibling startup work and the worker pool before closing cold database handles", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const { agentIds, cfg } = seedFleet(state.env);
+    cfg.session = { mainKey: "primary" };
+    const startupAgents = agentIds.slice(0, 3);
+    const gate = gateFirstCertificationPerTask();
+    const closeDatabase = lifecycle.closeOpenClawAgentDatabaseByPathAsync;
+    const coldCloses: Array<{ path: string; workersExited: boolean }> = [];
+    vi.spyOn(lifecycle, "closeOpenClawAgentDatabaseByPathAsync").mockImplementation((...args) => {
+      coldCloses.push({
+        path: args[0],
+        workersExited: [...observer.workers].every((worker) => worker.threadId === -1),
+      });
+      return closeDatabase(...args);
+    });
+    const startup = runSessionStartupMigration({
+      cfg,
+      env: state.env,
+      agentIds: new Set(startupAgents),
+      log: { info: vi.fn(), warn: vi.fn() },
+    });
+    void startup.catch(() => {});
+    try {
+      await gate.waitFor("certification", 2, startup);
+      gate.held.find(({ agentId }) => agentId === startupAgents[0])!.release();
+      await gate.waitFor("release", 1, startup);
+      gate.heldReleases[0]!.release();
+      // The third task starts only after the first completes; its sibling is still held.
+      await gate.waitFor("certification", 2, startup);
+      expect(gate.tasks).toHaveLength(3);
+      expect(coldCloses).toEqual([]);
+
+      gate.releaseAll();
+      await startup;
+      expect(coldCloses).toHaveLength(3);
+      expect(coldCloses.every(({ workersExited }) => workersExited)).toBe(true);
+      expect(coldCloses.map(({ path }) => path).toSorted()).toEqual(
+        startupAgents
+          .map((agentId) => resolveOpenClawAgentSqlitePath({ agentId, env: state.env }))
+          .toSorted(),
+      );
+      expect(() => assertNoOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).not.toThrow();
+    } finally {
+      gate.releaseAll();
+      await startup.catch(() => {});
+    }
+  });
+});
+
 it("stops fleet admission on refusal and drains an already-started sibling before startup rejects", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
     const { agentIds, cfg } = seedFleet(state.env, true);
     const gate = gateFirstCertificationPerTask();
+    const closeDatabase = lifecycle.closeOpenClawAgentDatabaseByPathAsync;
+    const close = vi
+      .spyOn(lifecycle, "closeOpenClawAgentDatabaseByPathAsync")
+      .mockImplementation((...args) => {
+        expect([...observer.workers].every((worker) => worker.threadId === -1)).toBe(true);
+        return closeDatabase(...args);
+      });
     const consumed: string[] = [];
     let settled = false;
     const startup = runSessionStartupMigration({
@@ -381,6 +474,7 @@ it("stops fleet admission on refusal and drains an already-started sibling befor
       expect(gate.tasks).toHaveLength(2);
       expect(gate.held.map(({ agentId }) => agentId)).toEqual([agentIds[1]]);
       expect(consumed).toEqual([]);
+      expect(close).not.toHaveBeenCalled();
 
       gate.releaseAll();
       expect(await outcome).toEqual(
@@ -390,6 +484,7 @@ it("stops fleet admission on refusal and drains an already-started sibling befor
       );
       expect(gate.tasks).toHaveLength(2);
       expect(consumed).toEqual([agentIds[1]]);
+      expect(close).toHaveBeenCalledOnce();
       expect([...observer.workers].every((worker) => worker.threadId === -1)).toBe(true);
       expect(() => assertNoOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).not.toThrow();
     } finally {

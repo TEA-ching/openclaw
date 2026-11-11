@@ -1,11 +1,14 @@
 import type { Worker } from "node:worker_threads";
 import type { OpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
+import type {
+  captureStateDatabaseAccess,
+  StateDatabaseSchemaLease,
+} from "./gateway-state-owner.js";
 import type { RuntimeWorkerGeneration } from "./runtime-worker-generation.js";
 import type {
   SqliteWorkerRequest,
   SqliteWorkerReply,
   SqliteWorkerCloseReceipt,
-  SqliteWorkerEphemeralTarget,
 } from "./sqlite-worker-contract.js";
 import type {
   SqliteWorkerAdmissionFactory,
@@ -37,6 +40,7 @@ export type Job = {
   observation: WorkerRequestObservation;
   signal?: AbortSignal;
   maintenanceScope?: OpenClawDatabaseMaintenanceScope;
+  cleanupAccess?: Pick<StateDatabaseSchemaLease, "assertDatabaseAccess">;
   createAdmission?: SqliteWorkerAdmissionFactory;
   operationAdmission?: { admission: SqliteWorkerOperationAdmission; releaseService(): void };
   settleNative?: (settlement: SqliteWorkerOperationSettlement) => void;
@@ -59,7 +63,6 @@ export type Job = {
 };
 export type Slot = {
   custody: SqliteWorkerSlotCustody;
-  ephemeral?: true;
   runtimeGeneration?: RuntimeWorkerGeneration;
   borrowedGenerationSlot?: true;
   worker: Worker;
@@ -74,13 +77,13 @@ export type Slot = {
   pendingOpens: number;
 };
 export type Actor = {
-  target?: SqliteWorkerEphemeralTarget;
   nativeLostObservers?: Set<(reason: Error) => void>;
   runtimeGeneration?: RuntimeWorkerGeneration;
   nativeStopped: Promise<void>;
   markNativeStopped(): void;
   closeReceipt?: SqliteWorkerCloseReceipt;
   stateDatabasePath?: string;
+  stateAccess: ReturnType<typeof captureStateDatabaseAccess>;
   id: number;
   key: string;
   databasePath: string;
@@ -112,6 +115,7 @@ export type OperationScope = {
 export type EnqueueOptions = {
   requestClass?: string;
   maintenanceScope?: OpenClawDatabaseMaintenanceScope;
+  cleanupAccess?: Pick<StateDatabaseSchemaLease, "assertDatabaseAccess">;
   createAdmission?: SqliteWorkerAdmissionFactory;
   signal?: AbortSignal;
   dispatchState?: DispatchState;
@@ -132,7 +136,6 @@ export type StoreClient = {
 };
 
 export type SqliteWorkerStoreOptions = {
-  target?: SqliteWorkerEphemeralTarget;
   runtimeGeneration?: RuntimeWorkerGeneration;
   moduleUrl: URL;
   databasePath: string;
@@ -142,15 +145,15 @@ export type SqliteWorkerStoreOptions = {
 };
 
 export type PreparedSqliteWorkerOpen = {
-  target?: SqliteWorkerEphemeralTarget;
   onNativeLost?: (reason: Error) => void;
   signal?: AbortSignal;
-  preparation?: Buffer;
+  preparation?: Buffer<ArrayBuffer>;
   runtimeGeneration?: RuntimeWorkerGeneration;
   carrierUrl: URL;
   expectedIdentity?: string;
   createOpenAdmission?: SqliteWorkerAdmissionFactory;
   maintenanceScope?: OpenClawDatabaseMaintenanceScope;
+  cleanupAccess?: Pick<StateDatabaseSchemaLease, "assertDatabaseAccess">;
   retainCleanup?: (cleanup: SqliteWorkerAdmissionCleanup) => void;
   onNativeStopped?: (
     stopped: Promise<void>,
@@ -162,7 +165,7 @@ export type PreparedSqliteWorkerOpen = {
   assertCurrent?: () => void;
   moduleUrl: URL;
   databasePath: string;
-  input: Buffer;
+  input: Buffer<ArrayBuffer>;
   existingOnly: boolean;
   stateContext?: SqliteWorkerStateContext;
 };
@@ -176,6 +179,7 @@ export type SqliteWorkerAdmissionCleanup = {
 export type SqliteWorkerOpenCustody = Pick<
   PreparedSqliteWorkerOpen,
   | "maintenanceScope"
+  | "cleanupAccess"
   | "retainCleanup"
   | "createAdmission"
   | "stateDatabasePath"

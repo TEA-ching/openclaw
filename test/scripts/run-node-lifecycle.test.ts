@@ -264,7 +264,7 @@ process.kill(process.pid, "SIGKILL");
 );
 
 it.runIf(process.platform !== "win32")(
-  "stops gateway watch when a compile-cache respawn child dies from a signal",
+  "preserves gateway watch signal loss across compile-cache process replacement",
   async ({ signal }) => {
     const nodeArgs = resolveVitestNodeArgs();
     await withShimFixture("scripts/run-node.mjs", async (fixture) => {
@@ -409,7 +409,7 @@ else process.exit(outcome);
             signal,
             "Gateway watch exited before the compile-cache child was ready",
           );
-          expect(childPid, "the launcher must respawn before the signal is sent").not.toBe(
+          expect(childPid, "process replacement preserves the supervised Gateway PID").toBe(
             launcherPid,
           );
           expect(
@@ -453,6 +453,8 @@ it.runIf(process.platform !== "win32").for(["runner", "watch"] as const)(
     const sourceRoot = process.cwd();
     const hook = fileURLToPath(new URL("./fixtures/native-runner-signals.mjs", import.meta.url));
     mkdirSync(path.join(checkout, "src"), { recursive: true });
+    // This standalone checkout must not borrow its temporary parent's artifact lock.
+    mkdirSync(path.join(checkout, ".git"));
     mkdirSync(path.join(root, "home"));
     writeFileSync(
       path.join(root, "receipts.mjs"),

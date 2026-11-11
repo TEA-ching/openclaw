@@ -4,7 +4,6 @@ import * as stateWorker from "../../../state/openclaw-state-worker-store.js";
 import { createSubagentRunRecord } from "../../subagent-test-fixtures.test-helpers.js";
 import { mutateSubagentRuns } from "./subagent-registry-persistence.js";
 import { createSubagentRegistrySweeper } from "./subagent-registry-sweeper.js";
-import { subagentRunRowVersion } from "./subagent-registry.store.row.js";
 import type { SubagentRegistryWrite } from "./subagent-registry.store.types.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { isSameSubagentRunOwner } from "./subagent-run-generation.js";
@@ -42,8 +41,9 @@ export function createArchivedSubagentSweeperRun(
 export function createSubagentSweeperHarness(
   runtime: { current?: GatewayRecoveryRuntime },
   entry = createSubagentSweeperRun(),
+  suppliedRuns?: Map<string, SubagentRunRecord>,
 ) {
-  const runs = new Map([[entry.runId, entry]]);
+  const runs = suppliedRuns ?? new Map([[entry.runId, entry]]);
   const execute = stateWorker.runOpenClawStateWorkerOperation;
   const worker = vi
     .spyOn(stateWorker, "runOpenClawStateWorkerOperation")
@@ -59,10 +59,6 @@ export function createSubagentSweeperHarness(
           return {
             writeId: write.writeId,
             notices: [],
-            versions: new Map([
-              ...write.values.map((row) => [row.run_id, subagentRunRowVersion(row)] as const),
-              ...write.deleteRunIds.map((id) => [id, null] as const),
-            ]),
           } as never;
         },
       });
@@ -94,7 +90,7 @@ export function createSubagentSweeperHarness(
           return { value: undefined };
         }
         const draft = structuredClone(current);
-        params.discardDelivery?.(draft);
+        params.finalizeDelivery?.(draft);
         return { value: undefined, postimages: new Map([[draft.runId, draft]]) };
       },
       { runs },
@@ -109,12 +105,13 @@ export function createSubagentSweeperHarness(
   const resumeRequesterSettleWake = vi.fn();
   const warn = vi.fn();
   const startSubagentAnnounceCleanupFlow = vi.fn(() => true);
+  const sweepPendingLifecycle = vi.fn();
   const sweeper = createSubagentRegistrySweeper({
     runs,
     resumedRuns: new Set(),
     clearPendingLifecycleError: vi.fn(),
     clearPendingLifecycleTimeout: vi.fn(),
-    sweepPendingLifecycle: vi.fn(),
+    sweepPendingLifecycle,
     completeSubagentRunWithRecovery,
     getGatewayRecoveryRuntime: () => runtime.current,
     finalizeInterruptedSubagentRun,
@@ -153,6 +150,7 @@ export function createSubagentSweeperHarness(
   return {
     entry,
     runs,
+    sweepPendingLifecycle,
     callGateway,
     completeCleanupBookkeeping,
     completeSubagentRunWithRecovery,

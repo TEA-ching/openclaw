@@ -55,7 +55,7 @@ describe("auditGatewayServiceConfig runtime", () => {
     async (sqliteSelectionError) => {
       const sqliteVersion = sqliteSelectionError ? null : "3.51.2";
       resolveBunRuntimeInfoMock.mockResolvedValue({
-        version: sqliteSelectionError ? "1.4.2" : "1.4.0",
+        version: sqliteSelectionError ? "1.4.4" : "1.4.0",
         sqliteVersion,
         sqliteProbe: {
           available: !sqliteSelectionError,
@@ -72,7 +72,9 @@ describe("auditGatewayServiceConfig runtime", () => {
       expect(result.issues).toContainEqual(
         expect.objectContaining({
           code: codes.gatewayRuntimeBun,
-          message: expect.stringContaining("Bun 1.4+ with WAL-reset-safe node:sqlite is required"),
+          message: expect.stringContaining(
+            "Bun 1.4.4+ with WAL-reset-safe node:sqlite is required",
+          ),
           detail: sqliteSelectionError
             ? `/opt/homebrew/bin/bun: ${sqliteSelectionError}`
             : "/opt/homebrew/bin/bun",
@@ -97,7 +99,7 @@ describe("auditGatewayServiceConfig runtime", () => {
 
   it("flags a supported Node version whose SQLite decoder truncates TEXT", async () => {
     const capabilityError =
-      "Node 26.8.1: node:sqlite truncates TEXT at embedded NUL (nodejs/node#61954); use 24.16+/26.1+ or a build with the fix";
+      "Node 26.8.1: node:sqlite truncates TEXT at embedded NUL (nodejs/node#61954); use 24.22.1+/26.12.1+ or a build with the fix";
     resolveNodeRuntimeInfoMock.mockResolvedValue({
       version: "26.8.1",
       sqliteVersion: "3.53.4",
@@ -117,18 +119,16 @@ describe("auditGatewayServiceConfig runtime", () => {
     expect(needsNodeRuntimeMigration(result.issues)).toBe(true);
   });
 
-  it("reports a capable vendor Node as a note without requesting migration", async () => {
-    const note = "Node 24.15.0: unsupported version, capability check passed.";
+  it("reports a supported Node without a note or migration request", async () => {
     resolveNodeRuntimeInfoMock.mockResolvedValue({
-      version: "24.15.0",
+      version: "26.12.1",
       sqliteVersion: "3.53.4",
       sqliteProbe: { available: true, version: "3.53.4", text: true, blob: true, json: true },
       nodeSharedSqlite: false,
       status: "supported",
-      note,
     });
     const result = await audit();
-    expect(result.runtimeNote).toBe(note);
+    expect(result.runtimeNote).toBeUndefined();
     expect(hasIssue(result, codes.gatewayRuntimeNode)).toBe(false);
     expect(needsNodeRuntimeMigration(result.issues)).toBe(false);
   });

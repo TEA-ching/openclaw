@@ -147,6 +147,7 @@ export async function tryInstallShellCompletion(opts: {
 export async function maybeRestartService(params: {
   originalManagedServiceRuntime?: OriginalManagedServiceRuntime;
   shouldRestart: boolean;
+  observePackageReplacement?: boolean;
   result: UpdateRunResult;
   opts: UpdateCommandOptions;
   refreshServiceEnv: boolean;
@@ -444,19 +445,28 @@ export async function maybeRestartService(params: {
     return verification.ok ? ("ok" as const) : undefined;
   };
 
+  const expectedIdentity = activation.expectedGatewayIdentity ?? activation.result.after;
   if (!activation.shouldRestart) {
     if (!activation.opts.json) {
-      defaultRuntime.log("");
-      defaultRuntime.log(theme.muted("Gateway: restart skipped (--no-restart)."));
-      const doctor =
-        activation.result.mode === "npm" || activation.result.mode === "pnpm"
-          ? `\`${formatCliCommand("openclaw doctor", activation.serviceEnv)}\`, then `
-          : "";
-      defaultRuntime.log(
-        theme.muted(
-          `Tip: Run ${doctor}\`${formatCliCommand("openclaw gateway restart", activation.serviceEnv)}\` to apply updates to a running gateway.`,
-        ),
-      );
+      defaultRuntime.log(theme.muted("Gateway: updater restart skipped (--no-restart)."));
+    }
+    if (isPackageUpdate && activation.observePackageReplacement) {
+      try {
+        await verifyUpdatedGateway({
+          ...activation,
+          purpose: "package-replacement",
+          expectedVersion: normalizeOptionalString(expectedIdentity?.version),
+          expectedBuildId: normalizeOptionalString(expectedIdentity?.buildId),
+          waitForStartup: false,
+        });
+      } catch (error) {
+        assertRestartFailureCurrent(error);
+        recordServiceReconciliationWarning(
+          activation.result,
+          activation.serviceEnv,
+          `Package update installed; Gateway observation unavailable with --no-restart: ${formatErrorMessage(error)}. Run openclaw gateway status --deep after startup completes.`,
+        );
+      }
     }
     return "ok";
   }
@@ -475,7 +485,6 @@ export async function maybeRestartService(params: {
   }
 
   try {
-    const expectedIdentity = activation.expectedGatewayIdentity ?? activation.result.after;
     let expectedGatewayVersion = normalizeOptionalString(expectedIdentity?.version);
     const expectedGatewayBuildId = normalizeOptionalString(expectedIdentity?.buildId);
     const canVerifyUpdatedGatewayByVersion =
@@ -683,12 +692,8 @@ export async function maybeRestartService(params: {
       // The installed CLI owns restart retries; observe its final health result
       // without another native mutation.
       const healthy = await verifyRestartedGateway(
-        normalizeOptionalString(
-          (activation.expectedGatewayIdentity ?? activation.result.after)?.version,
-        ),
-        normalizeOptionalString(
-          (activation.expectedGatewayIdentity ?? activation.result.after)?.buildId,
-        ),
+        normalizeOptionalString(expectedIdentity?.version),
+        normalizeOptionalString(expectedIdentity?.buildId),
         { requireRunningService: true, recoverHealth: false },
       );
       return healthy ?? (await failed("restart-health-failed"));

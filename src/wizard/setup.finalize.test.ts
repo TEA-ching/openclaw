@@ -181,14 +181,6 @@ vi.mock("../commands/gateway-install-token.js", () => ({
   resolveGatewayInstallToken,
 }));
 
-vi.mock("../commands/daemon-runtime.js", () => ({
-  DEFAULT_GATEWAY_DAEMON_RUNTIME: "node",
-  GATEWAY_DAEMON_RUNTIME_OPTIONS: [
-    { value: "node", label: "Node" },
-    { value: "bun", label: "Bun 1.4+" },
-  ],
-}));
-
 vi.mock("../commands/health-format.js", () => ({
   formatHealthCheckFailure: vi.fn(() => "health failed"),
 }));
@@ -819,13 +811,13 @@ describe("finalizeSetupWizard", () => {
       typeof import("../commands/daemon-install-helpers.js")
     >("../commands/daemon-install-helpers.js");
     const bunVersion = Object.getOwnPropertyDescriptor(process.versions, "bun");
-    Object.defineProperty(process.versions, "bun", { configurable: true, value: "1.4.2" });
+    Object.defineProperty(process.versions, "bun", { configurable: true, value: "1.4.4" });
     const discoverNode = vi
       .spyOn(runtimePaths, "resolvePreferredNodePath")
       .mockResolvedValue(undefined);
     const probeBun = vi.spyOn(runtimePaths, "resolveBunRuntimeInfo").mockResolvedValue({
       status: "supported",
-      version: "1.4.2",
+      version: "1.4.4",
       sqliteVersion: "3.53.4",
       sqliteProbe: { available: true, version: "3.53.4", text: true, blob: true, json: true },
       nodeSharedSqlite: false,
@@ -987,29 +979,44 @@ describe("finalizeSetupWizard", () => {
     },
   );
 
-  it("reports gateway installation failure without waiting for impossible health", async () => {
-    gatewayServiceInstall.mockRejectedValueOnce(new Error("service install exploded"));
-    const prompter = createLaterPrompter();
-    const runtime = createRuntime();
-    await finalize("advanced", {
-      opts: { installDaemon: true, skipHealth: false },
-      prompter,
-      runtime,
-    });
+  it.each(["install", "restart"] as const)(
+    "reports gateway %s failure with recovery guidance instead of success",
+    async (action) => {
+      gatewayServiceIsLoaded.mockResolvedValue(action === "restart");
+      const error = `service ${action} exploded`;
+      (action === "restart" ? gatewayServiceRestart : gatewayServiceInstall).mockRejectedValueOnce(
+        new Error(error),
+      );
+      const progressStop = vi.fn();
+      const prompter = buildWizardPrompter(
+        {
+          progress: () => ({ update: vi.fn(), stop: progressStop }),
+        },
+        { defaultSelect: "restart" },
+      );
+      const runtime = createRuntime();
+      await finalize("advanced", {
+        opts: { installDaemon: true, skipHealth: false },
+        prompter,
+        runtime,
+      });
 
-    expect(waitForGatewayReachable).not.toHaveBeenCalled();
-    expect(probeGatewayReachable).toHaveBeenCalledOnce();
-    expect(runtime.error).toHaveBeenCalledWith("health failed");
-    expectNoteContains(prompter, "service install exploded", "Gateway");
-    expectNoteContains(prompter, "Gateway: not detected (offline)", "Control UI");
-    expect(prompter.outro).toHaveBeenCalledWith(
-      expect.stringContaining("managed Mock Platform Service setup failed"),
-    );
-    expectNoteContains(prompter, "openclaw gateway status --deep", "Gateway");
-    expectNoteContains(prompter, "openclaw gateway install --force", "Gateway");
-    expectNoteNotContains(prompter, "openclaw gateway run");
-    expectNoteNotContains(prompter, "openclaw gateway restart");
-  });
+      expect(progressStop).not.toHaveBeenCalledWith("Gateway service restarted.");
+      expect(progressStop).not.toHaveBeenCalledWith("Gateway service installed.");
+      expect(waitForGatewayReachable).not.toHaveBeenCalled();
+      expect(probeGatewayReachable).toHaveBeenCalledOnce();
+      expect(runtime.error).toHaveBeenCalledWith("health failed");
+      expectNoteContains(prompter, error, "Gateway");
+      expectNoteContains(prompter, "Gateway: not detected (offline)", "Control UI");
+      expect(prompter.outro).toHaveBeenCalledWith(
+        expect.stringContaining("managed Mock Platform Service setup failed"),
+      );
+      expectNoteContains(prompter, "openclaw gateway status --deep", "Gateway");
+      expectNoteContains(prompter, "openclaw gateway install --force", "Gateway");
+      expectNoteNotContains(prompter, "openclaw gateway run");
+      expectNoteNotContains(prompter, "openclaw gateway restart");
+    },
+  );
 
   it("keeps managed readiness timeout recovery on the canonical service path", async () => {
     const detail = "gateway readiness timed out";
@@ -1308,7 +1315,7 @@ describe("finalizeSetupWizard", () => {
     "reinstalls recorded Bun through $flow with choice=$choice",
     async ({ flow, choice }) => {
       const recordedPath = "/opt/recorded/bin/bun";
-      runExec.mockResolvedValue(createRuntimeProbeResult("1.4.2"));
+      runExec.mockResolvedValue(createRuntimeProbeResult("1.4.4"));
       gatewayServiceIsLoaded.mockResolvedValue(true);
       gatewayServiceReadCommand.mockResolvedValue({
         programArguments: [recordedPath, "/app/openclaw.mjs", "gateway"],

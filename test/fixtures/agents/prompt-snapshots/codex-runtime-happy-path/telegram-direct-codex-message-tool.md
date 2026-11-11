@@ -69,6 +69,7 @@
     },
     "features.code_mode_only": false,
     "features.goals": false,
+    "features.reasoning_effort_override": true,
     "features.shell_tool": true,
     "features.standalone_web_search": false,
     "project_doc_max_bytes": 131072,
@@ -94,6 +95,7 @@
     "tts",
     "web_fetch",
     "web_search",
+    "heartbeat_respond",
     "sessions_yield"
   ],
   "experimentalRawEvents": true,
@@ -116,6 +118,7 @@
     "features.code_mode": true,
     "features.code_mode_only": false,
     "features.goals": false,
+    "features.reasoning_effort_override": true,
     "features.shell_tool": true,
     "features.standalone_web_search": false,
     "project_doc_max_bytes": 131072,
@@ -256,8 +259,8 @@ This is the deterministic model-bound layer stack OpenClaw can snapshot for the 
     "roughTokens": 0
   },
   "dynamicToolsJson": {
-    "chars": 71753,
-    "roughTokens": 17939
+    "chars": 74699,
+    "roughTokens": 18675
   },
   "openClawDeveloperInstructions": {
     "chars": 3194,
@@ -272,8 +275,8 @@ This is the deterministic model-bound layer stack OpenClaw can snapshot for the 
     "roughTokens": 6893
   },
   "totalWithDynamicToolsJson": {
-    "chars": 99325,
-    "roughTokens": 24832
+    "chars": 102271,
+    "roughTokens": 25568
   },
   "userInputText": {
     "chars": 879,
@@ -602,6 +605,7 @@ Full JSON: `codex-dynamic-tools.telegram-direct.json`
   "tts",
   "web_fetch",
   "web_search",
+  "heartbeat_respond",
   "sessions_yield"
 ]
 ```
@@ -752,6 +756,45 @@ Full JSON: `codex-dynamic-tools.telegram-direct.json`
       "type": "object"
     },
     "name": "message",
+    "type": "function"
+  },
+  {
+    "description": "Accept heartbeat result for post-turn handling. `notify=false` no visible send. `notify=true` needs concise notificationText. Scratch is monitor prose only.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "nextCheck": {
+          "type": "string"
+        },
+        "notificationText": {
+          "type": "string"
+        },
+        "notify": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": ["no_change", "progress", "done", "blocked", "needs_attention"],
+          "type": "string"
+        },
+        "priority": {
+          "enum": ["low", "normal", "high"],
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "scratch": {
+          "description": "Complete replacement for heartbeat monitor prose; not a recurring schedule.",
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": ["outcome", "notify", "summary"],
+      "type": "object"
+    },
+    "name": "heartbeat_respond",
     "type": "function"
   }
 ]

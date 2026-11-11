@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 
 const runtime = vi.hoisted(() => ({
@@ -6,6 +6,7 @@ const runtime = vi.hoisted(() => ({
   runWorkerProcess: vi.fn<() => Promise<void>>(),
   loadWorkerTurnRuntime: vi.fn<() => Promise<void>>(),
   flushCompileCache: vi.fn<() => void>(),
+  releaseProcessStdin: vi.fn<() => void>(),
 }));
 
 vi.mock("node:module", async (importOriginal) => ({
@@ -18,13 +19,16 @@ vi.mock("../infra/runtime-guard.js", () => ({
   assertSupportedRuntime: runtime.assertSupportedRuntime,
 }));
 vi.mock("./worker-process.js", () => ({ runWorkerProcess: runtime.runWorkerProcess }));
+// mock-isolation: the real helper would inspect and destroy the test runner's own stdin.
+vi.mock("../process/release-stdin.js", () => ({
+  releaseProcessStdin: runtime.releaseProcessStdin,
+}));
 
 const originalArgv = process.argv;
 const originalExitCode = process.exitCode;
-const originalConnected = process.connected;
+const originalConnected = Object.getOwnPropertyDescriptor(process, "connected");
 const originalDisconnect = Object.getOwnPropertyDescriptor(process, "disconnect");
 const disconnect = vi.fn();
-let destroyStdin: MockInstance<typeof process.stdin.destroy>;
 
 beforeEach(() => {
   // Each case enters the executable again; the entry deliberately exports no runner.
@@ -34,16 +38,20 @@ beforeEach(() => {
   runtime.loadWorkerTurnRuntime.mockReset().mockResolvedValue();
   runtime.flushCompileCache.mockReset();
   process.exitCode = undefined;
-  process.connected = true;
+  Object.defineProperty(process, "connected", { configurable: true, value: true, writable: true });
   process.disconnect = disconnect.mockReset();
-  destroyStdin = vi.spyOn(process.stdin, "destroy").mockReturnValue(process.stdin);
+  runtime.releaseProcessStdin.mockReset();
   vi.stubEnv("OPENCLAW_DEBUG", undefined);
 });
 
 afterEach(() => {
   process.argv = originalArgv;
   process.exitCode = originalExitCode;
-  process.connected = originalConnected;
+  if (originalConnected) {
+    Object.defineProperty(process, "connected", originalConnected);
+  } else {
+    Reflect.deleteProperty(process, "connected");
+  }
   if (originalDisconnect) {
     Object.defineProperty(process, "disconnect", originalDisconnect);
   } else {
@@ -95,7 +103,7 @@ it.each([
     await expect(import("./worker-deploy-entry.js")).resolves.toBeDefined();
 
     expect(process.exitCode).toBe(1);
-    expect(destroyStdin).toHaveBeenCalledOnce();
+    expect(runtime.releaseProcessStdin).toHaveBeenCalledOnce();
     expect(disconnect).toHaveBeenCalledOnce();
     expect(runtime.flushCompileCache).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledOnce();
@@ -143,9 +151,9 @@ it("keeps the transport until worker execution has settled", async () => {
   const entry = import("./worker-deploy-entry.js");
   await started.promise;
   expect(disconnect).not.toHaveBeenCalled();
-  expect(destroyStdin).not.toHaveBeenCalled();
+  expect(runtime.releaseProcessStdin).not.toHaveBeenCalled();
   settled.resolve();
   await entry;
   expect(disconnect).toHaveBeenCalledOnce();
-  expect(destroyStdin).toHaveBeenCalledOnce();
+  expect(runtime.releaseProcessStdin).toHaveBeenCalledOnce();
 });

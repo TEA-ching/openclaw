@@ -151,7 +151,7 @@ export default definePluginEntry({
     // The base registration runtime deliberately rejects state access. Open the
     // store only when a proxied runtime performs the first binding operation.
     const lazyBindingStateStore: Parameters<typeof createLazyCodexAppServerBindingStore>[0] = {
-      // Final effect guards still see raw SDK revocations until the next SDK major.
+      // Final effect guards retain raw SDK revocations through 2026-12-31.
       lookup: (key) => openBindingStateStore().lookup(key),
       asyncReads: {
         lookup: (key) => openBindingMutationStore().lookup(key),
@@ -234,9 +234,6 @@ export default definePluginEntry({
         {
           contextVersion: 2,
           create: (context) => {
-            if (context.senderIsOwner !== true) {
-              return [];
-            }
             const resolveToolRuntimeConfig = () =>
               context.getRuntimeConfig?.() ??
               context.runtimeConfig ??
@@ -248,7 +245,9 @@ export default definePluginEntry({
               resolveAuthProfileId: resolveCodexAppServerAuthProfileIdForAgent,
               resolveAuthProfileIdAtEffect: resolveCodexAppServerAuthProfileIdAtEffect,
               resolveRuntimeOptions: resolveCodexSupervisionAppServerRuntimeOptions,
-              senderIsOwner: context.senderIsOwner,
+              get senderIsOwner() {
+                return context.senderIsOwner === true;
+              },
               assertInvocationCurrent: context.assertInvocationCurrent,
             });
           },

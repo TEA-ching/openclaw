@@ -11,8 +11,8 @@ import { resolveUtilityModelRefForAgent } from "../agents/utility-model.js";
 import type { WorktreeSourceStage } from "../agents/worktrees/types.js";
 import { stripInboundMetadata } from "../auto-reply/reply/strip-inbound-meta.js";
 import { patchSessionEntryCore } from "../config/sessions/session-accessor.js";
+import { captureSessionActorStorageOwner } from "../config/sessions/session-actor-storage-binding.js";
 import { readSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
-import { captureIncognitoSessionSource } from "../config/sessions/session-incognito-binding.js";
 import {
   sessionEntryCommitGuardOptions,
   composeSessionSourceAssertion,
@@ -157,33 +157,62 @@ function resolveDashboardTitleAuthProfile(params: {
   return configuredModel.provider === params.regularProvider ? configuredProfile : undefined;
 }
 
+// Introductions models put before the requested title, e.g. "Session title:",
+// "Concise title for this session:" or "Sitzungstitel:"; topics such as
+// "Fix button label:" stay part of the title.
+const TITLE_LEAD_IN =
+  /^(?:(?:concise|short|suggested|proposed|final|correct|session|chat|conversation|kurzer|kürzester|passender|richtiger|vorgeschlagener)\s+)?(?:(?:sitzungs|session-?|chat-?)?(?:title|titel)|label)(?:\s+(?:for|für)\s[^:]*)?\s*:\s*/iu;
+
+function stripTitleLeadIn(line: string): { text: string; introduced: boolean } {
+  const collapsed = line.replace(/\s+/g, " ").trim();
+  const title = collapsed.replace(TITLE_LEAD_IN, "");
+  // Markdown emphasis around the whole title is formatting, not title text.
+  const text = (/^\*\*([^*]+)\*\*$/u.exec(title)?.[1] ?? title).trim();
+  return { text, introduced: title !== collapsed };
+}
+
+// Opening quote → matching closing quote, shared by title extraction and wrapper removal.
+const TITLE_QUOTE_PAIRS: Record<string, string> = {
+  '"': '"',
+  "'": "'",
+  "`": "`",
+  "„": "“",
+  "“": "”",
+  "«": "»",
+  "»": "«",
+  "‘": "’",
+};
+
+function quotesExactly(line: string, text: string): boolean {
+  return Object.entries(TITLE_QUOTE_PAIRS).some(([open, close]) =>
+    line.includes(`${open}${text}${close}`),
+  );
+}
+
 function normalizeDashboardSessionTitle(raw: string): string | null {
-  const firstLine = raw
+  const lines = raw
     .replace(/\r/g, "")
     .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line && !line.startsWith("```"));
-  if (!firstLine) {
+    .map((line) => stripTitleLeadIn(line))
+    .filter(({ text }) => text && !text.startsWith("```"));
+  // A line ending in ":" introduces the next one instead of naming the session.
+  const candidates = lines.filter(({ text }) => !text.endsWith(":"));
+  const [first] = candidates;
+  // Prefer a line the model introduced as the title ("Titel: …"), then a later line
+  // that an over-long first line quotes exactly, as in "… a fitting title is "X".\n\nX".
+  const chosen = (
+    candidates.find(({ introduced }) => introduced) ??
+    (first && first.text.length > DASHBOARD_SESSION_TITLE_MAX_CHARS
+      ? candidates.slice(1).find(({ text }) => quotesExactly(first.text, text))
+      : undefined) ??
+    first ??
+    lines[0]
+  )?.text;
+  if (!chosen || chosen.endsWith(":")) {
     return null;
   }
-  const title = truncateUtf16Safe(
-    firstLine
-      .replace(/^title\s*:\s*/i, "")
-      .replace(/\s+/g, " ")
-      .trim(),
-    DASHBOARD_SESSION_TITLE_MAX_CHARS,
-  );
+  const title = truncateUtf16Safe(chosen, DASHBOARD_SESSION_TITLE_MAX_CHARS);
   const quotes = /["'`„“”«»‘’]/gu;
-  const quotePairs: Record<string, string> = {
-    '"': '"',
-    "'": "'",
-    "`": "`",
-    "„": "“",
-    "“": "”",
-    "«": "»",
-    "»": "«",
-    "‘": "’",
-  };
   const pending: Array<{ index: number; close: string }> = [];
   const removed = new Set<number>();
   // Pair after truncation so a cut-off span cannot leave a dangling delimiter.
@@ -216,8 +245,8 @@ function normalizeDashboardSessionTitle(raw: string): string | null {
         removed.add(opening.index);
         removed.add(index);
       }
-    } else if (quotePairs[character]) {
-      pending.push({ index, close: quotePairs[character] });
+    } else if (TITLE_QUOTE_PAIRS[character]) {
+      pending.push({ index, close: TITLE_QUOTE_PAIRS[character] });
       removed.add(index);
     } else if (/[”’]/u.test(character)) {
       removed.add(index);
@@ -350,11 +379,6 @@ export async function generateWorktreeSessionTitle(
     sessionKey: resolveStoredSessionKeyForAgentStore(params),
     storePath: params.storePath,
   };
-  const incognito = captureIncognitoSessionSource(scope);
-  const claim =
-    incognito && !("kind" in incognito)
-      ? incognito.actor.sessions.captureCurrent(scope.sessionKey)
-      : undefined;
   const request = maybeGenerateSessionTitle(params).then((persisted) => {
     if (persisted) {
       params.onPersisted();
@@ -368,20 +392,10 @@ export async function generateWorktreeSessionTitle(
   const readCurrent = async (assertSourceCurrent?: () => void) => {
     params.commitGuard?.();
     assertSourceCurrent?.();
-    const current = incognito
-      ? await (
-          await import("../config/sessions/session-entry-read-runtime.js")
-        ).readSessionEntryReadOnlyInWorker(scope, () => {
-          params.commitGuard?.();
-          assertSourceCurrent?.();
-          if ("kind" in incognito) {
-            incognito.assertCurrent();
-          } else {
-            incognito.actor.assertReadable();
-            claim?.assertCurrent();
-          }
-        })
-      : await readSessionEntryReadOnlyInWorker(scope);
+    const current = await readSessionEntryReadOnlyInWorker(scope, () => {
+      params.commitGuard?.();
+      assertSourceCurrent?.();
+    });
     if (current?.sessionId !== params.sessionId) {
       throw new Error("Session changed while naming its worktree; retry from the current session.");
     }
@@ -405,25 +419,28 @@ export async function maybeGenerateDashboardSessionTitle(
 export async function maybeGenerateSessionTitle(params: SessionTitleParams): Promise<boolean> {
   const sessionKey = resolveStoredSessionKeyForAgentStore(params);
   const scope = { agentId: params.agentId, sessionKey, storePath: params.storePath };
-  const incognito = captureIncognitoSessionSource(scope);
-  if (incognito && "kind" in incognito) {
+  const assertCurrent = () => params.commitGuard?.();
+  const memory = captureSessionActorStorageOwner(scope, {
+    assertCurrent,
+    authorize: assertCurrent,
+  });
+  if (memory && !memory.owner?.readSession(sessionKey, memory.authority)?.entry) {
     return false;
   }
-  const claim = incognito?.actor.sessions.captureCurrent(sessionKey);
-  const assertIncognitoCurrent = () => {
-    incognito?.admissionSignal?.throwIfAborted();
-    incognito?.actor.assertReadable();
-    claim?.assertCurrent();
+  const assertMemorySessionCurrent = memory?.owner?.captureSessionReadGuard(sessionKey);
+  const assertMemoryCurrent = () => {
+    assertMemorySessionCurrent?.();
+    memory?.binding?.actor.assertReadable();
+    memory?.authority.assertCurrent();
   };
   const requestTarget = {
     ...scope,
     sessionId: params.sessionId,
-    incarnation: incognito?.actor.identity.incarnation,
   };
   const existing = sessionTitleRequests.get(requestTarget);
   if (existing) {
     const persisted = await (params.retryFailedJoin ? existing.catch(() => false) : existing);
-    assertIncognitoCurrent();
+    assertMemoryCurrent();
     // A failed join can retry once with fresh session state and this caller's authority.
     return !persisted && params.retryFailedJoin
       ? await maybeGenerateSessionTitle({ ...params, retryFailedJoin: false })
@@ -439,7 +456,7 @@ export async function maybeGenerateSessionTitle(params: SessionTitleParams): Pro
       const assertCommitAllowed = composeSessionSourceAssertion([
         params.commitGuard,
         assertSourceCurrent,
-        ...(incognito ? [assertIncognitoCurrent] : []),
+        ...(memory ? [assertMemoryCurrent] : []),
       ]);
       if (assertSourceCurrent) {
         assertCommitAllowed?.();
@@ -467,11 +484,7 @@ export async function maybeGenerateSessionTitle(params: SessionTitleParams): Pro
   };
 
   const run = async () => {
-    const entry = incognito
-      ? await (
-          await import("../config/sessions/session-entry-read-runtime.js")
-        ).readSessionEntryReadOnlyInWorker(scope, assertIncognitoCurrent)
-      : await readSessionEntryReadOnlyInWorker(scope);
+    const entry = await readSessionEntryReadOnlyInWorker(scope, assertMemoryCurrent);
     if (hasExplicitSessionName(entry) || entry?.sessionId !== params.sessionId) {
       return false;
     }
@@ -487,7 +500,7 @@ export async function maybeGenerateSessionTitle(params: SessionTitleParams): Pro
     };
     const transcriptSource = (await readSessionTitleFieldsFromTranscriptAsync(transcriptScope))
       .firstUserMessage;
-    assertIncognitoCurrent();
+    assertMemoryCurrent();
     const transcriptText = transcriptSource ? stripInboundMetadata(transcriptSource).trim() : "";
     const currentText = params.currentUserMessage?.trim() ?? "";
     // A first-turn transcript may win the persistence race before title work starts.
@@ -511,7 +524,7 @@ export async function maybeGenerateSessionTitle(params: SessionTitleParams): Pro
         ...(abortSignal ? { abortSignal } : {}),
         ...(params.retryAfter ? { retryAfter: params.retryAfter } : {}),
         onFallback: params.onFallback,
-        ...(incognito ? { assertCurrent: assertIncognitoCurrent } : {}),
+        ...(memory ? { assertCurrent: assertMemoryCurrent } : {}),
       });
     const withSource = params.withSource;
     if (!withSource) {
@@ -536,7 +549,5 @@ export async function maybeGenerateSessionTitle(params: SessionTitleParams): Pro
       { cancelOnError: true },
     );
   };
-  return await sessionTitleRequests.run(requestTarget, () =>
-    incognito ? incognito.actor.sessions.withSharedState(run) : Promise.resolve().then(run),
-  );
+  return await sessionTitleRequests.run(requestTarget, run);
 }

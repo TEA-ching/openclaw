@@ -66,12 +66,12 @@ import {
   CODEX_SESSION_PERMISSION_EXEC_MODES,
   resolveCodexSessionPermissionCwd,
 } from "./app-server/session-permission-policy.js";
+import type { CodexAppServerClientOptions } from "./app-server/shared-client-options.js";
 import {
   getLeasedSharedCodexAppServerClient,
   releaseCodexAppServerClientLease,
   withCodexAppServerClientRequestScope,
   type CodexAppServerClientLease,
-  type CodexAppServerClientOptions,
   type CodexAppServerLeasedRequestOptions,
 } from "./app-server/shared-client.js";
 import {
@@ -235,6 +235,7 @@ export async function resolveConversationAppServerRuntime(params: {
     release: current?.release ?? (() => {}),
     assertCurrent: current?.assertCurrent ?? (async () => {}),
     source: current?.source,
+    sessionKey,
     incognito:
       source || sessionKey
         ? entry?.incognito === true || isIncognitoSessionKey(sessionKey)
@@ -294,7 +295,7 @@ async function resolveThreadBindingRuntime(params: CodexThreadBindingParams) {
     modelProvider: params.modelProvider,
     ...agentLookup,
   });
-  const { runtime, workspaceDir, assertCurrent, source, incognito, release } =
+  const { runtime, workspaceDir, assertCurrent, source, sessionKey, incognito, release } =
     await resolveConversationAppServerRuntime({
       ...params,
       modelProvider: reviewerModelProvider,
@@ -314,6 +315,7 @@ async function resolveThreadBindingRuntime(params: CodexThreadBindingParams) {
     release,
     assertCurrent,
     source,
+    sessionKey,
     incognito: incognito ?? params.incognito,
     runtime,
     workspaceDir,
@@ -326,7 +328,7 @@ async function resolveThreadBindingRuntime(params: CodexThreadBindingParams) {
 
 export async function buildConversationThreadRequestForClient(
   client: CodexAppServerClient,
-  resolved: Omit<ConversationAppServerRuntime, "release"> & {
+  resolved: Pick<ConversationAppServerRuntime, "runtime" | "workspaceDir" | "assertCurrent"> & {
     model?: string;
     modelProvider?: string;
   },
@@ -524,21 +526,19 @@ async function bindThread(params: CodexThreadBindingParams, threadId?: string) {
   return {
     assertCurrent: resolved.assertCurrent,
     source: resolved.source,
+    sessionKey: resolved.sessionKey,
     release: resolved.release,
   };
 }
 
-export async function prepareCodexConversationBinding(
-  params: {
-    bindingStore: CodexAppServerBindingStore;
-    data: CodexAppServerConversationBindingData;
-    pluginConfig?: unknown;
-    config?: CodexConversationConfig;
-    sessionKey?: string;
-    incognito: boolean;
-  },
-  options: { forceNew?: boolean } = {},
-): Promise<void> {
+export async function prepareCodexConversationBinding(params: {
+  bindingStore: CodexAppServerBindingStore;
+  data: CodexAppServerConversationBindingData;
+  pluginConfig?: unknown;
+  config?: CodexConversationConfig;
+  sessionKey?: string;
+  incognito: boolean;
+}): Promise<void> {
   const identity = { kind: "conversation" as const, bindingId: params.data.bindingId };
   const snapshot = await params.bindingStore.readAsync(identity);
   const run = () =>
@@ -551,7 +551,7 @@ export async function prepareCodexConversationBinding(
         params.data.start && current?.conversationStartId !== params.data.start.id
           ? params.data.start
           : undefined;
-      if (current && !requested && !options.forceNew) {
+      if (current && !requested) {
         return;
       }
       const sourceIdentity = params.data.source
@@ -596,10 +596,7 @@ export async function prepareCodexConversationBinding(
       // Harness threads retain immutable tools, developer instructions, and app
       // policy. Transfer bounded visible history into a fresh bound-only thread.
       const threadId = requested?.threadId;
-      const sourceAuthority = await bindThread(
-        bindingParams,
-        options.forceNew ? undefined : threadId,
-      );
+      const sourceAuthority = await bindThread(bindingParams, threadId);
       using _ = { [Symbol.dispose]: sourceAuthority.release };
       await sourceAuthority.assertCurrent();
       const sourceGuard = sourceAuthority.source;
@@ -612,22 +609,12 @@ export async function prepareCodexConversationBinding(
           await sourceAuthority.assertCurrent();
           const source = await params.bindingStore.readAsync(sourceIdentity);
           if (source && source.threadId === params.data.source?.threadId) {
-            const sourceSessionKey =
-              sourceIdentity.sessionKey ??
-              (
-                await getSessionEntryByIdAsync({
-                  agentId: sourceIdentity.agentId,
-                  sessionId: sourceIdentity.sessionId,
-                  storePath:
-                    params.data.source.storePath ??
-                    resolveStorePath(params.config?.session?.store, {
-                      agentId: sourceIdentity.agentId,
-                    }),
-                })
-              )?.sessionKey;
+            const sourceSessionKey = sourceAuthority.sessionKey;
             if (
               sourceSessionKey &&
-              resolveActiveEmbeddedRunSessionId(sourceSessionKey) === sourceIdentity.sessionId
+              resolveActiveEmbeddedRunSessionId(sourceSessionKey, {
+                executionStartedOnly: true,
+              }) === sourceIdentity.sessionId
             ) {
               throw new Error(
                 "Codex source session has an active run; stop it before binding this conversation.",

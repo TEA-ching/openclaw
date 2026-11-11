@@ -175,7 +175,7 @@ described [above](/start/wizard-cli-reference#what-the-wizard-does).
     - Native Windows: Scheduled Task first
       - If task creation is denied, OpenClaw falls back to a per-user Startup-folder login item and starts the gateway immediately.
       - Scheduled Tasks remain preferred because they provide better supervisor status.
-    - Runtime selection: Node is the primary, default, and recommended runtime. Bun 1.4+ with WAL-reset-safe `node:sqlite` is available as an explicit opt-in.
+    - Runtime selection: Node is the primary, default, and recommended runtime. Bun 1.4.4+ with WAL-reset-safe `node:sqlite` is available as an explicit opt-in.
       QuickStart reports the runtime selected by the install plan, including Bun when no supported Node is available on a Bun-only first install.
     - A SecretRef-managed `gateway.auth.token` is validated without copying its
       resolved plaintext value into supervisor service metadata. An unresolved
@@ -183,6 +183,8 @@ described [above](/start/wizard-cli-reference#what-the-wizard-does).
     - If both `gateway.auth.token` and `gateway.auth.password` exist while
       `gateway.auth.mode` is unset, daemon installation blocks until you choose
       a mode explicitly.
+    - If restarting an installed service fails, setup reports the failure reason
+      and recovery commands instead of claiming the service restarted.
 
   </Step>
   <Step title="Health check">

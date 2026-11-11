@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { collectProviderApiKeysForExecution } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { asNonNegativeFiniteNumber } from "openclaw/plugin-sdk/number-runtime";
+import { collectProviderApiKeysForExecution } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { resolvePositiveTimeoutSeconds } from "openclaw/plugin-sdk/provider-web-fetch";
 import { normalizeSecretInput } from "openclaw/plugin-sdk/secret-input";
 import { resolveReadOnlyEnvSecretRef } from "openclaw/plugin-sdk/secret-ref-readonly";
@@ -52,52 +52,45 @@ function resolveConfiguredSecret(value: unknown, path: string, cfg?: OpenClawCon
   });
 }
 
-export function resolveFirecrawlApiKey(cfg?: OpenClawConfig): string | undefined {
-  const pluginConfig = cfg?.plugins?.entries?.firecrawl?.config as PluginEntryConfig;
-  const search = resolveFirecrawlSearchConfig(cfg);
-  const configuredCandidates: Array<{ value: unknown; path: string }> = [
-    {
-      value: pluginConfig?.webFetch?.apiKey,
-      path: "plugins.entries.firecrawl.config.webFetch.apiKey",
-    },
-    {
-      value: search?.apiKey,
-      path: "plugins.entries.firecrawl.config.webSearch.apiKey",
-    },
-  ];
-  let blockedConfiguredSecret = false;
-  for (const candidate of configuredCandidates) {
-    const resolved = resolveConfiguredSecret(candidate.value, candidate.path, cfg);
-    if (resolved.status === "available") {
-      return resolved.value;
-    }
-    if (resolved.status === "blocked") {
-      blockedConfiguredSecret = true;
-    }
-  }
-  if (blockedConfiguredSecret) {
-    return undefined;
-  }
-  // Pool-only deployments (FIRECRAWL_API_KEYS, no singular FIRECRAWL_API_KEY)
-  // still need one key here: callers that gate on "!apiKey" before ever
-  // reaching collectProviderApiKeysForExecution's rotation would otherwise
-  // dispatch with no key at all.
-  return (
-    normalizeSecretInput(process.env[FIRECRAWL_API_KEY_ENV_VAR]) ||
-    collectProviderApiKeysForExecution({ provider: "firecrawl" })[0] ||
-    undefined
+export function resolveFirecrawlConnection(
+  cfg: OpenClawConfig | undefined,
+  scope: "webSearch" | "webFetch",
+) {
+  const scopes = {
+    webSearch: resolveFirecrawlSearchConfig(cfg),
+    webFetch: resolveFirecrawlFetchConfig(cfg),
+  };
+  const primary = scopes[scope];
+  // Borrow a sibling connection only as a whole; never send its key to our endpoint (or vice versa).
+  const selectedScope =
+    primary?.apiKey === undefined && !normalizeOptionalString(primary?.baseUrl)
+      ? scope === "webSearch"
+        ? "webFetch"
+        : "webSearch"
+      : scope;
+  const connection = scopes[selectedScope];
+  const resolved = resolveConfiguredSecret(
+    connection?.apiKey,
+    `plugins.entries.firecrawl.config.${selectedScope}.apiKey`,
+    cfg,
   );
-}
-
-export function resolveFirecrawlBaseUrl(cfg?: OpenClawConfig): string {
-  const search = resolveFirecrawlSearchConfig(cfg);
-  const fetch = resolveFirecrawlFetchConfig(cfg);
-  const configured =
-    normalizeOptionalString(search?.baseUrl) ||
-    normalizeOptionalString(fetch?.baseUrl) ||
-    normalizeSecretInput(process.env.FIRECRAWL_BASE_URL) ||
-    "";
-  return configured || DEFAULT_FIRECRAWL_BASE_URL;
+  return {
+    apiKey:
+      resolved.status === "available"
+        ? resolved.value
+        : resolved.status === "blocked"
+          ? undefined
+          : // Pool-only deployments (FIRECRAWL_API_KEYS, no singular FIRECRAWL_API_KEY)
+            // still need one key here: callers that gate on "!apiKey" before reaching
+            // the rotation would otherwise dispatch with no key at all.
+            normalizeSecretInput(process.env[FIRECRAWL_API_KEY_ENV_VAR]) ||
+            collectProviderApiKeysForExecution({ provider: "firecrawl" })[0] ||
+            undefined,
+    baseUrl:
+      normalizeOptionalString(connection?.baseUrl) ||
+      normalizeSecretInput(process.env.FIRECRAWL_BASE_URL) ||
+      DEFAULT_FIRECRAWL_BASE_URL,
+  };
 }
 
 export function resolveFirecrawlOnlyMainContent(cfg?: OpenClawConfig, override?: boolean): boolean {

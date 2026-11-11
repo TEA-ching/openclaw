@@ -12,10 +12,7 @@ import {
   waitForSessionTranscriptProjection,
 } from "../../config/sessions/session-accessor.js";
 import type { SessionTranscriptRuntimeTarget } from "../../config/sessions/session-accessor.types.js";
-import {
-  captureIncognitoSessionHistoryBinding,
-  withIncognitoSessionActor,
-} from "../../config/sessions/session-incognito-binding.js";
+import { captureSessionActorStorageOwner } from "../../config/sessions/session-actor-storage-binding.js";
 import {
   sessionEntryCommitGuardOptions,
   composeSessionSourceAssertion,
@@ -38,6 +35,17 @@ import type { AuthProfileCredential } from "../auth-profiles/types.js";
 import { buildSessionContext, SessionManager } from "../sessions/session-manager.js";
 import { createCliRunCurrentAssertion } from "./execution-target.js";
 import type { PreparedCliRunContext } from "./types.js";
+
+/**
+ * Another writer or lifecycle owns the session history. Local session state, not a provider
+ * failure: model fallback must stop instead of replaying the turn on another candidate.
+ */
+class CliHistoryOwnerChangedError extends Error {
+  constructor() {
+    super("CLI history owner changed before preparation");
+    this.name = "CliHistoryOwnerChangedError";
+  }
+}
 
 /**
  * History belongs to the local transcript, not the latest native handle. Cover only
@@ -83,30 +91,25 @@ async function prepareCliHistoryBoundaryOnce(
   const capturedAdmission = admission && structuredClone(admission);
   const assertRunCurrent = createCliRunCurrentAssertion(params);
   const assertOwned = captureOwnedTranscriptWriteAssertion(requested);
-  const incognito = captureIncognitoSessionHistoryBinding(requested);
-  let assertPhysicalSource = () => {};
-  const plan = incognito
-    ? await withIncognitoSessionActor(
-        incognito.actor,
-        () => {
-          assertPhysicalSource = incognito.authority.assertCurrent;
-          return planCliHistoryBoundary(
-            params,
-            identity,
-            { ...requested, storePath: incognito.actor.path },
-            capturedAdmission,
-            () => {
-              assertRunCurrent();
-              incognito.authority.assertCurrent();
-            },
-          );
-        },
-        params.abortSignal,
+  const memory = captureSessionActorStorageOwner(requested, {
+    assertCurrent: assertRunCurrent,
+    authorize() {},
+  });
+  let assertPhysicalSource = () => {
+    memory?.owner?.assertCurrent();
+    memory?.binding?.actor.assertReadable();
+    memory?.authority.assertCurrent();
+  };
+  const plan = memory
+    ? await planCliHistoryBoundary(
+        params,
+        identity,
+        { ...requested, storePath: memory.path },
+        capturedAdmission,
+        assertRunCurrent,
       )
     : await withSessionTranscriptReadSource(
         requested,
-        () =>
-          planCliHistoryBoundary(params, identity, requested, capturedAdmission, assertRunCurrent),
         ({ scope, expectedIdentity, assertCurrent: assertReaderCurrent }) => {
           const target = { ...requested, storePath: scope.storePath };
           assertPhysicalSource = () => {
@@ -145,7 +148,7 @@ async function prepareCliHistoryBoundaryOnce(
           snapshot.activeWriterRunId !== writerRunId &&
           hasLiveAgentRunContext(snapshot.activeWriterRunId)
         ) {
-          throw new Error("CLI history owner changed before preparation");
+          throw new CliHistoryOwnerChangedError();
         }
         assertSource();
       }),
@@ -161,7 +164,7 @@ async function prepareCliHistoryBoundaryOnce(
         (params.expectedLifecycleRevision !== undefined &&
           current.lifecycleRevision !== params.expectedLifecycleRevision)
       ) {
-        throw new Error("CLI history owner changed before preparation");
+        throw new CliHistoryOwnerChangedError();
       }
       return { activeWriterRunId: writerRunId, cliHistoryBoundary: boundary };
     },
@@ -206,7 +209,7 @@ async function prepareCliHistoryBoundaryOnce(
     assertReadable: async () => {
       assertWriterCurrent();
       assertPhysicalSource();
-      const authority = incognito
+      const authority = memory
         ? undefined
         : (
             await readSessionTranscriptAnchorsAsync(
@@ -217,11 +220,13 @@ async function prepareCliHistoryBoundaryOnce(
           ).contextAuthority;
       assertWriterCurrent();
       assertPhysicalSource();
-      const stored = authority?.entry;
-      const current = incognito ? incognito.actor.sessions.readSteering(target.sessionKey) : stored;
-      const history = incognito?.actor.sessions.readCliHistory(target.sessionKey);
-      const proof = incognito ? history?.boundary : stored?.cliHistoryBoundary;
-      const tip = incognito ? history?.watermark : authority?.watermark;
+      const facts =
+        memory?.binding?.actor.target.sessionKey === target.sessionKey
+          ? memory.binding.actor.snapshot(memory.authority)
+          : memory?.owner?.readSession(target.sessionKey, memory.authority);
+      const current = memory ? facts?.entry : authority?.entry;
+      const proof = current?.cliHistoryBoundary;
+      const tip = memory ? facts?.transcript.watermark : authority?.watermark;
       if (
         !current ||
         current.sessionId !== target.sessionId ||

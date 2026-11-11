@@ -105,6 +105,7 @@ export async function withShimFixture<T>(
     mkdirSync(path.dirname(wrapperPath), { recursive: true });
     mkdirSync(path.join(checkoutRoot, "scripts", "lib"), { recursive: true });
     copyFileSync(wrapper, wrapperPath);
+    mkdirSync(path.join(checkoutRoot, ".git"), { recursive: true });
     for (const source of [
       "scripts/tsx.mjs",
       "scripts/windows-cmd-helpers.mjs",
@@ -114,6 +115,7 @@ export async function withShimFixture<T>(
       "scripts/lib/managed-child-process.mts",
       "scripts/lib/managed-cleanup-handoff.mts",
       "scripts/lib/vitest-resource-ownership.mts",
+      "scripts/lib/vitest-worker-descriptor.mts",
       "scripts/lib/windows-taskkill.mjs",
     ]) {
       copyFileSync(source, path.join(checkoutRoot, source));

@@ -3,6 +3,7 @@ import { findNormalizedProviderKey } from "@openclaw/model-catalog-core/provider
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { toAgentEntriesRecord } from "../agents/agent-scope-config.js";
 import type { AuthProfileCredential } from "../agents/auth-profiles/types.js";
+import { resolveModelRuntimePolicy } from "../agents/model-runtime-policy.js";
 import { mergeAgentModelEntryForConfig } from "../config/model-input.js";
 import { materializeModelPolicyAllowlist } from "../config/model-policy-allowlist-migration.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -69,8 +70,14 @@ export async function createSystemAgentModelSelectionUpdater(
       modelConfig.upsertCanonicalModelConfigEntry(configuredVisibleModels, target);
     }
     if (selection.runtimeInDefaults) {
-      // Include the approved model in legacy restrictions before adding runtime-only metadata.
-      nextConfig = materializeModelPolicyAllowlist(nextConfig).config;
+      // Provider-added metadata is not a legacy restriction. Only extend the
+      // previous model map with the newly approved selection before migrating it.
+      const policySource = structuredClone(previousConfig);
+      const previousModels = policySource?.agents?.defaults?.models;
+      if (previousModels && Object.keys(previousModels).length > 0) {
+        modelConfig.upsertCanonicalModelConfigEntry(previousModels, target);
+      }
+      nextConfig = materializeModelPolicyAllowlist(nextConfig, policySource).config;
     }
     nextConfig.agents ??= {};
     nextConfig.agents.defaults ??= {};
@@ -168,6 +175,48 @@ export function withCodexHomeScope(
             appServer: {
               ...(isRecord(pluginConfig.appServer) ? pluginConfig.appServer : {}),
               homeScope,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+export function prepareSetupModelRuntime(params: {
+  config: OpenClawConfig;
+  modelRef: string;
+  agentId: string;
+  agentRuntimeId?: string;
+}): { config: OpenClawConfig; agentRuntimeId?: string } {
+  const agentRuntimeId =
+    params.agentRuntimeId ??
+    resolveModelRuntimePolicy({
+      config: params.config,
+      modelId: params.modelRef,
+      agentId: params.agentId,
+    }).policy?.id;
+  if (!params.agentRuntimeId) {
+    return { config: params.config, agentRuntimeId };
+  }
+  const agents = params.config.agents;
+  const agent = agents?.entries?.[params.agentId];
+  return {
+    agentRuntimeId,
+    config: {
+      ...params.config,
+      agents: {
+        ...agents,
+        entries: {
+          ...agents?.entries,
+          [params.agentId]: {
+            ...agent,
+            models: {
+              ...agent?.models,
+              [params.modelRef]: {
+                ...agent?.models?.[params.modelRef],
+                agentRuntime: { id: params.agentRuntimeId },
+              },
             },
           },
         },

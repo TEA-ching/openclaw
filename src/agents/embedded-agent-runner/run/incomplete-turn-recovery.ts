@@ -1,5 +1,8 @@
 import { isResponsesOutputLimitToolCallError } from "@openclaw/ai/diagnostics";
-import { hasOnlyAssistantReasoningContent } from "@openclaw/ai/internal/shared";
+import {
+  hasOnlyAssistantReasoningContent,
+  isReasoningOnlyLengthAssistantTurn,
+} from "@openclaw/ai/internal/shared";
 import { MALFORMED_TOOL_CALL_ARGUMENTS_ERROR_CODE } from "../../../llm/types.js";
 import { isTerminalAssistantError } from "../../../llm/utils/retry.js";
 import { hasAcceptedSessionSpawn } from "../../accepted-session-spawn.js";
@@ -31,9 +34,11 @@ import type { EmbeddedRunAttemptResult } from "./types.js";
 export const DEFAULT_REASONING_ONLY_RETRY_LIMIT = 2;
 export const DEFAULT_EMPTY_RESPONSE_RETRY_LIMIT = 1;
 const REASONING_ONLY_RETRY_INSTRUCTION =
-  "The previous assistant turn recorded reasoning but did not produce a user-visible answer. Continue from that partial turn and produce the visible answer now. Do not restate the reasoning or restart from scratch.";
+  "Your turn ended without a final reply. Continue from the current conversation and answer the user's request now. Do not repeat completed actions or restart the task. Do not restate your reasoning.";
 const EMPTY_RESPONSE_RETRY_INSTRUCTION =
   "The previous attempt did not produce a user-visible answer. Continue from the current state and produce the visible answer now. Do not restart from scratch.";
+const TEXT_TOOL_CALL_RETRY_INSTRUCTION =
+  "You wrote a tool call as text, so nothing ran for that call. Continue from the current state and call the tool natively through the tool interface. Do not print tool-call JSON or markup as your answer.";
 const TOOL_USE_WITHOUT_CALL_RETRY_INSTRUCTION =
   "The previous assistant turn stopped for tool use but contained no tool call, so nothing ran. Continue from the current state: call the tool you need through the tool interface instead of writing the call as text, or produce the visible answer now. Do not restart from scratch.";
 const REJECTED_TOOL_CALL_RETRY_INSTRUCTION =
@@ -74,6 +79,7 @@ export function shouldRetrySilentErrorAssistantTurn(params: {
   // harnesses retain the cumulative, fail-closed behavior.
   if (
     joinAssistantTexts(params.attempt.assistantTexts).length > 0 ||
+    params.attempt.lastToolError ||
     hasAttemptTerminalState(params.attempt) ||
     !isCurrentAttemptReplaySafe(params.attempt)
   ) {
@@ -173,6 +179,8 @@ export function resolveReasoningOnlyRetryInstruction(
   return joinAssistantTexts(params.attempt.assistantTexts).length === 0 &&
     assistant &&
     assistant.stopReason !== "error" &&
+    // Replay omits token-limited reasoning, so no partial turn remains to continue.
+    !isReasoningOnlyLengthAssistantTurn(assistant) &&
     !assistant.openclawDelivery?.tts?.text?.trim() &&
     Array.isArray(assistant.content) &&
     assistant.content.length > 0 &&
@@ -204,11 +212,20 @@ function readSettledToolCalls(
 }
 
 /** Proves settlement and intentional termination for the exact current-turn tool-call batch. */
-export function resolveSettledToolBatchEvidence(attempt: IncompleteTurnAttempt) {
+export function resolveSettledToolBatchEvidence(
+  attempt: IncompleteTurnAttempt,
+  // Set only when the attempt stopped before its next model call: a user message after
+  // the current attempt's batch was steered into this run and does not start a new turn.
+  options?: { midTurn?: boolean },
+) {
   const snapshot = attempt.messagesSnapshot ?? [];
-  const latestUserIndex = snapshot.findLastIndex((message) => message.role === "user");
   let assistant = attempt.currentAttemptAssistant;
   let assistantIndex = assistant ? snapshot.indexOf(assistant) : -1;
+  const latestUserIndex = snapshot.findLastIndex(
+    (message, index) =>
+      message.role === "user" &&
+      !(options?.midTurn && assistantIndex >= 0 && index > assistantIndex),
+  );
   if (assistantIndex <= latestUserIndex || readSettledToolCalls(assistant).length === 0) {
     assistantIndex = snapshot.findLastIndex(
       (message, index) =>
@@ -352,6 +369,10 @@ export function resolveSettledToolTerminalContinuationInstruction(
     intentionalTermination ||
     parkedCodeModeRun ||
     hasUnsettledToolError ||
+    // A denied action must not reopen tools after an empty stop. Settled execution
+    // failures retain their existing continuation and text-only summary contracts.
+    (attempt.lastToolError?.executionStarted === false &&
+      assistantState.assistant?.stopReason !== "toolUse") ||
     hasAsyncActivity(attempt.toolMetas) ||
     hasAcceptedSessionSpawn(attempt.acceptedSessionSpawns) ||
     attempt.clientToolCalls ||
@@ -419,6 +440,10 @@ export function resolveEmptyResponseRetryInstruction(
     })
   ) {
     return null;
+  }
+
+  if (params.attempt.textToolCallAttempt) {
+    return TEXT_TOOL_CALL_RETRY_INSTRUCTION;
   }
 
   // A tool-use stop with no structured call executed nothing; its text is not an answer.

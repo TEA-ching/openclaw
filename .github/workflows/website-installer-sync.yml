@@ -9,6 +9,7 @@ on:
       - scripts/build-installers.mjs
       - scripts/lib/standalone-installers.mjs
       - scripts/install.ps1
+      - test/scripts/install-ps1-entrypoint.ps1
       - .github/workflows/website-installer-sync.yml
   push:
     branches: [main]
@@ -19,6 +20,7 @@ on:
       - scripts/build-installers.mjs
       - scripts/lib/standalone-installers.mjs
       - scripts/install.ps1
+      - test/scripts/install-ps1-entrypoint.ps1
       - .github/workflows/website-installer-sync.yml
   workflow_dispatch:
     inputs:
@@ -288,7 +290,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
 
       - name: Assemble standalone installers
         run: node scripts/build-installers.mjs
@@ -302,6 +304,8 @@ jobs:
           OPENCLAW_NO_PROMPT: "1"
         run: |
           bash dist/installers/install.sh --no-onboard --no-prompt --version latest
+          source "$HOME/.bashrc"
+          hash -r
           openclaw --version
 
   windows-installer:
@@ -312,7 +316,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
 
       - name: install.ps1 strict option binding
         shell: pwsh
@@ -356,6 +360,9 @@ jobs:
             } finally {
               Remove-Item Env:OPENCLAW_INSTALL_METHOD -ErrorAction SilentlyContinue
             }
+
+            & $hostCommand -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File test/scripts/install-ps1-entrypoint.ps1 -InstallerPath $scriptPath
+            if ($LASTEXITCODE -ne 0) { throw "$hostCommand failed the piped installer regression." }
 
             $help = Invoke-InstallerProbe -HostCommand $hostCommand -InstallerArgs @("-?")
             if ($help.ExitCode -ne 0 -or $help.Output -match '\[OK\] Windows detected') {

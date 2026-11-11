@@ -166,6 +166,8 @@ export type FollowupRun = {
     predecessor: Promise<boolean>;
     settle: (accepted: boolean) => void;
   };
+  /** Internal Goal nudge; admission must still observe this exact active Goal. */
+  goalContinuation?: import("../goal-continuation.js").GoalContinuation;
   /** Internal marker for the one-shot stranded final recovery retry. */
   strandedReplyRetry?: boolean;
   /** This continuation owes last-resort feedback if it also stalls, including claimed input. */
@@ -210,6 +212,7 @@ export type FollowupRun = {
     | "bootstrapUserProfileId"
     | "gatewayUiCommandTarget"
     | "toolBindings"
+    | "scheduledAutomation"
     | "chatType"
     | "agentAccountId"
     | "conversationRoutePeerId"
@@ -228,6 +231,7 @@ export type FollowupRun = {
     | "authProfileId"
     | "authProfileIdSource"
     | "thinkLevel"
+    | "thinkingExplicit"
     | "fastMode"
     | "fastModeAutoOnSeconds"
     | "verboseLevel"
@@ -240,6 +244,7 @@ export type FollowupRun = {
     | "scheduledToolPolicy"
     | "runtimePluginToolGrant"
     | "extraSystemPrompt"
+    | "extraSystemPromptTurnContext"
     | "sourceReplyDeliveryMode"
     | "taskSuggestionDeliveryMode"
     | "silentReplyPromptMode"
@@ -249,6 +254,7 @@ export type FollowupRun = {
     | "suppressNextUserMessagePersistence"
     | "suppressTranscriptOnlyAssistantPersistence"
     | "skillLibraryAuthoring"
+    | "bootstrapContextMode"
   > & {
     internalEventExecution?: SessionEventExecution;
     agentId: string;

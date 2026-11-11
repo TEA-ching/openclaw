@@ -4,6 +4,13 @@ import {
   prepareSqliteQuerySync,
 } from "../../infra/kysely-sync.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import type { TranscriptMessageAppendOptions } from "./session-accessor.sqlite-contract.js";
+import {
+  findAssistantTranscriptEventInDatabase,
+  readTranscriptEventId,
+  readTranscriptEventMessage,
+  readTranscriptIdentityByEventId,
+} from "./session-accessor.sqlite-read.js";
 import { getSessionKysely, type ResolvedTranscriptScope } from "./session-accessor.sqlite-scope.js";
 import { readSessionActorTransactionState } from "./session-actor-transaction.js";
 import { readMessageIdempotencyKey } from "./transcript-message-identity.js";
@@ -45,7 +52,9 @@ export function readIdempotencyKeyOwner(
     const row = [...actor.transcript.identities.values()].findLast(
       (candidate) => candidate.message_idempotency_key === idempotencyKey,
     );
-    return row ? { eventId: row.event_id, seq: row.seq } : undefined;
+    if (row || actor.transcript.complete) {
+      return row ? { eventId: row.event_id, seq: row.seq } : undefined;
+    }
   }
   const db = getSessionKysely(database.db);
   const row = executeSqliteQueryTakeFirstSync(
@@ -61,7 +70,7 @@ export function readIdempotencyKeyOwner(
   return row ? { eventId: row.event_id, seq: row.seq } : undefined;
 }
 
-export function readTranscriptMessageByIdentity(
+function readTranscriptMessageByIdentity(
   database: Pick<OpenClawAgentDatabase, "db">,
   scope: ResolvedTranscriptScope,
   identity: { eventId: string; seq: number },
@@ -88,6 +97,15 @@ export function readTranscriptMessageByIdentity(
   return { messageId: identity.eventId, message: event.message };
 }
 
+export function readTranscriptMessageByEventId(
+  database: OpenClawAgentDatabase,
+  scope: ResolvedTranscriptScope,
+  eventId: string,
+): { messageId: string; message: unknown } | undefined {
+  const identity = readTranscriptIdentityByEventId(database, scope.sessionId, eventId);
+  return identity ? readTranscriptMessageByIdentity(database, scope, identity) : undefined;
+}
+
 export function readTranscriptEventIdentity(event: unknown) {
   if (!isRecord(event)) {
     return undefined;
@@ -100,5 +118,25 @@ export function readTranscriptEventIdentity(event: unknown) {
         parentId: typeof event.parentId === "string" ? event.parentId : null,
         messageIdempotencyKey: readMessageIdempotencyKey(event.message),
       }
+    : undefined;
+}
+
+export function readTranscriptMessageByScopedIdempotencyKey(
+  database: Pick<OpenClawAgentDatabase, "db">,
+  scope: ResolvedTranscriptScope,
+  idempotencyKey: string,
+  lookup: TranscriptMessageAppendOptions<unknown>["idempotencyLookup"],
+): { messageId: string; message: unknown } | undefined {
+  if (lookup !== "scan-assistant") {
+    const identity = readIdempotencyKeyOwner(database, scope.sessionId, idempotencyKey);
+    return identity ? readTranscriptMessageByIdentity(database, scope, identity) : undefined;
+  }
+  const found = findAssistantTranscriptEventInDatabase(database, scope.sessionId, idempotencyKey);
+  if (!found) {
+    return undefined;
+  }
+  const message = readTranscriptEventMessage(found.event);
+  return message
+    ? { messageId: readTranscriptEventId(found.event) ?? idempotencyKey, message }
     : undefined;
 }

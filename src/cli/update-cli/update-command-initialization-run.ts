@@ -105,6 +105,27 @@ export async function initializeAndRunUpdate(
                 return;
               }
               const selectedTarget = selection.target;
+              const assertSelectedRuntimeCurrent = async () => {
+                if (!selectedTarget) {
+                  return;
+                }
+                try {
+                  await selectedTarget.assertPackageRuntimeCurrent?.();
+                } catch (error) {
+                  if (
+                    hasCommandProcessCleanupError(error) ||
+                    !(error instanceof UpdatePreMutationError)
+                  ) {
+                    throw error;
+                  }
+                  await selectedTarget.refuseUpdate(
+                    error.reason,
+                    error.message,
+                    error.failureFacts,
+                    error.recoverySteps,
+                  );
+                }
+              };
               const candidateAdmissionEnabled =
                 selectedTarget?.updateInstallKind === "package" &&
                 usesCandidateUpdateAdmission(opts, prepared.installKind);
@@ -228,7 +249,11 @@ export async function initializeAndRunUpdate(
                   if (hasCommandProcessCleanupError(error)) {
                     throw error;
                   }
-                  warn(`Original state capture is unavailable: ${formatErrorMessage(error)}`);
+                  // Capture is best effort. Lead with continuation guidance because the
+                  // warning is length-bounded and the nested cause can be long.
+                  warn(
+                    `Original state capture is unavailable; the update continues without it. A running Gateway or another active writer changing state during capture is expected to cause this. Database rollback uses the pre-migration snapshots taken after the Gateway stops. A completed update does not need to be restarted because of this warning. Cause: ${formatErrorMessage(error)}`,
+                  );
                 }
                 assertCurrent();
                 if (resolveDebugProxySettings(env).enabled) {
@@ -238,6 +263,7 @@ export async function initializeAndRunUpdate(
                 }
               };
               const runCapturedInitialization = async () => {
+                await assertSelectedRuntimeCurrent();
                 await captureOriginal();
                 await runInitialized(initialization);
               };
@@ -378,6 +404,7 @@ export async function initializeAndRunUpdate(
                 await captureOriginal();
                 const runtime = await preparePackageUpdateRuntime({
                   ...target,
+                  assertPackageRuntimeCurrent: assertSelectedRuntimeCurrent,
                   managedService: schemaPreflight.service,
                   shouldRestart: prepared.shouldRestart,
                   opts,
@@ -422,6 +449,7 @@ export async function initializeAndRunUpdate(
                         await checkSchemas();
                         assertCurrent();
                         if (!target.packageAlreadyCurrent && !initialization.stagedPackage) {
+                          await assertSelectedRuntimeCurrent();
                           initializationStage = await stagePackageInstallUpdate(
                             stageParams(presentation),
                           );
@@ -470,6 +498,7 @@ export async function initializeAndRunUpdate(
                 ) {
                   const presentation = createUpdateProgress(!opts.json);
                   try {
+                    await assertSelectedRuntimeCurrent();
                     return await withPrivateStagedPackageInstall(
                       stageParams(presentation),
                       async ({ stage }) => {

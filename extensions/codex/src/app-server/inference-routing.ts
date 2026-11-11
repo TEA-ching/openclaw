@@ -93,8 +93,11 @@ export function ownCodexInferenceClient(
   };
   client.addCloseHandler(close);
   client.addNotificationHandler((notification) => {
+    // Unsubscribe releases the subscription, but native configuration stays loaded until teardown.
     if (
-      notification.method === "thread/closed" &&
+      (notification.method === "thread/closed" ||
+        notification.method === "thread/archived" ||
+        notification.method === "thread/deleted") &&
       isJsonObject(notification.params) &&
       typeof notification.params.threadId === "string"
     ) {
@@ -341,6 +344,7 @@ async function prepareCodexInferenceRoute(params: {
         assertClient();
         return createCodexInferenceProxy({
           upstream: target,
+          configurationIdentity: key,
           assertCurrent: assertClient,
           oauth: owner.oauth,
           preserveAzureUrlFeatures,
@@ -452,27 +456,6 @@ export async function prepareCodexInferenceThreadConfig(params: {
     retained?.route ?? (await prepareCodexInferenceRoute({ ...params, effectiveConfig }));
   if (!route) {
     return undefined;
-  }
-  if (
-    binding?.clientId === params.clientId &&
-    !getCodexInferenceThread(params.client, binding.threadId)
-  ) {
-    const { thread } = await params.client.request(
-      "thread/read",
-      { threadId: binding.threadId, includeTurns: false },
-      {
-        signal: params.signal,
-        assertCurrent: params.assertCurrent,
-        withCurrent: params.authority?.withCurrent,
-      },
-    );
-    params.signal?.throwIfAborted();
-    params.assertCurrent();
-    if (thread.id !== binding.threadId || thread.status?.type !== "notLoaded") {
-      throw new Error(
-        "Codex loaded thread has no owned inference route; reconnect before retrying",
-      );
-    }
   }
   const provider = owner.handles.get(route)?.provider;
   if (!provider) {
@@ -644,7 +627,7 @@ export function bindCodexInferenceThread(
   owner.threads.set(threadId, { route, providers: projected, qualification });
 }
 
-export function forgetCodexInferenceThread(client: CodexAppServerClient, threadId: string): void {
+function forgetCodexInferenceThread(client: CodexAppServerClient, threadId: string): void {
   const owner = owners.get(client);
   owner?.threads.get(threadId)?.route.context.forget(threadId);
   owner?.threads.delete(threadId);

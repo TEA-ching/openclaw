@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { TalkClientCreateResult } from "../../../../packages/gateway-protocol/src/schema/channels.js";
+import type { PrepareAssistantTranscriptMessage } from "../../../config/sessions/transcript-assistant-delivery.js";
 import type { OpenClawConfig } from "../../../config/types.js";
 import type { RealtimeVoiceProviderPlugin } from "../../../plugins/types.js";
 import type { BoundedSerialQueue } from "../../../shared/bounded-serial-queue.js";
 import type { RealtimeVoiceAgentControlResult } from "../../../talk/agent-run-control.js";
 import type { ClientVoiceSessionSource } from "../../../talk/client-voice-session-source.js";
+import type { ClientVoiceSessionWriter } from "../../../talk/client-voice-session-write.js";
 import type { createClientVoiceTranscriptReadiness } from "../../../talk/client-voice-transcript-readiness.js";
 import type { InternalRealtimeVoiceProviderCapabilities } from "../../../talk/provider-internal.js";
 import type {
@@ -105,6 +107,7 @@ export class TalkRealtimeRelayOutputOwnership {
     private readonly activeTurnId: () => string | undefined,
     private readonly ensureTurn: () => string,
     private readonly fail: (message: string) => void,
+    private readonly continuousOutput: () => boolean,
   ) {}
 
   get discarding(): boolean {
@@ -153,7 +156,13 @@ export class TalkRealtimeRelayOutputOwnership {
     if (this.discarding) {
       return undefined;
     }
-    const activeTurnId = this.activeTurnId();
+    // Continuous transports never send response.created, so output that arrives
+    // before client input starts its own turn, as an ID-less response does.
+    const activeTurnId =
+      this.activeTurnId() ??
+      (claim && this.phase === "unowned" && this.continuousOutput()
+        ? this.ensureTurn()
+        : undefined);
     if (activeTurnId && this.mode === "turn-bound" && claim && this.phase === "unowned") {
       this.cancelledTerminal = undefined;
       Object.assign(this, { phase: "owned" as const, turnId: activeTurnId });
@@ -248,6 +257,7 @@ export class TalkRealtimeRelayOutputOwnership {
 export type RelayAgentRun = {
   runId: string;
   sessionKey: string;
+  detached?: boolean;
   standalone?: RelayAgentRunRegistration;
   releaseVoice?: () => void;
 };
@@ -257,6 +267,7 @@ export type RelayAgentRunRegistration = {
   isCurrent: () => boolean;
   release: () => void;
   abortIfCurrent: () => void;
+  prepareTranscript: PrepareAssistantTranscriptMessage;
 };
 
 export type RelaySession = {
@@ -275,6 +286,8 @@ export type RelaySession = {
   expiresAtMs: number;
   cleanupTimer: ReturnType<typeof setTimeout>;
   activeAgentRuns: Map<string, RelayAgentRun>;
+  /** Keep completed consult answers until the transport can no longer speak them. */
+  unspokenAnswers?: Map<string, (writer: ClientVoiceSessionWriter) => Promise<void>>;
   provider: string;
   activeAgentToolCalls: Map<string, RelayAgentRunRegistration>;
   toolCalls: RelayToolCallLedger;
@@ -457,7 +470,11 @@ export function pruneInactiveRelayAgentRuns(session: RelaySession): number {
 
 /** Omitting the abort reason releases relay correlation while accepted work continues. */
 export function retireRelayAgentRuns(session: RelaySession, reason?: string): void {
-  if (reason !== undefined) {
+  if (reason === undefined) {
+    for (const run of session.activeAgentRuns.values()) {
+      run.detached = true;
+    }
+  } else {
     for (const [runId, run] of session.activeAgentRuns) {
       const current =
         run.standalone?.isCurrent() ||

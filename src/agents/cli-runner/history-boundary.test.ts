@@ -19,16 +19,15 @@ import {
 import * as sessionAccessor from "../../config/sessions/session-accessor.js";
 import { appendTranscriptEventSync } from "../../config/sessions/session-accessor.sqlite-transcript-write.test-support.js";
 import { projectPublicSessionEntry } from "../../config/sessions/session-entry-projection.js";
-import {
-  getOwnedSessionTranscriptWriterFence,
-  runWithoutOwnedSessionTranscriptWrites,
-} from "../../config/sessions/transcript-write-context.js";
+import { runWithoutOwnedSessionTranscriptWrites } from "../../config/sessions/transcript-write-context-owner.js";
+import { getOwnedSessionTranscriptWriterFence } from "../../config/sessions/transcript-write-context.js";
 import type { InternalSessionEntry } from "../../config/sessions/types.js";
 import { useSessionStoreTempDirs } from "../../test-utils/session-state-cleanup.js";
 import { prepareSystemAgentRunAdmission } from "../admitted-run-context.js";
 import type { AuthProfileCredential } from "../auth-profiles/types.js";
 import { persistCliSessionBindingResult } from "../cli-session-store.js";
 import { claimAgentSessionWriter } from "../embedded-agent-runner/run/session-bootstrap.js";
+import { runWithModelFallback } from "../model-fallback-runner.js";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../sessions/session-manager.js";
 import { persistCliAssistantTranscript } from "./cli-run-transcript.js";
 import { prepareCliHistoryBoundary } from "./history-boundary.js";
@@ -473,9 +472,23 @@ describe("CLI transcript account boundary", () => {
       await f.withRun("direct-cli-blocked", async (direct) => {
         direct.sessionEntry = loadSessionEntryReadOnly(f.target);
         const before = structuredClone(direct.sessionEntry);
-        await expect(prepareCliHistoryBoundary(direct, identity)).rejects.toThrow(
-          "CLI history owner changed before preparation",
+        const run = vi.fn(async (provider: string) =>
+          provider === "fixture-next"
+            ? "replayed"
+            : (await prepareCliHistoryBoundary(direct, identity), "prepared"),
         );
+        // The refusal is local session ownership; replaying on another model cannot repair it.
+        const refusal = runWithModelFallback({
+          cfg: undefined,
+          provider: "test-cli",
+          model: "fixture-model",
+          manifestPlugins: [],
+          fallbacksOverride: ["fixture-next/fixture-model"],
+          run,
+        });
+        await expect(refusal).rejects.toMatchObject({ name: "CliHistoryOwnerChangedError" });
+        await expect(refusal).rejects.toThrow("CLI history owner changed before preparation");
+        expect(run).toHaveBeenCalledOnce();
         expect(direct.sessionEntry).toEqual(before);
       });
     });

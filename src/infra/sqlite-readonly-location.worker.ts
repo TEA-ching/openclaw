@@ -2,6 +2,8 @@ import path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { deserialize } from "node:v8";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { scheduleOpenClawCompileCacheFlush } from "../../node-compile-cache.mjs";
+import { routeLogsToStderr } from "../logging/console.js";
 import { withArtifactPreservingStateReads } from "../state/artifact-preserving-state-reads.js";
 import { jsonFieldBatches } from "./json-field-transfer.js";
 import { isPrivateDirectoryCreationRefused } from "./private-directory-creation.js";
@@ -58,6 +60,7 @@ async function inspect(args: string[]): Promise<SqliteReadOnlyWorkerResult> {
       mode !== "async" &&
       mode !== "consolidated" &&
       mode !== "reclaim" &&
+      mode !== "update-generation" &&
       !isSqliteSnapshotStagingMode(mode)) ||
     !pathname
   ) {
@@ -71,6 +74,16 @@ async function inspect(args: string[]): Promise<SqliteReadOnlyWorkerResult> {
       throw new Error(
         "SQLite source identity is supported only for artifact-preserving sync copies",
       );
+    }
+    if (mode === "update-generation") {
+      // Committed generation reads need SQLite; keep them off the lightweight
+      // source-revision worker and its standalone build graph.
+      const { readUpdateDatabaseGenerationObservation } =
+        await import("./update-database-generations.js");
+      return {
+        ok: true,
+        generation: JSON.stringify(readUpdateDatabaseGenerationObservation(pathname)),
+      };
     }
     const expectedSourceIdentity =
       args[3] === undefined ? undefined : readDatabaseFileIdentity(JSON.parse(args[3]));
@@ -319,7 +332,7 @@ function runSession(): void {
             throw new Error(`Unknown SQLite read-only operation: ${request.type}`);
           }
           assertExistingDatabaseIdentity(pathname, expectedIdentity);
-          const value = sqliteReadOnlyOperations.execute(request, {
+          const value = await sqliteReadOnlyOperations.execute(request, {
             path: pathname,
             env: process.env,
           });
@@ -362,7 +375,9 @@ function runSession(): void {
         isRecord(read) && read.artifactPreserving === true
           ? withArtifactPreservingStateReads(execute, { agentDatabases: true })
           : execute()
-      ).catch((error: unknown) => fail(id, error));
+      )
+        .catch((error: unknown) => fail(id, error))
+        .finally(scheduleOpenClawCompileCacheFlush);
       return;
     }
     if (
@@ -395,11 +410,14 @@ function runSession(): void {
           busy = false;
         });
       })
-      .catch((error: unknown) => fail(id, error));
+      .catch((error: unknown) => fail(id, error))
+      .finally(scheduleOpenClawCompileCacheFlush);
   });
 }
 
 if (process.argv[2] === SQLITE_READONLY_CHILD_ARG) {
+  // One-shot stdout is the JSON result, and sessions may inherit a JSON caller's stdout.
+  routeLogsToStderr();
   if (process.argv[3] === "session" && process.send) {
     runSession();
   } else {

@@ -127,7 +127,9 @@ export async function add(
         enabledExplicit: opts?.enabledExplicit,
         systemOwned: opts?.systemOwned,
         createdActor: opts?.createdActor,
+        inferenceBinding: opts?.inferenceBinding,
         sourceConversation: opts?.sourceConversation,
+        operatorSource: opts?.operatorSource,
         skillLibrarySelections: opts?.skillLibrarySelections,
         scheduledToolPolicy: opts?.scheduledToolPolicy,
         toolsAllowProvenance: opts?.toolsAllowProvenance,
@@ -270,6 +272,7 @@ async function updateLoadedJob(params: {
     id,
     patch,
     options: {
+      inferenceBinding: opts?.inferenceBinding,
       scheduledToolPolicy: opts?.scheduledToolPolicy,
       toolsAllowProvenance: opts?.toolsAllowProvenance,
       toolsAllowExecTarget: opts?.toolsAllowExecTarget,

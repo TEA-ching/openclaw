@@ -12,6 +12,7 @@ import {
   STARTUP_MIGRATION_LEASE_TTL_MS,
 } from "../../infra/startup-migration-checkpoint.js";
 import { hasCommandProcessCleanupError } from "../../process/exec-result.js";
+import { resolveCommandProcessSignal } from "../../process/exec-spawn.js";
 import { isPidAlive } from "../../shared/pid-alive.js";
 import { sleep } from "../../utils.js";
 import {
@@ -94,6 +95,7 @@ type GatewayRestartWaitOptions = {
   expectedBuildId?: string | null;
   requireRunningService?: boolean;
   requirePluginHealth?: boolean;
+  requireChannelHealth?: boolean;
   /** Diagnostics can report absence immediately; start/restart callers wait for installation. */
   waitForMissingService?: boolean;
   supervisorKeepsAlive?: boolean;
@@ -112,7 +114,7 @@ export async function waitForGatewayHealthyRestart(
       | { child: Pick<ChildProcess, "pid" | "exitCode" | "signalCode">; service?: never }
     ),
 ): Promise<GatewayRestartResult> {
-  const signal = params.deadline?.signal ?? params.signal;
+  const signal = resolveCommandProcessSignal(params.deadline?.signal ?? params.signal);
   const read = <T>(phase: string, operation: () => Promise<T>) =>
     params.deadline
       ? params.deadline.read(`${params.phase ?? "health-wait"}:${phase}`, operation)
@@ -198,7 +200,7 @@ export async function waitForGatewayHealthyRestart(
       snapshot.runtime.status !== "running" ||
       snapshot.versionMismatch ||
       snapshot.buildIdMismatch ||
-      snapshot.channelProbeErrors?.length ||
+      (params.requireChannelHealth !== false && snapshot.channelProbeErrors?.length) ||
       (params.requirePluginHealth !== false && snapshot.activatedPluginErrors?.length) ||
       snapshot.staleGatewayPids.length > 0
     ) {
@@ -261,6 +263,7 @@ export async function waitForGatewayHealthyRestart(
         expectedVersion: params.expectedVersion,
         expectedBuildId: params.expectedBuildId,
         requirePluginHealth: params.requirePluginHealth,
+        requireChannelHealth: params.requireChannelHealth,
         probeContext,
         configuredProbe,
         probeHosts,
@@ -333,7 +336,7 @@ export async function waitForGatewayHealthyRestart(
       if (params.requirePluginHealth !== false && snapshot.activatedPluginErrors?.length) {
         return withWaitContext(snapshot, "plugin-errors", elapsedMs);
       }
-      if (snapshot.channelProbeErrors?.length) {
+      if (params.requireChannelHealth !== false && snapshot.channelProbeErrors?.length) {
         return withWaitContext(snapshot, "channel-errors", elapsedMs);
       }
       if (snapshot.versionMismatch) {
@@ -341,6 +344,10 @@ export async function waitForGatewayHealthyRestart(
       }
       if (snapshot.buildIdMismatch) {
         return withWaitContext(snapshot, "build-id-mismatch", elapsedMs);
+      }
+      // Partial settling clears snapshot.healthy, not the successful observation.
+      if (!healthy && snapshot.authenticationError) {
+        return withWaitContext(snapshot, "auth-rejected", elapsedMs);
       }
       if (snapshot.staleGatewayPids.length > 0 && snapshot.runtime.status !== "running") {
         return withWaitContext(snapshot, "stale-pids", elapsedMs);

@@ -188,6 +188,9 @@ export async function runAutoUpdateCommand(
       }
     } else {
       // A joined helper owns another run; it cannot complete this campaign's admission.
+      await recordUpdateRunPhase(params.runId, "requested", {
+        origin: { nextAction: started.message },
+      });
       await finishUpdateRun(params.runId, {
         status: "skipped",
         reason: "managed-service-handoff-already-running",
@@ -259,7 +262,7 @@ export async function runCampaignUpdate(params: {
   runAuto: AutoUpdateRunner;
   canApply: () => boolean;
   campaign: UpdateCampaignController;
-  onAttempt: (version: string) => void;
+  onAttempt: (version: string) => Promise<void> | void;
   onUpdateRunCreated?: () => void;
   signal?: AbortSignal;
 }): Promise<"handoff" | "applied" | "failed"> {
@@ -343,7 +346,10 @@ export async function runCampaignUpdate(params: {
     if (!isCurrent()) {
       return "failed";
     }
-    params.onAttempt(params.version);
+    await params.onAttempt(params.version);
+    if (!isCurrent()) {
+      return "failed";
+    }
 
     const outcome = await params.runAuto({
       runId,

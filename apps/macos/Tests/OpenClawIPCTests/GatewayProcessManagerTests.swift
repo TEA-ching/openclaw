@@ -462,6 +462,7 @@ struct GatewayProcessManagerTests {
     private func makeGatewayReadinessFixture(
         url: URL,
         clock: any Clock<Duration> = ContinuousClock(),
+        childSupervisor: GatewayChildSupervisor = GatewayChildSupervisor(),
         taskFactory: @escaping GatewayTestWebSocketSession.TaskFactory)
         -> (session: GatewayTestWebSocketSession, connection: GatewayConnection, manager: GatewayProcessManager)
     {
@@ -471,7 +472,7 @@ struct GatewayProcessManagerTests {
             sessionBox: WebSocketSessionBox(session: session))
         // Keep fixture dependencies private for the manager's whole lifetime;
         // late probe cleanup must not fall back to shared app services.
-        let manager = GatewayProcessManager(readinessClock: clock)
+        let manager = GatewayProcessManager(readinessClock: clock, childSupervisor: childSupervisor)
         manager.setTestingConnection(connection)
         manager.setTestingSkipControlChannelRefresh(true)
         return (session, connection, manager)
@@ -949,13 +950,21 @@ struct GatewayProcessManagerTests {
                 #expect(manager.retainedServiceCLI?.hadRuntimePin == true)
             }
             #expect(GatewayLaunchAgentManager.testingDaemonCommandCallsSnapshot().isEmpty)
+            try makeExecutableForTests(at: replacement.bun)
+            defer { try? FileManager.default.removeItem(at: state.appendingPathComponent("runtime")) }
             let resumed = GatewayProcessManager()
             #expect(await resumed._testEnableLaunchAgentIfNeededInstalled(port: 29871))
             let command = try #require(GatewayLaunchAgentManager.testingResolvedDaemonCommandsSnapshot()
                 .first { $0.contains("install") })
+            // The resumed service keeps the stable Bun path its macOS grants belong to.
             let expected = operatorRuntime ? original : GatewayLaunchAgentManager.InstalledServiceCLI(
-                prefix: replacement.cliCommand, sqliteLibrary: replacement.sqliteLibrary.path)
+                prefix: [replacement.serviceBun.path, replacement.cliCommand[1]],
+                sqliteLibrary: replacement.sqliteLibrary.path)
             #expect(Array(command.prefix(2)) == expected.prefix)
+            let runtimePath = try #require(command.firstIndex(of: "--runtime-path"))
+            #expect(command[runtimePath + 1] == expected.prefix[0])
+            #expect(FileManager.default.contentsEqual(
+                atPath: replacement.serviceBun.path, andPath: replacement.bun.path) == !operatorRuntime)
             #expect(resumed.retainedServiceCLI?.sqliteLibrary == expected.sqliteLibrary)
             #expect(resumed.retainedServiceCLI?.environment["OPENCLAW_SQLITE_LIBRARY"] == expected.sqliteLibrary)
         }
@@ -1817,14 +1826,31 @@ struct GatewayProcessManagerTests {
         }
     }
 
-    @Test func `inactive lifecycle skips persistence ensure`() async throws {
-        try await self.withLaunchAgentEnvironment {
-            let manager = self.manager
-            manager.desiredActive = false
-            _ = await manager.ensureLaunchAgentEnabledIfNeeded()
+    @Test(arguments: ["inactive", "repair-owned", "repair-during-inspection"])
+    func `persistence ensure defers to inactive or repair-owned activation`(_ scenario: String) async throws {
+        let manager = self.manager
+        let port = try self.availableGatewayPort()
+        try await self.withLaunchAgentEnvironment(
+            port: port,
+            commandHook: { arguments in
+                if scenario == "repair-during-inspection", arguments.first == "status" {
+                    await MainActor.run { manager.hostingChangeInProgress = true }
+                }
+            }) {
+                manager.desiredActive = scenario != "inactive"
+                manager.hostingChangeInProgress = scenario == "repair-owned"
+                defer { manager.hostingChangeInProgress = false }
 
-            #expect(GatewayLaunchAgentManager.testingDaemonCommandCallsSnapshot().isEmpty)
-        }
+                let installed = await manager.ensureLaunchAgentEnabledIfNeeded()
+
+                let calls = GatewayLaunchAgentManager.testingDaemonCommandCallsSnapshot()
+                if scenario == "inactive" {
+                    #expect(calls.isEmpty)
+                } else {
+                    #expect(!calls.contains { $0.first == "install" })
+                }
+                #expect(!installed)
+            }
     }
 
     @Test(arguments: [
@@ -2338,6 +2364,118 @@ struct GatewayProcessManagerTests {
 
             await connection.shutdown()
             await PortGuardian.shared.setTestingDescriptor(nil, forPort: port)
+        }
+    }
+
+    @Test(arguments: ["ready", "failed", "cancelled"])
+    func `first-run handoff survives supervised startup retries`(outcome: String) async throws {
+        try await self.withLaunchAgentEnvironment {
+            let retryClock = ManualTestClock()
+            let waiterClock = ManualTestClock()
+            let exits = (0..<3).map { _ in AsyncTestGate() }
+            let started = (0..<3).map { _ in AsyncTestGate() }
+            let restarting = (0..<2).map { _ in AsyncTestGate() }
+            var launchCount = 0
+            let supervisor = GatewayChildSupervisor(clock: retryClock) { _ in
+                let index = launchCount
+                launchCount += 1
+                return .init(
+                    waitUntilStarted: {
+                        started[index].open()
+                        return Int32(4200 + index)
+                    },
+                    wait: {
+                        await exits[index].wait()
+                        return "fixture startup failed"
+                    },
+                    terminate: { exits[index].open() })
+            }
+            let url = try #require(URL(string: "ws://example.invalid"))
+            let (session, connection, manager) = self.makeGatewayReadinessFixture(
+                url: url, clock: waiterClock, childSupervisor: supervisor)
+            {
+                GatewayTestWebSocketTask()
+            }
+            var firstRun: Task<OnboardingFirstRun.Fallback?, Never>?
+            let cleanup = {
+                firstRun?.cancel()
+                manager.desiredActive = false
+                await supervisor.stop()
+                await manager.waitForStartupAttempt()
+                _ = await firstRun?.value
+                await connection.shutdown()
+            }
+            do {
+                manager.desiredActive = true
+                manager.setTestingStatus(.starting)
+                let generation = manager.gatewayStartGeneration
+                var restartCount = 0
+                _ = try await supervisor.start(configuration: .init(
+                    bun: URL(fileURLWithPath: "/fixture/bun"),
+                    packageRoot: URL(fileURLWithPath: "/fixture/package"), environment: [:],
+                    logPath: "/unused/gateway.log", port: GatewayEnvironment.gatewayPort(),
+                    allowUnconfigured: false))
+                { event in
+                    if case .restarting = event {
+                        manager.handleChildEvent(event, port: GatewayEnvironment.gatewayPort())
+                        restarting[restartCount].open()
+                        restartCount += 1
+                    }
+                }
+                manager.beginGatewayStartTask(generation: generation) { await exits[0].wait() }
+                let waiting = AsyncTestGate()
+                var configWritten = false
+                var handoffs = 0
+                var completed = 0
+                var settled = false
+                let run = Task {
+                    let fallback = await OnboardingFirstRun.run(
+                        selectLocal: { configWritten = true }, prepareRuntime: {},
+                        startGateway: {
+                            waiting.open()
+                            guard await manager.waitForGatewayReady(timeout: 0.01) else {
+                                throw CancellationError()
+                            }
+                        },
+                        supportsAutomaticSetup: { true },
+                        openDashboard: { handoffs += 1 },
+                        markComplete: { completed += 1 })
+                    settled = true
+                    return fallback
+                }
+                firstRun = run
+                await waiting.wait()
+                await waiterClock.waitForSleep(until: waiterClock.now.advanced(by: .milliseconds(100)))
+                for attempt in 0..<2 {
+                    exits[attempt].open()
+                    await restarting[attempt].wait()
+                    await manager.waitForStartupAttempt()
+                    let registration = waiterClock.sleepRegistrations
+                    waiterClock.advance(by: .milliseconds(100))
+                    await waiterClock.waitForSleep(
+                        until: waiterClock.now.advanced(by: .milliseconds(100)), after: registration)
+                    #expect(configWritten)
+                    #expect(!settled)
+                    #expect(handoffs == 0)
+                    retryClock.advance(by: .seconds(1 << attempt))
+                    await started[attempt + 1].wait()
+                }
+                switch outcome {
+                case "ready": manager.setTestingStatus(.running(details: "fixture healthy"))
+                case "failed": manager.handleChildEvent(.failed("fixture terminal failure"), port: 0)
+                default: run.cancel()
+                }
+                waiterClock.advance(by: .milliseconds(100))
+                let fallback = await run.value
+                #expect((fallback == nil) == (outcome == "ready"))
+                #expect(handoffs == (outcome == "ready" ? 1 : 0))
+                #expect(completed == handoffs)
+                #expect(session.snapshotMakeCount() == 0)
+            } catch {
+                await cleanup()
+                throw error
+            }
+            await cleanup()
         }
     }
 

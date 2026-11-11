@@ -176,13 +176,16 @@ describe("node exec events", () => {
     loadOrCreateProcessDeviceIdentityMock.mockClear();
   });
 
-  it.each([false, true])(
-    "preserves exec authorization and terminal consumption with suppressNotifyOnExit=%s",
-    async (suppressNotifyOnExit) => {
+  it.each([
+    { suppressNotifyOnExit: true, settle: "disconnect" },
+    { suppressNotifyOnExit: false, settle: "result" },
+    { suppressNotifyOnExit: false, settle: "disconnect" },
+  ] as const)(
+    "consumes exec authorization and notifies only undelivered output (suppress=$suppressNotifyOnExit, settle=$settle)",
+    async ({ suppressNotifyOnExit, settle }) => {
       const registry = new NodeRegistry();
-      const connection = { connId: "conn-1" },
-        auth = registry.authorizeSystemRunEvent.bind(registry);
-      const [runId, sessionKey] = [`run-seq-suppress-${suppressNotifyOnExit}`, "agent:main:main"];
+      const connection = { connId: "conn-1" };
+      const [runId, sessionKey] = [`run-seq-${suppressNotifyOnExit}-${settle}`, "agent:main:main"];
       const eventRouting = { sessionKey, contextKey: `exec:${runId}` };
       const startedPayload = { runId, sessionKey, command: "printf ok" };
       const finishedPayload = {
@@ -195,52 +198,147 @@ describe("node exec events", () => {
       const finishedEvent = nodeEvent("exec.finished", finishedPayload);
       const unmatchedEvent = eventResult("exec.finished", "unmatched_exec_event");
       const ctx = buildCtx({
-        authorizeNodeSystemRunEvent: (p) => auth({ ...p, terminal: p.event !== "exec.started" }),
+        authorizeNodeSystemRunEvent: (p) =>
+          registry.authorizeSystemRunEventWithState({
+            ...p,
+            terminal: p.event !== "exec.started",
+          }) ?? false,
       });
-      registry.register(makeNodeClient(connection.connId, "node-1"), {
-        pairingIdentity: "identity-a",
-      });
+      const client = makeNodeClient(connection.connId, "node-1");
+      const sent: string[] = [];
+      Object.assign(client.socket, { send: (frame: string) => sent.push(frame) });
+      registry.register(client, { pairingIdentity: "identity-a" });
       const invoke = registry.invoke({
         nodeId: "node-1",
         command: "system.run",
         params: { runId, sessionKey },
         timeoutMs: 0,
       });
-      try {
-        await expect(
-          handleNodeEvent(ctx, "node-1", finishedEvent, { connId: "wrong-conn" }),
-        ).resolves.toEqual(unmatchedEvent);
-        await expect(
-          handleNodeEvent(ctx, "node-1", nodeEvent("exec.started", startedPayload), connection),
-        ).resolves.toBeUndefined();
+      await expect(
+        handleNodeEvent(ctx, "node-1", finishedEvent, { connId: "wrong-conn" }),
+      ).resolves.toEqual(unmatchedEvent);
+      await expect(
+        handleNodeEvent(ctx, "node-1", nodeEvent("exec.started", startedPayload), connection),
+      ).resolves.toBeUndefined();
 
-        const started = [`Exec started (node=node-1 id=${runId}): printf ok`, eventRouting];
-        const wake = [execEventHeartbeatOptions(sessionKey)];
-        expect(enqueueSystemEventMock.mock.calls).toEqual([started]);
-        expect(requestHeartbeatMock.mock.calls).toEqual([wake]);
+      const started = [`Exec started (node=node-1 id=${runId}): printf ok`, eventRouting];
+      const wake = [execEventHeartbeatOptions(sessionKey)];
+      expect(enqueueSystemEventMock.mock.calls).toEqual([started]);
+      expect(requestHeartbeatMock.mock.calls).toEqual([wake]);
 
-        await expect(
-          handleNodeEvent(ctx, "node-1", finishedEvent, connection),
-        ).resolves.toBeUndefined();
-        // Remove suppression on replay so filtering cannot hide unconsumed authorization.
-        await expect(
-          handleNodeEvent(
-            ctx,
-            "node-1",
-            nodeEvent("exec.finished", { ...finishedPayload, suppressNotifyOnExit: false }),
-            connection,
-          ),
-        ).resolves.toEqual(unmatchedEvent);
-        const finished = [`Exec finished (node=node-1 id=${runId}, code 0)\ndone`, eventRouting];
-        expect(enqueueSystemEventMock.mock.calls).toEqual(
-          suppressNotifyOnExit ? [started] : [started, finished],
-        );
-        expect(requestHeartbeatMock.mock.calls).toEqual(
-          suppressNotifyOnExit ? [wake] : [wake, wake],
-        );
-      } finally {
+      await expect(
+        handleNodeEvent(ctx, "node-1", finishedEvent, connection),
+      ).resolves.toBeUndefined();
+      // Remove suppression on replay so filtering cannot hide unconsumed authorization.
+      await expect(
+        handleNodeEvent(
+          ctx,
+          "node-1",
+          nodeEvent("exec.finished", { ...finishedPayload, suppressNotifyOnExit: false }),
+          connection,
+        ),
+      ).resolves.toEqual(unmatchedEvent);
+      // The waiting caller owns the output until its invoke settles.
+      expect(enqueueSystemEventMock.mock.calls).toEqual([started]);
+
+      if (settle === "result") {
+        const request = sent
+          .map((frame) => JSON.parse(frame) as { event?: string; payload?: { id?: string } })
+          .find((frame) => frame.event === "node.invoke.request");
+        registry.handleInvokeResult({
+          id: request?.payload?.id ?? "",
+          nodeId: "node-1",
+          connId: connection.connId,
+          ok: true,
+          payloadJSON: "{}",
+        });
+        await expect(invoke).resolves.toMatchObject({ ok: true });
+      } else {
         registry.unregister(connection.connId);
-        await invoke;
+        await expect(invoke).resolves.toMatchObject({ ok: false });
+      }
+      const finished = [`Exec finished (node=node-1 id=${runId}, code 0)\ndone`, eventRouting];
+      const recovered = !suppressNotifyOnExit && settle === "disconnect";
+      expect(enqueueSystemEventMock.mock.calls).toEqual(
+        recovered ? [started, finished] : [started],
+      );
+      expect(requestHeartbeatMock.mock.calls).toEqual(recovered ? [wake, wake] : [wake]);
+      registry.unregister(connection.connId);
+    },
+  );
+
+  it.each([
+    { settle: "result", notified: false },
+    { settle: "timeout", notified: true },
+  ] as const)(
+    "notifies a late exec.finished only after an undelivered invocation ($settle)",
+    async ({ settle, notified }) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      const registry = new NodeRegistry();
+      const connId = "late-mac-conn";
+      try {
+        const frames: string[] = [];
+        const client = makeNodeClient(connId, "late-mac-node");
+        Object.assign(client.socket, { send: (frame: string) => frames.push(frame) });
+        registry.register(client, { pairingIdentity: "late-mac-identity" });
+        const runId = `late-${settle}`;
+        const sessionKey = "agent:main:late";
+        const invocation = registry.invoke({
+          nodeId: "late-mac-node",
+          command: "system.run",
+          params: { runId, sessionKey },
+          timeoutMs: 60_000,
+        });
+        await waitForFast(() => expect(frames).toHaveLength(1));
+        if (settle === "result") {
+          registry.handleInvokeResult({
+            id: JSON.parse(frames[0]!).payload.id,
+            nodeId: "late-mac-node",
+            connId,
+            ok: true,
+            payloadJSON: JSON.stringify({ exitCode: 0, stdout: "late" }),
+          });
+        } else {
+          vi.advanceTimersByTime(60_000);
+        }
+        await expect(invocation).resolves.toMatchObject({ ok: settle === "result" });
+        const ctx = buildCtx({
+          authorizeNodeSystemRunEvent: (params) =>
+            registry.authorizeSystemRunEventWithState({
+              ...params,
+              terminal: params.event !== "exec.started",
+            }) ?? false,
+        });
+        const payload = { runId, sessionKey, exitCode: 0, output: "late" };
+        if (!notified) {
+          await expect(
+            handleNodeEvent(ctx, "late-mac-node", nodeEvent("exec.started", payload), { connId }),
+          ).resolves.toBeUndefined();
+          expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+          expect(requestHeartbeatMock).not.toHaveBeenCalled();
+        }
+        await expect(
+          handleNodeEvent(ctx, "late-mac-node", nodeEvent("exec.finished", payload), { connId }),
+        ).resolves.toBeUndefined();
+        if (notified) {
+          expect(enqueueSystemEventMock).toHaveBeenCalledExactlyOnceWith(
+            `Exec finished (node=late-mac-node id=${runId}, code 0)
+late`,
+            { sessionKey, contextKey: `exec:${runId}` },
+          );
+          expect(requestHeartbeatMock).toHaveBeenCalledExactlyOnceWith(
+            execEventHeartbeatOptions(sessionKey),
+          );
+        } else {
+          expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+          expect(requestHeartbeatMock).not.toHaveBeenCalled();
+        }
+        await expect(
+          handleNodeEvent(ctx, "late-mac-node", nodeEvent("exec.finished", payload), { connId }),
+        ).resolves.toEqual(eventResult("exec.finished", "unmatched_exec_event"));
+      } finally {
+        registry.unregister(connId);
+        vi.useRealTimers();
       }
     },
   );
@@ -1093,6 +1191,7 @@ describe("agent request events", () => {
       diskAvailableBytes: 16384,
     };
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(100_000);
+    using parse = vi.spyOn(JSON, "parse");
     setActiveNodeContexts([{ nodeId: "active-computer" }]);
     try {
       await expect(
@@ -1102,6 +1201,7 @@ describe("agent request events", () => {
         }),
       ).resolves.toEqual(eventResult("node.host.stats", "updated", true));
       expect(session.hostStats).toEqual({ ...stats, updatedAtMs: 100_000 });
+      expect(parse.mock.calls.filter(([raw]) => raw === JSON.stringify(stats))).toHaveLength(1);
       expect(broadcast).toHaveBeenCalledExactlyOnceWith(
         "node.hostStats",
         { nodeId: session.nodeId, hostStats: { ...stats, updatedAtMs: 100_000 } },
@@ -1139,18 +1239,16 @@ describe("agent request events", () => {
         broadcast,
         updateNodeHostStats: (params) => registry.updateHostStats(params),
       };
+      using parse = vi.spyOn(JSON, "parse");
+      const payload = { ...stats, memoryFreeBytes: 1024 };
       try {
         await expect(
-          handleNodeEvent(
-            ctx,
-            session.nodeId,
-            nodeEvent("node.host.stats", { ...stats, memoryFreeBytes: 1024 }),
-            {
-              connId: connection === "stale" ? "retired-connection" : client.connId,
-            },
-          ),
+          handleNodeEvent(ctx, session.nodeId, nodeEvent("node.host.stats", payload), {
+            connId: connection === "stale" ? "retired-connection" : client.connId,
+          }),
         ).resolves.toEqual(eventResult("node.host.stats", "stale_connection"));
         expect(session.hostStats).toEqual({ ...stats, updatedAtMs: 100 });
+        expect(parse.mock.calls.filter(([raw]) => raw === JSON.stringify(payload))).toHaveLength(1);
         expect(broadcast).not.toHaveBeenCalled();
       } finally {
         registry.unregister(client.connId);

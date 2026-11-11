@@ -30,8 +30,8 @@ import {
   upsertSessionEntryCore,
 } from "../config/sessions/session-accessor.js";
 import { replaceTranscriptEvents } from "../config/sessions/session-accessor.sqlite-transcript-write.test-support.js";
+import { runWithoutOwnedSessionTranscriptWrites } from "../config/sessions/transcript-write-context-owner.js";
 import {
-  runWithoutOwnedSessionTranscriptWrites,
   SessionTranscriptWriterClaimReboundError,
   withOwnedSessionTranscriptWrites,
 } from "../config/sessions/transcript-write-context.js";
@@ -734,13 +734,19 @@ describe("CLI history through Gateway terminal persistence", () => {
         }
         const context = await f.laterContext("account-a");
         expect(JSON.stringify(context.reseedMessages)).toContain("Prior account-owned request");
-        expect(context.durableContext).toContain(
-          "Your request couldn't be completed: Run timed out",
-        );
+        expect(context.durableContext).toBeUndefined();
         const transcript = await loadTranscriptEvents(f.cliTarget);
         expect(
           transcript.filter((entry) => isRecord(entry) && entry.type === "custom_message"),
-        ).toHaveLength(1);
+        ).toEqual([
+          expect.objectContaining({
+            customType: "run-failed-before-reply",
+            content: "Your request couldn't be completed: Run timed out",
+            display: true,
+            excludeFromContext: true,
+            details: { runId: "cli-timeout-run", error: "Run timed out" },
+          }),
+        ]);
         const otherAccount = await f.laterContext("account-b");
         expect(otherAccount.reseedMessages).toEqual([]);
         expect(otherAccount.durableContext).toBeUndefined();
@@ -764,7 +770,16 @@ describe("CLI history through Gateway terminal persistence", () => {
       expect(completed).toBe(false);
       release.resolve();
       await finish;
-      expect((await f.laterContext("account-a")).durableContext).toContain("Run timed out");
+      expect(await loadTranscriptEvents(f.cliTarget)).toContainEqual(
+        expect.objectContaining({
+          type: "custom_message",
+          customType: "run-failed-before-reply",
+          content: "Your request couldn't be completed: Run timed out",
+          display: true,
+          excludeFromContext: true,
+          details: { runId: "cli-timeout-run", error: "Run timed out" },
+        }),
+      );
     });
   });
 

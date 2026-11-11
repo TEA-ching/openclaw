@@ -24,8 +24,9 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-vi.mock("ws", () => ({
-  default: mocks.FakeWebSocket,
+vi.mock("openclaw/plugin-sdk/websocket-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/websocket-runtime")>()),
+  WebSocket: mocks.FakeWebSocket,
 }));
 
 vi.mock("./realtime-quicksilver-socket.js", async () => {
@@ -171,11 +172,13 @@ describe("OpenAI realtime voice bridge connection", () => {
       const cfg = {} as never;
 
       expect(
-        readInternalRealtimeVoiceProviderApi(provider).resolveBrowserSessionCapabilities({
-          cfg,
-          providerConfig: { apiKey: "test-api-key-platform" },
-          model: "gpt-realtime-2.1",
-        }),
+        await readInternalRealtimeVoiceProviderApi(provider).resolveBrowserSessionCapabilitiesAsync(
+          {
+            cfg,
+            providerConfig: { apiKey: "test-api-key-platform" },
+            model: "gpt-realtime-2.1",
+          },
+        ),
       ).toMatchObject({ supportsGatewayControl: true });
       await expect(
         provider.createBrowserSession?.({

@@ -65,6 +65,29 @@ describe("human Notes blocks", () => {
     expect(extractHumanNotesBlock(existing)).toBe(`${startMarker}\n${notes}\n${endMarker}`);
     expect(preserveHumanNotesBlock(rendered, existing)).toBe(existing);
   });
+
+  it.each([startMarker, endMarker])("rejects an unpaired producer-page marker %s", (marker) => {
+    const existing = `# Concept\n\n## Notes\n${marker}\nHandwritten note.\n`;
+
+    expect(() => preserveHumanNotesBlock(rendered, existing, { producerMarkdown: true })).toThrow(
+      "human Notes are missing",
+    );
+  });
+
+  it.each(["\n", "\r\n"])("preserves legacy Notes under an open producer fence (%j)", (newline) => {
+    const humanBlock = [startMarker, "Keep café and trailing spaces.  ", endMarker].join(newline);
+    const existing = `~~~sql${newline}SELECT 1${newline}## Notes${newline}${humanBlock}${newline}`;
+
+    expect(preserveHumanNotesBlock(rendered, existing, { producerMarkdown: true })).toBe(
+      rendered.replace(`${startMarker}\n${endMarker}`, () => humanBlock),
+    );
+  });
+
+  it("does not preserve a legacy producer's closed Notes example", () => {
+    const existing = `~~~markdown\n## Notes\n${startMarker}\nProducer example.\n${endMarker}\n~~~`;
+
+    expect(preserveHumanNotesBlock(rendered, existing, { producerMarkdown: true })).toBe(rendered);
+  });
 });
 
 describe("toWikiPageSummary", () => {
@@ -221,4 +244,41 @@ describe("scanWikiPageSummary linkTargets", () => {
     const links = scanWikiLinkTargets(markdown, "entities/test.md");
     expect(links).toEqual(["RealPage"]);
   });
+});
+
+it("decodes Markdown URL paths without changing literal wiki links or malformed escapes", () => {
+  const markdown = renderWikiMarkdown({
+    frontmatter: { pageType: "source", id: "source.links", title: "Links" },
+    body: "[Notes](../syntheses/plan%20notes.md)\n[Cafe](../syntheses/caf%C3%A9.md#menu)\n[Malformed](../syntheses/100%.md)\n[[literal%20name]]\n`[Code](hidden%20target.md)`",
+  });
+  expect(scanWikiLinkTargets(markdown, "sources/links.md")).toEqual([
+    "literal%20name",
+    "syntheses/plan notes.md",
+    "syntheses/café.md",
+    "syntheses/100%.md",
+  ]);
+});
+
+it("keeps inline link filtering while parsing CommonMark destinations", () => {
+  const markdown = [
+    "[[Wiki target|Alias]]",
+    '[Plan](../syntheses/plan(v2).md?view=full#details "Project plan")',
+    "[Escaped](../syntheses/plan\\(v3\\).md)",
+    "![Image](../assets/diagram.png)",
+    "[External](https://example.com/page.md)",
+    "[Anchor](#details)",
+    "`[Inline code](inline.md)`",
+    "```markdown\n[Fenced code](fenced.md)\n```",
+    "<!-- openclaw:wiki:related:start -->",
+    "[Generated](generated.md)",
+    "<!-- openclaw:wiki:related:end -->",
+    "[Reference][ref]\n\n[ref]: reference.md",
+  ].join("\n\n");
+
+  expect(scanWikiLinkTargets(markdown, "entities/test.md")).toEqual([
+    "Wiki target",
+    "syntheses/plan(v2).md",
+    "syntheses/plan(v3).md",
+    "assets/diagram.png",
+  ]);
 });

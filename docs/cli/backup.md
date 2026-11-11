@@ -13,6 +13,11 @@ title: "Backup"
 
 # `openclaw backup`
 
+Human-readable schedule acknowledgements and external backup record labels strip
+terminal escape sequences and display embedded newlines, tabs, and carriage returns
+as `\n`, `\t`, and `\r`. Scheduled command arguments, stored records, and JSON
+output retain their original values.
+
 Create backup archives for OpenClaw state, config, auth profiles, channel/provider
 credentials, sessions, and optionally workspaces. Save them locally or upload to
 a named [storage location](/concepts/storage-locations). SQLite snapshots and Git
@@ -52,6 +57,22 @@ openclaw backup record --status ok --target host-restic --bytes 1048576
 Archive `create`, `list`, `verify`, and `restore`, external `record`, plus SQLite
 `create`, `list`, `verify`, and `restore`, accept `--json` for one machine-readable
 result on stdout.
+
+## PostgreSQL stores
+
+`openclaw backup create` routes each managed database through its physical engine,
+including activated plugins' declared backup resources. If any selected store
+uses PostgreSQL, stop the Gateway through its service owner first. A running
+Gateway causes a refusal: “stop through the service owner, then rerun.” Backup
+never stops it automatically. The requirement also applies to `create --to`.
+
+A PostgreSQL capture contains the original anchor, a sanitized SQLite export
+image, and a format-2 manifest with the profile, engine, store UUID, versions,
+active fragments, allocation facts, sizes, and hashes. The manifest contains no
+DSN. Keep these artifacts together; copying only the anchor does not back up rows.
+Existing format-1 SQLite snapshots remain readable. See
+[Database engines](/reference/database-engines#anchors-and-backups) for matched
+restore and update-recovery behavior.
 
 ## Notes
 
@@ -270,6 +291,12 @@ not create captures, change retention, or change ordinary backup sanitization.
 
 Use `openclaw backup sqlite` when you need a portable artifact for one OpenClaw-owned SQLite database instead of a broad state archive.
 
+This command remains SQLite-only. A PostgreSQL anchor is refused with guidance to
+use `openclaw backup create`. Generic local snapshot providers use the matched
+format-2 PostgreSQL capture when supported; they require the Gateway stopped
+through its service owner and refuse while it is running. They do not turn an
+anchor into an empty SQLite snapshot.
+
 Snapshot creation accepts exactly one named source. Agent sources always use
 the current configuration's resolved `<agentDir>/openclaw-agent.sqlite`, even
 when `agentDir` is outside the state directory:
@@ -319,7 +346,17 @@ Snapshot repositories are local directories. Scheduling, upload, retention, incr
 
 ## Versioned Git backups
 
-`openclaw backup git` stores consistently ordered, per-table JSONL dumps in a plain Git repository owned by the operator. One repository can hold the shared database and every per-agent database:
+`openclaw backup git create --all` also includes PostgreSQL stores discovered
+through activated plugins' declared backup resources, including Workboard.
+`--global` and `--agent <id>` keep their existing source selection. For a
+PostgreSQL source, Git backup routing captures the same sanitized export image,
+anchor, and format-2 manifest. Stop the Gateway through
+its service owner before capture or restore; a running Gateway is refused, never
+stopped automatically. A matched PostgreSQL restore verifies the artifacts and
+loads a fresh owned namespace before publishing its anchor. Existing SQLite Git
+backups retain their format and restore behavior.
+
+For SQLite sources, `openclaw backup git` stores consistently ordered, per-table JSONL dumps in a plain Git repository owned by the operator. One repository can hold the shared database and every per-agent database:
 
 ```text
 global/manifest.json
@@ -330,8 +367,8 @@ agents/<agentId>/schema.sql
 agents/<agentId>/tables/<table>.jsonl
 ```
 
-Initialize the repository, then create a snapshot of the shared database and
-all configured agent databases:
+Initialize the repository, then capture the shared database, all configured
+agent databases, and declared PostgreSQL plugin stores:
 
 ```bash
 openclaw backup git init --repository ~/Backups/openclaw-git --remote <private-git-url>
@@ -394,6 +431,8 @@ backup creation does not scrub their history or remove them from later trees.
   Git history is durable. Without `--exclude-secrets`, snapshots include
   credential material and any pushed remote must be private.
 
+SQLite and PostgreSQL Git exports apply the same `--exclude-secrets` policy. PostgreSQL portable images retain empty table definitions so the matching provider can restore them; credential rows and catalog fields are removed before publication.
+
 `src/state/secret-state-tables.ts` is the source of truth for redaction. At this revision, `--exclude-secrets` omits these shared-state tables:
 
 - `audit_identity_keys`
@@ -412,6 +451,7 @@ backup creation does not scrub their history or remove them from later trees.
 - `mcp_oauth_stores`
 - `native_hook_relay_bridges`
 - `secret_store_entries`
+- `web_push_approval_deliveries` (dependent subscription receipts)
 - `web_push_subscriptions`
 - `worker_environment_credentials`
 
@@ -425,6 +465,26 @@ It omits these per-agent tables:
 - `session_suggestions`
 
 For generated plugin model catalogs in per-agent `cache_entries`, including retained migration copies, it removes provider and model API keys and headers while retaining model inventory and unrelated cache rows. Unusable generated-cache rows are omitted rather than exporting unknown secrets.
+
+In `plugin_state_entries` and `plugin_blob_entries`, it removes the identified
+bundled credential scopes listed in `STATE_SECRET_PLUGIN_SCOPES` in the same
+policy file. These include Discord Activity bearer sessions and document tokens,
+Zalo User and Matrix credentials, Matrix recovery
+keys and crypto snapshots, Google Meet, Twitch, X and Microsoft Teams token
+stores, Reef identity keys and setup sessions, MCP relay identity keys, MCP
+Events subscription signing secrets, and Zalo, SMS and Synology Chat hosted
+media bearer records. Retained variants of these namespaces receive the same
+redaction. For Discord thread bindings, it removes only the webhook token from
+each JSON record while retaining routing fields. Unreadable records in that
+credential scope are omitted rather than exported with unknown secrets.
+Other plugin state, including allowlists, spending counters, memory
+settings, registration identities, relay grants and durable blobs, is preserved.
+Restoring a redacted backup requires signing in or registering the affected
+integrations again; hosted media links whose bearer records were omitted must
+be recreated. Custom plugin payloads need their own credential classification;
+this policy does not inspect arbitrary JSON or blob contents for secrets. An
+unclassified custom plugin's `credentials` namespace remains included, for both
+JSON records and blobs.
 
 The backup manifest records omitted tables in `excludedTables` and omitted
 machine-state prefixes in `excludedConfigStateKeyPrefixes`. Restore reports
@@ -567,7 +627,8 @@ openclaw backup record --status failed --target host-restic --error "Backup dest
 ```
 
 `--status ok|failed` and `--target <label>` are required. `--bytes <n>` optionally
-records a nonnegative integer byte count; `--error <text>` records a diagnostic.
+records a nonnegative decimal integer byte count (not radix or exponent notation);
+`--error <text>` records a diagnostic.
 `--json` emits a machine-readable result. The command adds a `kind: "external"`
 outcome using the same best-effort recording semantics as built-in backups. It
 does not run or verify the external backup. Use a stable target label and run
@@ -645,16 +706,23 @@ agent moves or is removed from configuration. Distinct databases belonging to
 the same agent are captured separately. `--no-include-workspace` preserves this
 database coverage.
 
-SQLite files under activated plugins' declared `backupResources` with
-`disposition: "include"` also receive managed snapshots. Other filenames under
-the state directory or an agent directory alone do not establish SQLite ownership.
+SQLite headers identify regular database files even when they use `.db`,
+`.sqlite3`, or no extension. Existing `.sqlite` filename handling is unchanged.
 
-Managed databases are captured with SQLite's online backup API and compacted
+Database files under activated plugins' declared `backupResources` with
+`disposition: "include"` also receive managed snapshots. Workboard declares its
+existing store this way, so its PostgreSQL anchor selects a matched PostgreSQL
+capture instead of an anchor-only copy. Other filenames under the state directory
+or an agent directory alone do not establish database ownership.
+
+Managed SQLite databases are captured with SQLite's online backup API and compacted
 offline with `VACUUM`. Committed write-ahead log (WAL) changes are included,
 deleted-page remnants are removed, and sidecars are omitted. Shared and agent
 databases also receive their existing transient-state sanitization and must match
 their expected role and agent owner. Unsafe aliasing or an owner mismatch stops the backup. A declared plugin database that requires unavailable SQLite capabilities
-also stops the backup rather than falling back to a direct file copy.
+also stops the backup rather than falling back to a direct file copy. Restore
+the required SQLite capabilities or use the plugin's own backup procedure before
+retrying. This also applies to newly recognized database filenames.
 
 Other SQLite files under state and configured agent roots, including their
 sidecars, are copied as opaque bytes. Creation reports each filename in
@@ -689,6 +757,10 @@ Symbolic links are archived as link entries, including absolute and dangling tar
 
 Absolute links retain their original location after restore, including links to separately backed-up config or credentials. They are no longer rewritten to relative targets. Review these links before activating a restored tree on another host or at another path. Older releases, including v2026.9.4, reject archives with absolute or escaping link targets; use the current release to restore those archives. Existing archives remain readable.
 
+Older backups with source-relative hardlink targets remain restorable when each
+target resolves unambiguously to an archived regular file. Missing or ambiguous
+targets are rejected instead of selecting different recovery data.
+
 Installer-managed and rebuildable runtime roots under the state directory are
 also skipped: `dev/`, `git/`, `npm/`, legacy `npm-runtime/`, `tmp/`, and
 `tools/`. These contain managed checkouts, package trees, compiler caches,
@@ -722,6 +794,12 @@ OpenClaw does not enforce a built-in maximum backup size or per-file size limit.
 - Time to rescan the archive with `--verify` or `openclaw backup verify`
 - Destination filesystem behavior: OpenClaw requires no-overwrite hard-link publication so a final archive path never exposes an in-progress copy; unsupported filesystems fail with an actionable error
 
+Interrupting archive creation with Ctrl-C or SIGTERM stops traversal and compression,
+closes the archive writer, and cleans up its owned partial archive and scratch before
+the command exits. Existing archives and backup source files remain unchanged.
+An archive already published to the requested local destination is retained;
+admitted verification and best-effort outcome recording finish before signal exit.
+
 If final-directory durability confirmation fails after publication, the command reports failure but preserves the complete final entry rather than risk deleting a concurrent replacement.
 
 Large workspaces are usually the main driver of archive size. Use `--no-include-workspace` for a smaller/faster backup, or `--only-config` for the smallest archive.
@@ -749,6 +827,8 @@ processes before manually removing their reported scratch directories.
 Published archives and package rollback backups are outside this cleanup.
 Retired scratch is renamed to `openclaw-backup-retired-*` before deletion so a
 later pass can finish partial cleanup even after the lifetime token is gone.
+On Windows, the retirement destination is left absent until a guarded
+no-clobber move, so cleanup does not try to replace an existing directory.
 
 ## Related
 

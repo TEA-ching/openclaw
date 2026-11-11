@@ -114,7 +114,7 @@ describe("runGatewayLoop", () => {
   registerNaturalExitTests(waitForLoopTurn);
   registerGatewayRequestTests(fixtures);
 
-  registerExternalHandoffShutdownTests(fixtures, DEFAULT_RESTART_DEFERRAL_TIMEOUT_MS);
+  registerExternalHandoffShutdownTests(fixtures);
 
   it("does not grant process control to a nonexclusive embedded host", async () => {
     await withIsolatedSignals(async ({ captureSignal }) => {
@@ -176,7 +176,7 @@ describe("runGatewayLoop", () => {
         expect(hostedStopExecute).not.toHaveBeenCalled();
         joined.resolve();
         await expect(exited).resolves.toBe(0);
-        expect(waitForGatewayActiveWork).toHaveBeenCalledWith(315_000, {
+        expect(waitForGatewayActiveWork).toHaveBeenCalledWith(20_000, {
           onSnapshot: expect.any(Function),
         });
         expect(hostedStopExecute).toHaveBeenCalledOnce();
@@ -452,7 +452,7 @@ describe("runGatewayLoop", () => {
             captureSignal(signal)();
             await enteredDrain.promise;
             expect(gatewayWorkAdmissionActual.isGatewayWorkAdmissionClosed()).toBe(true);
-            expect(waitForGatewayActiveWork).toHaveBeenCalledWith(315_000, {
+            expect(waitForGatewayActiveWork).toHaveBeenCalledWith(20_000, {
               onSnapshot: expect.any(Function),
             });
             expect(createGatewayActiveWorkSnapshot).not.toHaveBeenCalled();
@@ -460,7 +460,7 @@ describe("runGatewayLoop", () => {
             expect(cleanupSignal.aborted).toBe(false);
             expect(runtime.exit).not.toHaveBeenCalled();
             expect(gatewayLog.info).toHaveBeenCalledWith(
-              `draining active work before stop with timeout 315000ms: ${counts}`,
+              `draining active work before stop with timeout 20000ms: ${counts}`,
             );
             captureSignal(signal)();
             expect(waitForGatewayActiveWork).toHaveBeenCalledOnce();
@@ -1193,6 +1193,53 @@ describe("runGatewayLoop", () => {
       }
     });
   });
+
+  it.each(["SIGTERM", "SIGINT"] as const)(
+    "exits instead of restarting when %s arrives while an in-place restart drains",
+    async (stopSignal) => {
+      const closing = createDeferred();
+      const close = vi.fn(async () => {
+        await closing.promise;
+      });
+
+      await withIsolatedSignals(async ({ captureSignal }) => {
+        const completeBoot = vi.fn();
+        const { start, started } = createSignaledStart(close);
+        const { runtime, exited } = createRuntimeWithExitSignal();
+        const { runGatewayLoop } = await import("./run-loop.test-support.js");
+        void runGatewayLoop({ start, runtime, completeBoot });
+        await waitForStart(started);
+        try {
+          captureSignal("SIGUSR2")();
+          await waitForLoopCondition(() => close.mock.calls.length === 1, "close not entered");
+          captureSignal(stopSignal)();
+          // A repeated stop stays a no-op for the shutdown that is already exiting.
+          captureSignal(stopSignal)();
+          closing.resolve();
+          await waitForLoopCondition(
+            () => runtime.exit.mock.calls.length > 0 || start.mock.calls.length > 1,
+            "restart drain did not settle",
+          );
+          expect(start).toHaveBeenCalledOnce();
+          await expect(exited).resolves.toBe(0);
+          expect(close).toHaveBeenCalledOnce();
+          expect(gatewayLog.info).toHaveBeenCalledWith(
+            `received ${stopSignal} during shutdown; finishing shutdown without restart`,
+          );
+          expect(completeBoot).toHaveBeenLastCalledWith({
+            outcome: "clean_stop",
+            reason: `stop (${stopSignal})`,
+          });
+        } finally {
+          closing.resolve();
+          if (start.mock.calls.length > 1) {
+            captureSignal("SIGINT")();
+            await exited;
+          }
+        }
+      });
+    },
+  );
 
   it.each(["close", "lock release"] as const)(
     "upgrades an accepted restart when an update arrives during %s",

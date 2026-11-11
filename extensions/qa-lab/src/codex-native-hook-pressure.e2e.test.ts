@@ -240,6 +240,10 @@ describe.skipIf(process.platform !== "linux")(
           context.skip(sandboxSkipReason);
         }
         expect(process.platform).toBe("linux");
+        const codexManifest = JSON.parse(
+          await fs.readFile(path.join(REPO_ROOT, "extensions/codex/package.json"), "utf8"),
+        ) as { dependencies: { "@openai/codex": string } };
+        const expectedCodexVersion = `codex-cli ${codexManifest.dependencies["@openai/codex"]}`;
         const root = tempDirs.make("openclaw-native-hook-pressure-");
         const pluginDir = path.join(root, "plugin");
         await fs.mkdir(pluginDir);
@@ -590,23 +594,21 @@ export default {
             }
             const calls = (await readCalls()).slice(callsBefore);
             const expectedCalls = selection === "matched" ? count : 0;
+            let failureDetails: string | undefined;
             if (calls.length !== expectedCalls) {
-              console.log(
-                "NATIVE_HOOK_PRESSURE_FAILURE " +
-                  JSON.stringify({
-                    scenario,
-                    tools: [...wireTools.values()].map(({ name, type }) => ({ name, type })),
-                    peakRelays,
-                    registry: await (
-                      await fetch(`${gateway.baseUrl}/qa/native-hook-pressure`, {
-                        headers: { Authorization: `Bearer ${gateway.token}` },
-                      })
-                    ).json(),
-                    logs: gateway.logs(),
-                  }),
-              );
+              failureDetails = JSON.stringify({
+                scenario,
+                tools: [...wireTools.values()].map(({ name, type }) => ({ name, type })),
+                peakRelays,
+                registry: await (
+                  await fetch(`${gateway.baseUrl}/qa/native-hook-pressure`, {
+                    headers: { Authorization: `Bearer ${gateway.token}` },
+                  })
+                ).json(),
+                logs: gateway.logs(),
+              });
             }
-            expect(calls).toHaveLength(expectedCalls);
+            expect(calls, failureDetails).toHaveLength(expectedCalls);
             if (selection === "matched" && count === 20) {
               expect(scenario.failedResponses).toBe(1);
               expect(scenario.unacknowledgedRetries).toBeGreaterThan(0);
@@ -678,7 +680,7 @@ export default {
               ).stdout.trim();
               const current = await readProcess(row.pid);
               expect(current?.startTimeTicks).toBe(row.startTimeTicks);
-              expect(version).toBe("codex-cli 0.160.0");
+              expect(version).toBe(expectedCodexVersion);
               binaryIdentities.push({
                 pid: row.pid,
                 startTimeTicks: row.startTimeTicks,

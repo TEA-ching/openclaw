@@ -51,6 +51,12 @@ If the worker inventory has already retired when shutdown starts, the Gateway
 still drains its retained worker tunnels and workspace transfers. Inventory
 retirement alone does not fail shutdown; other cleanup failures still do.
 
+While the Gateway is running, a temporary state-database read-admission seal
+pauses worker inventory access. After the same database is admitted again, the
+next reconciliation reloads the inventory and resumes worker maintenance without
+a Gateway restart. Closed stores stay closed during shutdown, and database
+replacement or corruption still requires recovery through the database owner.
+
 If work still ignores cancellation at the shutdown deadline under systemd or launchd,
 a native service stop or supervisor-owned restart logs
 the remaining work categories and pending owners (including command lanes and
@@ -242,6 +248,14 @@ External supervisor implementations should also apply these acceptance rules:
 - `pnpm build` then `pnpm test:restart:gateway -- --case skipChannels --runs 1 --restarts 5` benchmarks in-process restart on macOS or Linux (not supported on Windows; restart requires `SIGUSR2`). Uses `SIGUSR2`, enables both traces in the child process, and records next `/healthz`, next `/readyz`, downtime, ready timing, CPU, RSS, and restart trace metrics.
 - Session projection warming overlaps transport setup after session admission and request-context preparation. Readiness still waits for initial session materialization and interrupted-turn recovery; a listener can be live while those gates remain pending. Update canaries continue to defer session catalogs until activation.
 - `/healthz` is liveness; `/readyz` is usable readiness. Treat trace lines and benchmark output as owner-attribution signal, not a complete performance conclusion from one span or sample.
+
+For persistent startup tracing, set `OPENCLAW_GATEWAY_STARTUP_TRACE=1` in the
+global `~/.openclaw/.env` file (`%USERPROFILE%\.openclaw\.env` on Windows),
+or use the config `env.vars` block. See [Environment variables](/help/environment).
+An existing startup-trace assignment in the service definition, including
+`set "OPENCLAW_GATEWAY_STARTUP_TRACE=1"` in Windows `gateway.cmd`, also survives
+`openclaw gateway install --force` and service repair. Generated service values
+remain authoritative; arbitrary `OPENCLAW_*` script edits are not preserved.
 
 Without tracing, stops and restarts report nonzero active-work category counts at
 the first drain snapshot and at most once every 30 seconds while still pending.

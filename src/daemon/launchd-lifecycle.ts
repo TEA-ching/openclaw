@@ -108,17 +108,50 @@ export async function repairLaunchAgentBootstrap(args: {
   // env file before the plist becomes world-readable for launchd.
   const warn = args.warn ?? ((message: string) => console.warn(formatLine("Warning", message)));
   await rewriteLaunchAgentPlistForRestart({ env, label, plistPath, warn });
-  await execLaunchctl(["enable", serviceTarget], args.deadline);
-  const boot = await execLaunchctl(["bootstrap", domain, plistPath], args.deadline);
-  if (boot.code === 0) {
-    return { ok: true, status: "repaired" };
-  }
-  const detail = (boot.stderr || boot.stdout).trim();
-  if (isUnsupportedGuiDomain(detail)) {
-    return { ok: false, status: "gui-session-unavailable", detail, domain };
-  }
-  if (!isLaunchctlAlreadyLoaded(boot)) {
-    return { ok: false, status: "bootstrap-failed", detail: detail || undefined };
+  try {
+    const bootstrap = await bootstrapLaunchAgentOrThrow({
+      domain,
+      serviceTarget,
+      plistPath,
+      actionHint: "openclaw gateway start",
+      deadline: args.deadline,
+    });
+    if (bootstrap === "bootstrapped") {
+      return { ok: true, status: "repaired" };
+    }
+  } catch (error) {
+    if (hasCommandProcessCleanupError(error)) {
+      throw error;
+    }
+    const boot = error instanceof Error ? error.cause : undefined;
+    if (
+      !boot ||
+      typeof boot !== "object" ||
+      !("stderr" in boot) ||
+      typeof boot.stderr !== "string" ||
+      !("stdout" in boot) ||
+      typeof boot.stdout !== "string" ||
+      !("code" in boot) ||
+      typeof boot.code !== "number" ||
+      !("termination" in boot)
+    ) {
+      throw error;
+    }
+    const detail = (boot.stderr || boot.stdout).trim();
+    if (isUnsupportedGuiDomain(detail)) {
+      return { ok: false, status: "gui-session-unavailable", detail, domain };
+    }
+    if (
+      boot.termination !== "exit" ||
+      !isLaunchctlAlreadyLoaded({
+        code: boot.code,
+        termination: "exit",
+        stderr: boot.stderr,
+        stdout: boot.stdout,
+      })
+    ) {
+      return { ok: false, status: "bootstrap-failed", detail: detail || undefined };
+    }
   }
 
   // Service is already bootstrapped. Only kickstart if it is not actively running —
@@ -160,6 +193,7 @@ async function ensureLaunchAgentLoadedAfterFailure(params: {
   plistPath: string;
   onMutation?: (mode: "enable" | "bootstrap") => void;
   assertCurrent?: () => void;
+  beforeEffect?: () => void;
   retryPendingTeardown?: boolean;
   preserveAutoStart?: boolean;
   deadline?: GatewayServiceControlArgs["deadline"];
@@ -243,6 +277,7 @@ async function prepareLaunchAgentActivation(
     plistPath,
     onMutation: reportMutation,
     assertCurrent,
+    beforeEffect: args.beforeEffect,
     preserveAutoStart,
     retryPendingTeardown: preserveDefinition,
     deadline,
@@ -264,7 +299,7 @@ async function prepareLaunchAgentActivation(
         return false;
       }
       assertCurrent?.();
-      const result = await execLaunchctl(["enable", serviceTarget], deadline);
+      const result = await execLaunchctl(["enable", serviceTarget], deadline, args.beforeEffect);
       if (result.code === 0) {
         reportMutation("enable");
       }
@@ -279,6 +314,7 @@ async function prepareLaunchAgentActivation(
       let start = await execLaunchctl(
         ["kickstart", ...(action === "restart" ? ["-k"] : []), serviceTarget],
         deadline,
+        args.beforeEffect,
       );
       if (action === "restart" && start.code === 0) {
         reportMutation("kickstart");
@@ -291,7 +327,7 @@ async function prepareLaunchAgentActivation(
           return;
         }
         assertCurrent?.();
-        start = await execLaunchctl(["kickstart", serviceTarget], deadline);
+        start = await execLaunchctl(["kickstart", serviceTarget], deadline, args.beforeEffect);
       }
       if (start.code !== 0) {
         throw new Error(`launchctl kickstart failed: ${start.stderr || start.stdout}`.trim());
@@ -401,6 +437,9 @@ export async function restartLaunchAgent(
     });
     if (!handoff.ok) {
       throw new Error(`launchd restart handoff failed: ${handoff.error}`);
+    }
+    if (!(await handoff.value)) {
+      throw new Error("launchd restart handoff failed: helper failed to spawn");
     }
     reportMutation(plistReloadNeeded ? "handoff-reload" : "handoff-kickstart");
     writeLaunchAgentActionLine(stdout, "Scheduled LaunchAgent restart", serviceTarget);

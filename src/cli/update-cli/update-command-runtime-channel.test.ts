@@ -16,7 +16,10 @@ import { installFreshUpdateFixture, targetMetadata } from "./update-command-fres
 import * as packageUpdate from "./update-command-package.js";
 import * as commandRun from "./update-command-run.js";
 import * as runtimePlan from "./update-command-runtime-preflight.js";
-import { unsupportedServiceRuntimeFixture } from "./update-command-runtime-recovery.test-support.js";
+import {
+  stubNodeRuntime,
+  unsupportedServiceRuntimeFixture,
+} from "./update-command-runtime-recovery.test-support.js";
 import { updateCommand } from "./update-command.js";
 
 vi.mock("../../infra/container-environment.js", () => ({ isContainerEnvironment: () => false }));
@@ -31,6 +34,7 @@ it.each([
 ] as const)(
   "replays runtime recovery for saved %s (%s, %s, requested=%s) through the target resolver",
   async (channel, version, selector, requestedChannel) => {
+    stubNodeRuntime();
     vi.stubEnv("OPENCLAW_PROFILE", undefined);
     const configPath = expectDefined(process.env.OPENCLAW_CONFIG_PATH, "isolated config path");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -55,7 +59,7 @@ it.each([
     vi.mocked(packageMetadata.fetchNpmPackageTargetStatus).mockImplementation(async () => ({
       ...targetMetadata,
       version,
-      nodeEngine: ">=24.16.0",
+      nodeEngine: ">=24.22.1",
     }));
     vi.mocked(updateCheck.resolveNpmChannelTag).mockResolvedValue({ tag: channel, version });
     vi.mocked(shared.resolveTargetVersion).mockResolvedValue({ version });
@@ -83,7 +87,7 @@ it.each([
       expect.objectContaining({
         storedChannel: channel,
         targetVersion: version,
-        failures: [expect.objectContaining({ reason: "node-runtime-preflight" })],
+        failures: [expect.objectContaining({ reason: "preflight-node-runtime-incompatible" })],
       }),
     );
     await expect(updateCommand(options)).rejects.toBeInstanceOf(Error);
@@ -106,7 +110,7 @@ it.each([
     expect(command.slice(0, launcher.length)).toBe(launcher);
     runtime.mockResolvedValue({
       status: "supported",
-      version: "26.1.0",
+      version: "26.12.1",
       sqliteVersion: "3.53.0",
       nodeSharedSqlite: false,
       sqliteProbe: { available: true, version: "3.53.0", text: true, blob: true, json: true },

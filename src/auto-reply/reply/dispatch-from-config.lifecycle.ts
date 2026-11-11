@@ -8,7 +8,6 @@ import {
 import { patchSessionEntryCore } from "../../config/sessions/session-accessor.js";
 import { readSessionEntryReadOnlyInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
-import { captureIncognitoSessionSource } from "../../config/sessions/session-incognito-binding.js";
 import {
   composeSessionSourceAssertion,
   sessionEntryCommitGuardOptions,
@@ -63,6 +62,7 @@ type DispatchReplyOperationAcquisition =
   | { status: "aborted" };
 
 async function restoreArchivedDispatchSession(params: {
+  assertCurrent: () => void;
   ctx: FinalizedMsgContext;
   entry?: SessionEntry;
   hasPluginOwnedBinding: boolean;
@@ -80,14 +80,14 @@ async function restoreArchivedDispatchSession(params: {
     hasPluginOwnedBinding ||
     ctx.InboundAccessAuthorized !== true ||
     ctx.InboundEventKind === "room_event" ||
-    isNativeCommandTurn(ctx.CommandTurn) ||
+    // Authorized native controls restore their own archived source in place.
+    (isNativeCommandTurn(ctx.CommandTurn) && ctx.CommandTurn?.authorized !== true) ||
     classifySessionStateActor({ inputProvenance: ctx.InputProvenance }).actorType !== "human"
   ) {
     return entry;
   }
   const scope = { sessionKey, storePath };
-  const actor = captureIncognitoSessionSource(scope);
-  const metadata = actor ? captureSessionEntryMetadataRead(scope) : undefined;
+  const metadata = captureSessionEntryMetadataRead(scope, params.assertCurrent);
   let placementContext = params.placementContext;
   if (!placementContext) {
     try {
@@ -107,7 +107,7 @@ async function restoreArchivedDispatchSession(params: {
     if (
       currentEntry.sessionId !== snapshotSessionId ||
       currentEntry.archivedAt !== snapshotArchivedAt ||
-      (actor && currentEntry.lifecycleRevision !== entry.lifecycleRevision) ||
+      (metadata && currentEntry.lifecycleRevision !== entry.lifecycleRevision) ||
       isRestartRecoveryTombstone(currentEntry)
     ) {
       return false;
@@ -133,16 +133,8 @@ async function restoreArchivedDispatchSession(params: {
     scope: storePath,
     identities: [sessionKey, snapshotSessionId],
     run: async () => {
-      const currentEntry = actor
-        ? "kind" in actor
-          ? undefined
-          : (
-              await actor.actor.sessions.read(
-                { assertCurrent: () => metadata!.assertCurrent() },
-                { sessionKey },
-                actor.admissionSignal,
-              )
-            ).entry
+      const currentEntry = metadata
+        ? metadata.readCurrent()
         : await readSessionEntryReadOnlyInWorker(scope);
       metadata?.assertCurrent();
       if (
@@ -327,6 +319,7 @@ export function createDispatchReplyOperationCoordinator(params: {
     // Archive restoration belongs to pre-dispatch ownership resolution. Later calls only upgrade admission.
     if (phase === "pre_dispatch") {
       params.operationSessionStoreEntry.entry = await restoreArchivedDispatchSession({
+        assertCurrent: () => getPreDispatchAbortSignal()?.throwIfAborted(),
         ctx: params.ctx,
         entry: params.operationSessionStoreEntry.entry,
         hasPluginOwnedBinding,
@@ -507,6 +500,9 @@ export function createDispatchReplyOperationCoordinator(params: {
           : { status: "skipped", reason: admission.reason };
     }
     if (admission.status === "skipped") {
+      if (admission.error) {
+        params.replyOptions?.internalEventExecution?.onFailed?.(admission.error);
+      }
       if (
         admission.reason === "active-run" &&
         (allowActiveResolution ||
@@ -516,8 +512,8 @@ export function createDispatchReplyOperationCoordinator(params: {
             routeThreadId: params.routeThreadId,
           }))
       ) {
-        // A low-level successor retains its own cancellation while it waits for queue admission.
-        if (allowActiveResolution && !params.allowActiveQueueResolution) {
+        // Gateway and low-level successors retain their own cancellation while awaiting queue admission.
+        if (allowActiveResolution && !allowGatewayQueueResolution) {
           preDispatchAbortOperation = admission.activeOperation;
         }
         preDispatchLifecycleAdmission = admission.lifecycleAdmission;

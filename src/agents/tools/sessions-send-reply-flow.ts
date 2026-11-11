@@ -2,7 +2,7 @@ import { isRequesterParentOfBackgroundAcpSession } from "@openclaw/acp-core/sess
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { isGatewayProtocolResponseError } from "../../../packages/gateway-client/src/protocol-request.js";
 import { getRuntimeConfig } from "../../config/config.js";
-import { runWithoutOwnedSessionTranscriptWrites } from "../../config/sessions/transcript-write-context.js";
+import { runWithoutOwnedSessionTranscriptWrites } from "../../config/sessions/transcript-write-context-owner.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { resolveGatewaySessionStoreTargetInWorker } from "../../gateway/session-utils-store-worker.js";
 import type { GatewaySessionStoreTargetWithStore } from "../../gateway/session-utils-store.types.js";
@@ -23,7 +23,7 @@ import {
   runWithGatewayToolContinuationContext,
 } from "./in-process-gateway.js";
 import { recordSessionToolActionFact } from "./sessions-access.js";
-import { sendReplyResult } from "./sessions-send-helpers.js";
+import { resolveSessionsSendReply, sendReplyResult } from "./sessions-send-helpers.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 import type { SessionsSendStart } from "./sessions-send-tool.delivery.js";
 import { jsonResult } from "./tool-results.js";
@@ -261,6 +261,7 @@ export async function finishSessionsSendReply(params: {
   start: SessionsSendStart;
   completion?: FollowupCompletionOwner;
   registryCompletion: boolean;
+  requesterTurnRunId?: string;
   watchField: { watched?: boolean };
   replyContext: SessionsSendReplyContext;
   targetSession: GatewaySessionStoreTargetWithStore;
@@ -353,7 +354,7 @@ export async function finishSessionsSendReply(params: {
       : completion
         ? await completion.take(timeoutMs)
         : await waitForAgentRunReply({ runId, timeoutMs, callGateway: replyContext.callGateway });
-  if (!result) {
+  if (!result || result.yielded === true || result.status === "pending") {
     await startReplyFlow(true);
     return accepted();
   }
@@ -377,6 +378,25 @@ export async function finishSessionsSendReply(params: {
       return accepted();
     }
   }
+  if (
+    registryCompletion &&
+    params.requesterTurnRunId &&
+    (result.status === "ok" ||
+      isTerminalAgentWaitTimeout(result) ||
+      (result.status === "error" && result.endedAt !== undefined))
+  ) {
+    if (!replyContext.requesterSessionKey) {
+      throw new Error("Inline child result is missing its requester session.");
+    }
+    const { acknowledgeSubagentResultForRequesterTurn } =
+      await import("../subagents/registry/subagent-registry-requester-claim.js");
+    await acknowledgeSubagentResultForRequesterTurn({
+      runId,
+      requesterSessionKey: replyContext.requesterSessionKey,
+      requesterAgentId,
+      requesterTurnRunId: params.requesterTurnRunId,
+    });
+  }
   if (result.status === "timeout" || result.status === "error") {
     return jsonResult({
       runId,
@@ -387,5 +407,14 @@ export async function finishSessionsSendReply(params: {
       ...watchField,
     });
   }
-  return sendReplyResult({ runId, sessionKey: replyContext.displayKey, ...watchField }, result);
+  const reply = await resolveSessionsSendReply(result, {
+    runId,
+    sessionKey: acceptedTargetSessionKey,
+    agentId: replyContext.targetAgentId,
+    callGateway: replyContext.callGateway,
+  });
+  return sendReplyResult(
+    { runId, sessionKey: replyContext.displayKey, ...watchField },
+    { ...result, ...reply },
+  );
 }

@@ -16,6 +16,7 @@ import {
 } from "./attempt-timeouts.js";
 import { isCodexAppServerLiveThreadClaimed } from "./client-runtime.js";
 import { CodexAppServerClient } from "./client.js";
+import { CodexAppServerEventProjector } from "./event-projector.js";
 import { isJsonObject } from "./protocol.js";
 import { itemNotification, turnCompleted } from "./protocol.test-helpers.js";
 import {
@@ -31,7 +32,10 @@ import {
 } from "./run-attempt-test-harness.js";
 import * as sharedClient from "./shared-client.js";
 import { resetSharedCodexAppServerClientForTests } from "./shared-client.test-support.js";
-import { attachSqliteSessionTarget } from "./sqlite-session.test-helpers.js";
+import {
+  attachSqliteSessionTarget,
+  readTranscriptMessagesByIdentity,
+} from "./sqlite-session.test-helpers.js";
 import { createInferenceReadyClientHarness, waitForHarnessRequest } from "./test-support.js";
 import { codexTranscriptMirrorRuntime } from "./transcript-mirror.js";
 import { CODEX_APP_SERVER_VERSION } from "./version.js";
@@ -45,6 +49,150 @@ describe("Codex app-server terminal settlement", () => {
 
   afterEach(() => {
     resetSharedCodexAppServerClientForTests();
+  });
+
+  it("recovers one durable unknown result for an active native command at settlement expiry", async () => {
+    const params = createTestParams();
+    await attachSqliteSessionTarget(
+      params,
+      path.join(tempDir, "recovered-native-result.sqlite"),
+      "session-recovered-native-result",
+    );
+    const promptPersisted = createDeferred<void>();
+    params.onUserMessagePersisted = () => promptPersisted.resolve();
+    params.timeoutMs = 60 * 60_000;
+    const projectionEntered = createDeferred<void>();
+    const releaseProjection = createDeferred<void>();
+    const harness = createStartedThreadHarness(async (method) => {
+      if (method !== "thread/backgroundTerminals/list") {
+        return undefined;
+      }
+      const notificationSpy = vi
+        .spyOn(CodexAppServerEventProjector.prototype, "handleNotification")
+        .mockImplementationOnce(async function (this: CodexAppServerEventProjector, notification) {
+          notificationSpy.mockRestore();
+          projectionEntered.resolve();
+          await releaseProjection.promise;
+          return await this.handleNotification(notification);
+        });
+      void harness.notify(
+        itemNotification("item/completed", {
+          id: "blocked-projection",
+          type: "webSearch",
+          query: "synthetic settlement blocker",
+          action: { type: "search", query: "synthetic settlement blocker" },
+          results: null,
+        }),
+      );
+      await projectionEntered.promise;
+      return {
+        data: [{ itemId: "active-command", processId: "process-1" }],
+        nextCursor: null,
+      };
+    });
+    vi.useFakeTimers();
+    const run = runCodexAppServerAttempt(params);
+    try {
+      await harness.waitForMethod("turn/start");
+      await promptPersisted.promise;
+      await harness.notify(
+        itemNotification("item/started", {
+          id: "active-command",
+          type: "commandExecution",
+          command: "synthetic-background-command",
+          cwd: params.workspaceDir,
+          commandActions: [],
+          processId: "process-1",
+          source: "agent",
+          status: "inProgress",
+        }),
+      );
+      const receivedAt = Date.now();
+      void harness.notify(
+        turnCompleted({
+          id: "turn-1",
+          status: "completed",
+          items: [{ id: "answer", type: "agentMessage", text: "Command is still running." }],
+        }),
+      );
+      await projectionEntered.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(
+        receivedAt + TURN_TERMINAL_SETTLEMENT_TIMEOUT_MS - Date.now(),
+      );
+
+      const result = await run;
+      expect(result.terminal).toMatchObject({
+        kind: "ok",
+        settlementWarning: { timeoutMs: TURN_TERMINAL_SETTLEMENT_TIMEOUT_MS },
+      });
+      const durableResults = (await readTranscriptMessagesByIdentity(params)).filter(
+        (message) => message.role === "toolResult" && message.toolCallId === "active-command",
+      );
+      expect(durableResults).toEqual([
+        expect.objectContaining({
+          isError: false,
+          details: { processId: "process-1", status: "running" },
+          __openclaw: expect.objectContaining({
+            toolOutput: expect.objectContaining({ outcome: "unknown" }),
+          }),
+        }),
+      ]);
+    } finally {
+      releaseProjection.resolve();
+      vi.useRealTimers();
+      await Promise.allSettled([run]);
+    }
+  });
+
+  it("checkpoints one failed native result when settlement throws before normal close", async () => {
+    const params = createTestParams();
+    await attachSqliteSessionTarget(
+      params,
+      path.join(tempDir, "exceptional-native-result.sqlite"),
+      "session-exceptional-native-result",
+    );
+    const failure = new Error("injected settlement inventory failure");
+    vi.spyOn(
+      CodexAppServerEventProjector.prototype,
+      "getPendingNativeCommands",
+    ).mockImplementationOnce(() => {
+      throw failure;
+    });
+    const harness = createStartedThreadHarness();
+    const run = runCodexAppServerAttempt(params);
+    await harness.waitForMethod("turn/start");
+    await harness.notify(
+      itemNotification("item/started", {
+        id: "failed-command",
+        type: "commandExecution",
+        command: "synthetic-failed-command",
+        cwd: params.workspaceDir,
+        commandActions: [],
+        processId: "process-2",
+        source: "agent",
+        status: "inProgress",
+      }),
+    );
+    await harness.notify(
+      turnCompleted({
+        id: "turn-1",
+        status: "completed",
+        items: [{ id: "answer", type: "agentMessage", text: "Settlement failed." }],
+      }),
+    );
+
+    await expect(run).rejects.toThrow(failure);
+    const durableResults = (await readTranscriptMessagesByIdentity(params)).filter(
+      (message) => message.role === "toolResult" && message.toolCallId === "failed-command",
+    );
+    expect(durableResults).toEqual([
+      expect.objectContaining({
+        isError: true,
+        details: { reason: "missing_tool_result" },
+      }),
+    ]);
   });
 
   it.each([MAX_TIMER_TIMEOUT_MS])(
@@ -182,14 +330,25 @@ describe("Codex app-server terminal settlement", () => {
             params?: { threadId?: string };
           },
       );
+    const allowNativeToolPreflight = async (since = 0) => {
+      let nextRequest = since;
+      for (let read = 0; read < 2; read += 1) {
+        const request = await waitForHarnessRequest(
+          physical,
+          "configRequirements/read",
+          nextRequest,
+        );
+        nextRequest = physical.writes.length;
+        physical.send({ id: request.id, result: { requirements: null } });
+      }
+    };
     try {
       const initialize = await waitForHarnessRequest(physical, "initialize");
       physical.send({
         id: initialize.id,
         result: { userAgent: `openclaw/${CODEX_APP_SERVER_VERSION} (macOS; test)` },
       });
-      const firstRequirements = await waitForHarnessRequest(physical, "configRequirements/read");
-      physical.send({ id: firstRequirements.id, result: { requirements: null } });
+      await allowNativeToolPreflight();
       const firstThread = await waitForHarnessRequest(physical, "thread/start");
       physical.send({ id: firstThread.id, result: threadStartResult("thread-settlement") });
       const warmupTurn = await waitForHarnessRequest(physical, "turn/start");
@@ -207,24 +366,14 @@ describe("Codex app-server terminal settlement", () => {
       const firstStart = physical.writes.length;
       firstRun = runCodexAppServerAttempt(firstParams);
       void firstRun.then(firstSettled, firstSettled);
-      const firstRequirementsAgain = await waitForHarnessRequest(
-        physical,
-        "configRequirements/read",
-        firstStart,
-      );
-      physical.send({ id: firstRequirementsAgain.id, result: { requirements: null } });
+      await allowNativeToolPreflight(firstStart);
       const firstTurn = await waitForHarnessRequest(physical, "turn/start", firstStart);
       physical.send({ id: firstTurn.id, result: turnStartResult("turn-settlement") });
       expect(isCodexAppServerLiveThreadClaimed(physical.client, "thread-settlement")).toBe(true);
 
       const siblingStart = physical.writes.length;
       siblingRun = runCodexAppServerAttempt(siblingParams);
-      const siblingRequirements = await waitForHarnessRequest(
-        physical,
-        "configRequirements/read",
-        siblingStart,
-      );
-      physical.send({ id: siblingRequirements.id, result: { requirements: null } });
+      await allowNativeToolPreflight(siblingStart);
       const siblingThread = await waitForHarnessRequest(physical, "thread/start", siblingStart);
       physical.send({ id: siblingThread.id, result: threadStartResult("thread-sibling") });
       const siblingTurn = await waitForHarnessRequest(physical, "turn/start", siblingStart);

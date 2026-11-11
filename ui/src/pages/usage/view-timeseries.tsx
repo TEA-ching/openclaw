@@ -91,6 +91,7 @@ function deriveTimeSeries(detail: TimeSeriesProps["detail"], range: TimeSeriesPr
     cumCost += p.cost;
     return {
       timestamp: p.timestamp,
+      totalTokens: p.totalTokens,
       input: p.input,
       output: p.output,
       cacheRead: p.cacheRead,
@@ -120,8 +121,9 @@ function deriveTimeSeries(detail: TimeSeriesProps["detail"], range: TimeSeriesPr
   }
 
   const filteredPoints = hasSelection ? points.slice(rangeStartIdx, rangeEndIdx) : points;
-  const filteredTokens = { output: 0, input: 0, cacheRead: 0, cacheWrite: 0 };
+  const filteredTokens = { totalTokens: 0, output: 0, input: 0, cacheRead: 0, cacheWrite: 0 };
   for (const p of filteredPoints) {
+    filteredTokens.totalTokens += p.totalTokens;
     for (const { key } of USAGE_TOKEN_CATEGORIES) {
       filteredTokens[key] += p[key];
     }
@@ -140,7 +142,7 @@ function deriveTimeSeries(detail: TimeSeriesProps["detail"], range: TimeSeriesPr
 
   const formatAxisTimestamp = (timestamp: number) =>
     formatTimeMs(timestamp, { hour: "2-digit", minute: "2-digit", ...timeZoneOptions }, "");
-  const totalTypeTokens = Object.values(filteredTokens).reduce(
+  const totalTypeTokens = USAGE_TOKEN_CATEGORIES.map(({ key }) => filteredTokens[key]).reduce(
     (total, tokens) => total + tokens,
     0,
   );
@@ -182,14 +184,11 @@ function deriveTimeSeries(detail: TimeSeriesProps["detail"], range: TimeSeriesPr
           segmentY -= segmentHeight;
           return [{ className, y: segmentY, height: segmentHeight }];
         })
-      : [];
+      : [{ className: "", y, height: barHeight }];
     return {
       x,
-      y,
       width: barWidth,
-      height: barHeight,
       tooltip: tooltipLines.join(" · "),
-      stacked: breakdownByType,
       dimmed: hasSelection && (index < rangeStartIdx || index >= rangeEndIdx),
       segments,
     };
@@ -214,8 +213,6 @@ function deriveTimeSeries(detail: TimeSeriesProps["detail"], range: TimeSeriesPr
       chartHeight,
       maxValue,
       formatAxisTimestamp,
-      barWidth,
-      barGap,
       formatTooltipTimestamp,
       breakdownByType,
       rangeStartIdx,
@@ -476,37 +473,23 @@ function TimeSeriesChart(props: {
             {model().formatAxisTimestamp(model().lastTimestamp)}
           </text>
           <For each={model().bars}>
-            {(bar) =>
-              bar.stacked ? (
-                <For each={bar.segments}>
-                  {(segment) => (
-                    <rect
-                      x={bar.x}
-                      y={segment.y}
-                      width={bar.width}
-                      height={segment.height}
-                      class={["ts-bar", segment.className, { dimmed: bar.dimmed }]}
-                      rx="1"
-                      role="img"
-                      data-tooltip={bar.tooltip}
-                      aria-label={bar.tooltip}
-                    />
-                  )}
-                </For>
-              ) : (
-                <rect
-                  x={bar.x}
-                  y={bar.y}
-                  width={bar.width}
-                  height={bar.height}
-                  class={["ts-bar", { dimmed: bar.dimmed }]}
-                  rx="1"
-                  role="img"
-                  data-tooltip={bar.tooltip}
-                  aria-label={bar.tooltip}
-                />
-              )
-            }
+            {(bar) => (
+              <For each={bar.segments}>
+                {(segment) => (
+                  <rect
+                    x={bar.x}
+                    y={segment.y}
+                    width={bar.width}
+                    height={segment.height}
+                    class={["ts-bar", segment.className, { dimmed: bar.dimmed }]}
+                    rx="1"
+                    role="img"
+                    data-tooltip={bar.tooltip}
+                    aria-label={bar.tooltip}
+                  />
+                )}
+              </For>
+            )}
           </For>
           {/*  Selection highlight overlay (always visible between handles)  */}
           <rect
@@ -599,7 +582,7 @@ function TimeSeriesChart(props: {
             {model().formatAxisTimestamp(model().rangeStartTs)}–
             {model().formatAxisTimestamp(model().rangeEndTs)}
             {" · "}
-            {formatUsageTokens(model().totalTypeTokens)}
+            {formatUsageTokens(model().filteredTokens.totalTokens)}
             {" · "}
             {formatUsageCost(model().filteredPoints.reduce((s, p) => s + (p.cost || 0), 0))}
           </>

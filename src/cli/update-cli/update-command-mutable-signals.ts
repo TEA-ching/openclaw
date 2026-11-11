@@ -11,7 +11,6 @@ import { defaultRuntime } from "../../runtime.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { ABSOLUTE_DEADLINE_EXPIRED, awaitWithinDeadline } from "../../utils/absolute-deadline.js";
 import {
-  exitAfterSignalExitBarriers,
   registerSignalExitBarrier,
   registerSignalExitGate,
   waitForSignalExitBarriers,
@@ -28,6 +27,7 @@ type MutableAdmission = {
   phase: UpdateRunRecord["phase"];
   terminal?: Promise<void>;
   recovering?: true;
+  ledgerRecordingRetired?: true;
   interruption?: { signal: "SIGINT" | "SIGTERM" | "SIGHUP"; phase: string; error: Error };
   forward: Set<() => void>;
 };
@@ -183,7 +183,14 @@ export function admitMutableUpdateSignalRun(run: Run, record: UpdateRunRecord): 
   });
 }
 
-export function retireMutableUpdateSignalRun(run: Run): void {
+export function retireMutableUpdateSignalLedgerRecording(run: Run): void {
+  const admission = admissions.get(run);
+  if (admission) {
+    admission.ledgerRecordingRetired = true;
+  }
+}
+
+function retireMutableUpdateSignalRun(run: Run): void {
   admissions.delete(run);
 }
 
@@ -211,6 +218,10 @@ export async function withMutableUpdateSignals<T>(
       executorFence.assertCurrent();
     };
     return () => {
+      // Candidate migrations can retire this reader without ending signal ownership.
+      if (admission.ledgerRecordingRetired) {
+        return;
+      }
       assertCurrent();
       if (admission.unconfirmedWrite) {
         throw admission.unconfirmedWrite.error;
@@ -265,9 +276,13 @@ export async function withMutableUpdateSignals<T>(
         `${admission.interruption.error.message} Recovering the Gateway before exit. Check openclaw update status; use openclaw update repair if recovery remains pending.`,
       );
       const deadline =
-        Date.now() +
+        performance.now() +
         (run.activationTimeoutMs ?? run.defaultStepTimeoutMs ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS);
-      const settled = awaitWithinDeadline(() => admission.terminal!, deadline).then((result) => {
+      const settled = awaitWithinDeadline(
+        () => admission.terminal!,
+        deadline,
+        () => performance.now(),
+      ).then((result) => {
         if (result === ABSOLUTE_DEADLINE_EXPIRED) {
           defaultRuntime.error(
             "Update interruption cleanup exceeded its recovery budget. Run openclaw update status, then openclaw update repair to inspect retained recovery.",
@@ -291,12 +306,7 @@ export async function withMutableUpdateSignals<T>(
     } catch {
       defaultRuntime.error("Update interruption could not be recorded; history remains pending.");
     }
-    if (signal === "SIGHUP") {
-      // The shared CLI signal type covers INT/TERM; retain HUP as the same
-      // accepted process outcome instead of silently converting it to SIGINT.
-      exitAfterSignalExitBarriers(code);
-    }
-    shutdown = waitForSignalExitBarriers(signal === "SIGHUP" ? undefined : signal)
+    shutdown = waitForSignalExitBarriers(signal)
       .catch(() => {
         defaultRuntime.error("Update signal cleanup did not complete.");
       })

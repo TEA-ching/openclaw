@@ -13,6 +13,7 @@ import {
   shouldClearTerminalPresentationForNativeItem,
 } from "./event-projector-items.js";
 import { CodexTurnProjection } from "./event-projector-result.js";
+import type { CodexAppServerToolTelemetry } from "./event-projector-result.js";
 import { buildCodexSteeringMessagesSnapshot } from "./event-projector-snapshot.js";
 import type { CodexToolProgressProjection } from "./event-projector-tool-progress.js";
 import {
@@ -39,6 +40,16 @@ import {
 
 const optedOutNotificationMethods = new Set<string>(CODEX_APP_SERVER_OPT_OUT_NOTIFICATION_METHODS);
 
+const RAW_TOOL_ITEM_PHASE: Record<string, "started" | "completed"> = {
+  function_call: "started",
+  custom_tool_call: "started",
+  local_shell_call: "started",
+  tool_search_call: "started",
+  function_call_output: "completed",
+  custom_tool_call_output: "completed",
+  tool_search_output: "completed",
+};
+
 export class CodexAppServerEventProjector extends CodexTurnProjection {
   private readonly compactionProgress = new Map<string, "open" | "closed">();
 
@@ -57,18 +68,25 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
   }
 
   /** Native completion owns the answer independently of unfinished host projection. */
-  recoverCompletedAnswer(): boolean {
+  recoverCompletedAnswer(
+    toolTelemetry: CodexAppServerToolTelemetry,
+    options?: { readRetainedNativeCommands?: () => ReadonlyMap<string, string> },
+  ): boolean {
     const completed = this.settlement.completedAnswer;
     if (!completed || this.aborted || this.promptError) {
       return false;
     }
+    this.completedTurn = completed.turn;
+    this.assistantProjection.recordItemCompleted(completed.answer);
+    this.assistantProjection.finalizeAnswerCandidate(completed.turn);
+    // Settlement expiry abandons blocked checkpoint writes. Materialize any
+    // missing native result first so the final transcript mirror retains the
+    // unknown outcome instead of presenting the recovered answer as clean.
+    this.prepareTerminalToolResultCheckpoint(toolTelemetry, options);
     // Retire accepted writes before the enriched final enters the same mirror owner.
     this.closeCompactionProgress();
     this.projectionController.abort();
     this.transcriptCheckpoint.abandon();
-    this.completedTurn = completed.turn;
-    this.assistantProjection.recordItemCompleted(completed.answer);
-    this.assistantProjection.finalizeAnswerCandidate(completed.turn);
     return true;
   }
 
@@ -133,13 +151,10 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
   }
 
   async handleNotification(notification: CodexServerNotification): Promise<void> {
-    if (this.projectionClosed) {
+    if (this.projectionClosed || !isJsonObject(notification.params)) {
       return;
     }
-    const params = isJsonObject(notification.params) ? notification.params : undefined;
-    if (!params) {
-      return;
-    }
+    const params = notification.params;
     if (notification.method === "hook/started" || notification.method === "hook/completed") {
       if (!this.isHookNotificationForCurrentThread(params)) {
         return;
@@ -167,6 +182,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
     ) {
       this.eventProjection.flushPendingGuardianWarning();
     }
+    this.diagnostics.recordNotification(notification, params);
     this.nativeToolLifecycleProjector.handleNotification(notification);
     this.assistantProjection.handleNotification(notification.method, params);
 
@@ -677,6 +693,17 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
     const item = isJsonObject(params.item) ? params.item : undefined;
     if (!item) {
       return;
+    }
+    const type = readString(item, "type");
+    const phase =
+      type && Object.hasOwn(RAW_TOOL_ITEM_PHASE, type) ? RAW_TOOL_ITEM_PHASE[type] : undefined;
+    const itemId = readString(item, "call_id");
+    if (phase && itemId) {
+      // Raw receipts include outer code-mode calls that have no ThreadItem lifecycle.
+      this.emitAgentEvent({
+        stream: "codex_app_server.item",
+        data: { phase, itemId, type },
+      });
     }
     if (item.role === "assistant" && extractRawResponseItemText(item)) {
       this.eventProjection.markSafetyBufferingAssistantStarted();

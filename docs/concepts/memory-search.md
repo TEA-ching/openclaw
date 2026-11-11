@@ -11,6 +11,13 @@ read_when:
 wording differs from the original text. It chunks memory into small pieces and
 searches them with embeddings, keywords, or both.
 
+The result-count argument is `maxResults` (an integer of at least 1). The tool
+also accepts `max_results` and `limit` as aliases. If several are supplied,
+`maxResults` takes precedence over `max_results`, which takes precedence over
+`limit`, regardless of argument order. Only the selected value is validated;
+an invalid higher-priority value is rejected rather than falling back to a valid
+alias. The advertised tool schema continues to use `maxResults`.
+
 When indexing Markdown, the builtin engine attaches a heading-only chunk to the
 following content chunk. This keeps short headings from taking search result slots
 on their own while preserving section context and source line references. A final
@@ -124,6 +131,15 @@ If only one path is available, the other runs alone. Keyword boosts stay bounded
 without clipping distinct lexical scores to the same maximum, so relevance
 continues to influence ranking when dated notes decay.
 
+When both paths return results, the builtin engine scales each query's keyword
+scores before weighting them. The strongest keyword match earns at most the best
+semantic score, and every other keyword match earns a share in proportion to its
+BM25 relevance, never more than its own keyword score. A match much weaker than
+the query's best keyword match adds little, so sharing a common word rarely
+outweighs a note that is closer in meaning. This matters most for questions
+asked in a different language than the notes. `minScore` applies to the weighted
+sum of the cosine similarity and the scaled keyword score.
+
 The builtin engine then applies fixed ranking rules:
 
 ```text
@@ -183,7 +199,9 @@ redacted embedding-bootstrap reason in `debug.embeddingBootstrap` even when
 there are no matches.
 
 A failed local embedding request preserves keyword access to a matching index
-and records the degraded provider in memory status and Gateway logs. A real model
+and records the degraded provider in memory status and Gateway logs. A query
+embedding that comes back as all zeros skips vector recall for that search and
+is reported in the Gateway log, so keyword-only results never pass silently. A real model
 or index-configuration mismatch still pauses search instead of serving
 mismatched data.
 
@@ -253,6 +271,9 @@ conversations. This is opt-in: set `experimental.sessionMemory: true` and add
 
 Use `corpus: "memory"` to search only memory notes. Results containing no session
 transcripts do not load session history or perform session-visibility lookups.
+For session hits, visibility checks read the matching sessions and their aliases
+instead of loading the full session catalog. Private recall also checks its anchor
+conversation and any shared aliases before returning transcript content.
 
 Session hits obey `tools.sessions.visibility`, which defaults to `"all"`.
 `memory_search` still searches the selected agent's indexed corpus; use

@@ -28,6 +28,7 @@ import type {
   SqliteSnapshotStagingRequest,
   SqliteSnapshotStagingReply,
 } from "./sqlite-snapshot-staging.types.js";
+import { recordWorkerMessage } from "./worker-message-metrics.js";
 import {
   captureRetainedNativeWorkerSource,
   type RetainedNativeWorkerSource,
@@ -67,6 +68,7 @@ function createStagingOwner(workerUrl: URL, nativeSource: RetainedNativeWorkerSo
       retainedTransport: true,
       nativeSource,
       nativeResource,
+      databaseAccess: "read-only",
       decodeResourceError: (payload) =>
         // SAFETY: The paired staging worker emits the SQLite codec in this opaque envelope.
         decodeSqliteSnapshotStagingError(payload as OpenClawStateWorkerErrorPayload | undefined),
@@ -77,6 +79,7 @@ function createStagingOwner(workerUrl: URL, nativeSource: RetainedNativeWorkerSo
     number,
     {
       directories: Set<string>;
+      abort(): void;
       startClose(): RetainedOperation<void>;
       serviceClose(): void;
       releaseIfComplete(): void;
@@ -198,11 +201,12 @@ function createStagingOwner(workerUrl: URL, nativeSource: RetainedNativeWorkerSo
     const preparationId = ++preparationSequence;
     const inputBytes = Buffer.byteLength(JSON.stringify({ ...command, preparationId }));
     const cancellation = command.type === "prepare" ? new MessageChannel() : undefined;
-    const abort = () => cancellation?.port1.postMessage({ type: "abort" });
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) {
-      abort();
-    }
+    const abort = () => {
+      if (cancellation) {
+        cancellation.port1.postMessage({ type: "abort" });
+        recordWorkerMessage("resource", "to_worker");
+      }
+    };
     const input: SqliteSnapshotStagingCommand =
       command.type === "prepare" && cancellation
         ? { ...command, preparationId, abortPort: cancellation.port2 }
@@ -211,6 +215,11 @@ function createStagingOwner(workerUrl: URL, nativeSource: RetainedNativeWorkerSo
     let pendingClose: RetainedOperation<void> | undefined;
     const preparation = {
       directories: new Set<string>(),
+      abort() {
+        if (task.read().status === "pending") {
+          abort();
+        }
+      },
       startClose,
       serviceClose: () => pendingClose?.service(),
       releaseIfComplete() {
@@ -228,6 +237,7 @@ function createStagingOwner(workerUrl: URL, nativeSource: RetainedNativeWorkerSo
             throw unavailable.error;
           }
           signal?.throwIfAborted();
+          signal?.addEventListener("abort", abort, { once: true });
           return input;
         },
         { inputBytes, transferList: () => (cancellation ? [cancellation.port2] : []) },
@@ -347,6 +357,10 @@ function createStagingOwner(workerUrl: URL, nativeSource: RetainedNativeWorkerSo
   };
   nativeSource.retain(owner, async () => {
     admissionClosed = true;
+    // Snapshot reads can stop; token allocation and native cleanup still join normally.
+    for (const preparation of preparations.values()) {
+      preparation.abort();
+    }
     await Promise.allSettled([...activeRequests].map((request) => request.result));
     const closures = Array.from(preparations.values()).map((preparation) =>
       preparation.startClose(),

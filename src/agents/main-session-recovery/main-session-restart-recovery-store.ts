@@ -49,7 +49,11 @@ import {
   type MainSessionRecoverySkipReason,
 } from "./main-session-restart-recovery-diagnostics.js";
 import { loadExpectedRestartRecoveryTarget } from "./main-session-restart-recovery-exact-target.js";
-import { tombstoneMainRestartRecoveryWithNotice } from "./main-session-restart-recovery-failure.js";
+import {
+  finishDelegatedRestartRecovery,
+  requiresDelegatedRecoverySource,
+  tombstoneMainRestartRecoveryWithNotice,
+} from "./main-session-restart-recovery-failure.js";
 import {
   hasReplaySafeCodeModeCheckpointInCurrentTurn,
   resolveMainSessionResumePolicy,
@@ -170,6 +174,7 @@ export async function recoverStore(params: {
   activeSessionKeys?: Iterable<string>;
   lifecycleGeneration?: string;
   shouldContinue?: () => boolean;
+  signal?: AbortSignal;
   gatewayRuntime: GatewayRecoveryRuntime;
 }): Promise<{ started: number; settled: number; failed: number; skipped: number }> {
   const result = { started: 0, settled: 0, failed: 0, skipped: 0 };
@@ -508,20 +513,43 @@ export async function recoverStore(params: {
       if (stopped()) {
         return result;
       }
-      // Steering changes the transcript tail, not the executing turn's source claim.
-      const hasRetainedHumanSource =
-        expectedRecoverySourceRunId !== undefined &&
-        (entry.restartRecoverySourceIngress === "control-ui" ||
-          entry.restartRecoverySourceIngress === "channel");
+      if (
+        !harnessCompletion &&
+        entry.restartRecoverySourceIngress === "internal" &&
+        expectedRecoverySourceRunId?.startsWith("announce:requester-settle:")
+      ) {
+        try {
+          const { prepareRequesterSettleWakeRecoverySource } =
+            await import("../subagents/registry/subagent-registry.js");
+          completionSource = await prepareRequesterSettleWakeRecoverySource({
+            runId: expectedRecoverySourceRunId,
+            requesterSessionKey: dispatchSessionKey,
+            requesterAgentId: agentId,
+            sessionId: entry.sessionId,
+            lifecycleRevision: entry.lifecycleRevision,
+            storePath: params.storePath,
+            gatewayRuntime: params.gatewayRuntime,
+          });
+          if (!completionSource || !entry.restartRecoveryOperatorSource) {
+            throw new Error(
+              "Requester settle recovery lacks its original cohort or operator authority",
+            );
+          }
+          completionSource();
+        } catch (error) {
+          mainSessionRecoveryLog.warn(
+            `requester settle recovery source unavailable for ${sessionKey}: ${String(error)}`,
+          );
+          result.failed++;
+          continue;
+        }
+      }
       if (
         !recoverableHarnessCompletion &&
-        ((source === "inter_session" && !hasRetainedHumanSource) ||
-          ((source === undefined ||
-            source === "internal_system" ||
-            source === "harness_completion") &&
-            entry.restartRecoverySourceIngress === "internal"))
+        !completionSource &&
+        requiresDelegatedRecoverySource(entry, source)
       ) {
-        const tombstone = await tombstoneMainRestartRecoveryWithNotice({
+        const outcome = await finishDelegatedRestartRecovery({
           ...target,
           cfg: params.cfg,
           entry,
@@ -529,7 +557,7 @@ export async function recoverStore(params: {
           observation: recoveryView.observation,
           reason: "delegated recovery sender authority is unavailable",
         });
-        if (tombstone === "notice_failed") {
+        if (outcome === "notice_failed") {
           result.failed++;
         } else {
           skip("delegated_authority_unavailable");
@@ -538,10 +566,7 @@ export async function recoverStore(params: {
       }
 
       const pendingFinal = entry.pendingFinalDelivery;
-      let resumeOptions: Pick<
-        Parameters<typeof resumeMainSession>[0],
-        "forceCodeModeTools" | "forceRestartSafeTools" | "pendingFinalDeliveryText"
-      >;
+      let resumeOptions: Partial<Parameters<typeof resumeMainSession>[0]>;
       if (pendingAction === "fail" || pendingFinal?.kind === "replayable") {
         resumeOptions = {
           ...(pendingFinal?.kind === "replayable"
@@ -550,12 +575,15 @@ export async function recoverStore(params: {
           forceRestartSafeTools:
             pendingAction === "fail" ||
             (isTerminalSessionStatus(entry.status) && entry.status !== "interrupted") ||
+            entry.mainRestartRecovery?.safeToolsRequired === true ||
             entry.restartRecoveryForceSafeTools === true ||
             hasReplaySafeCodeModeCheckpointInCurrentTurn(messages),
         };
       } else {
         const retainedSafeTools =
-          replaySafeCheckpoint || (entry.restartRecoveryForceSafeTools === true && !fullAccess);
+          replaySafeCheckpoint ||
+          entry.mainRestartRecovery?.safeToolsRequired === true ||
+          (entry.restartRecoveryForceSafeTools === true && !fullAccess);
         const resumePolicy = resolveMainSessionResumePolicy(
           messages,
           retainedSafeTools,
@@ -609,6 +637,7 @@ export async function recoverStore(params: {
         completionSource,
         recoveryAttempt: recoveryView.nextAttempt,
         recoveryAdmission: params.recoveryAdmission,
+        signal: params.signal,
         gatewayRuntime: params.gatewayRuntime,
         ...resumeOptions,
         lifecycleGeneration: params.lifecycleGeneration,
@@ -620,7 +649,7 @@ export async function recoverStore(params: {
         reason: `dispatch_${resumeResult}`,
         nextOwner:
           resumeResult === "started"
-            ? "main-lane"
+            ? "background-lane"
             : resumeResult === "settled"
               ? "none"
               : "main-session-recovery",

@@ -2,11 +2,17 @@ import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import type { ConfigSnapshotReadMeasure, ConfigSnapshotReadOptions } from "../config/io.js";
 import { resolveStateDir } from "../config/paths.js";
 import type { ConfigFileSnapshot } from "../config/types.js";
+import { assertDatabasePortStartupAllowed } from "../infra/database-port-recovery.js";
 import type { StartupMigrationLease } from "../infra/startup-migration-checkpoint.js";
 import { recordStartupMigrationWarnings } from "../infra/state-migrations.messages.js";
 import { RetiredStateFormatError } from "../infra/state-migrations.retired-files.js";
 import { assertNoRetiredRuntimeStateFiles } from "../infra/state-migrations.retired-runtime-files.js";
-import type { PluginCache } from "../plugins/plugin-cache.js";
+import {
+  getPluginCache,
+  getPluginMetadataSnapshotCache,
+  withPluginCache,
+  type PluginCache,
+} from "../plugins/plugin-cache.js";
 import { setActiveDegradedPlugins } from "../plugins/runtime-degraded-state.js";
 import {
   readAdmittedConfigSnapshot,
@@ -39,6 +45,7 @@ export type StartupConfigPreflightResult = ReturnType<typeof result> & {
 export async function runStartupConfigPreflight(
   options: StartupConfigPreflightOptions,
 ): Promise<StartupConfigPreflightResult> {
+  assertDatabasePortStartupAllowed(resolveStateDir(process.env));
   for (let attempt = 1; ; attempt++) {
     await using snapshots = createConfigPreflightSnapshotReader();
     const { withSqliteReadOnlyWorkerScope } = await import("../infra/sqlite-readonly-worker.js");
@@ -173,6 +180,33 @@ async function prepareStartupConfig(
         return result(read);
       }
     }
+    const [{ initializeNativeOpenClawStateDatabase }, { isStatePostgres }] = await Promise.all([
+      import("../state/openclaw-state-db.js"),
+      import("../state/openclaw-state-db-engine.js"),
+    ]);
+    await beforeStatePreparation(read.snapshot);
+    assertLeaseCurrent();
+    // Native clients can create a version-zero catalog before the first Gateway.
+    // Finish that producer's bootstrap after read admission releases its snapshot,
+    // before webhook history or other runtime tables are consumed.
+    if (!isStatePostgres()) {
+      const [
+        { withStateDatabaseColdAdmission },
+        { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS },
+        { resolveOpenClawStateSqlitePath },
+      ] = await Promise.all([
+        import("../infra/gateway-state-owner.js"),
+        import("../state/openclaw-state-db-contract.js"),
+        import("../state/openclaw-state-db.paths.js"),
+      ]);
+      withStateDatabaseColdAdmission(
+        {
+          databasePath: resolveOpenClawStateSqlitePath(env),
+          busyTimeoutMs: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
+        },
+        () => initializeNativeOpenClawStateDatabase({ env }),
+      );
+    }
     const { HISTORICAL_WEBHOOK_CHANNELS, recordUnwrittenWebhookCompletion } =
       await import("./doctor/shared/legacy-webhook-pins.js");
     const webhookCompletion = read.snapshot.sourceConfig.meta?.migrations?.webhookListeners;
@@ -186,6 +220,7 @@ async function prepareStartupConfig(
         return applyPluginDoctorCompatibilityMigrations(read.snapshot.sourceConfig, {
           config: read.snapshot.sourceConfig,
           env,
+          manifestRegistry: read.pluginMetadataSnapshot?.manifestRegistry,
           pluginIds: HISTORICAL_WEBHOOK_CHANNELS,
           historicalWebhookListeners: true,
           startup: true,
@@ -207,11 +242,21 @@ async function prepareStartupConfig(
         }
       }
     }
-    const verification = await refreshStartupPluginQuarantine({
-      cfg: read.snapshot.sourceConfig,
-      env,
-      measure,
-    });
+    const verification = await withPluginCache(
+      read.pluginMetadataSnapshot
+        ? getPluginMetadataSnapshotCache(read.pluginMetadataSnapshot)
+        : getPluginCache(),
+      () =>
+        refreshStartupPluginQuarantine({
+          cfg: read.snapshot.sourceConfig,
+          env,
+          measure,
+          beforePersistentEffect: async () => {
+            await beforeStatePreparation(read.snapshot);
+            assertLeaseCurrent();
+          },
+        }),
+    );
     setActiveDegradedPlugins(verification.quarantinedPlugins);
     recordStartupMigrationWarnings([
       ...readStartupStateWarnings(env),

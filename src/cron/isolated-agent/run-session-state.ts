@@ -9,6 +9,7 @@ import type { SessionEntry } from "../../config/sessions.js";
 import { resolveSessionAuthProfileOverrideSource } from "../../config/sessions/auth-profile-override-provenance.js";
 import { resolveSessionWorkStartError } from "../../config/sessions/lifecycle.js";
 import type { SessionResetBoundaryWrite } from "../../config/sessions/session-accessor.lifecycle-types.js";
+import { preserveSqliteSameKeySessionRolloverLineage } from "../../config/sessions/session-entry-lineage.js";
 import {
   buildSessionCreationStamp,
   inheritSessionCreationPolicy,
@@ -26,6 +27,7 @@ import {
   getSessionWorkAdmissionOwnerRelease,
   isSessionWorkAdmissionActive,
 } from "../../sessions/session-lifecycle-admission.js";
+import { CronSessionLifecycleClaimError } from "../run-authority.js";
 import {
   normalizeCronScheduledToolCallerOrigin,
   normalizeCronScheduledToolPolicy,
@@ -42,6 +44,8 @@ import type {
 import { setSessionRuntimeModel } from "./run.runtime.js";
 import type { CronLaneWaitCallback } from "./run.types.js";
 import { loadCronSessionEntryLatest, type resolveCronSession } from "./session.js";
+
+export { CronSessionLifecycleClaimError } from "../run-authority.js";
 
 const CRON_SESSION_PREPARATION_OWNER = Symbol.for("openclaw.cronSessionPreparation");
 
@@ -63,7 +67,7 @@ export async function withCronSessionPreparation<T>(
     owner: CRON_SESSION_PREPARATION_OWNER,
   };
   if (getSessionWorkAdmissionOwnerRelease(target)) {
-    params.onLaneWait?.({ waiting: true });
+    params.onLaneWait?.({ waiting: true, stage: "session-preparation" });
   }
   const admission = await beginSessionWorkAdmission({
     agentId: params.agentId,
@@ -88,21 +92,21 @@ export async function withCronSessionPreparation<T>(
             if (release) {
               return { kind: "waiting" as const, release };
             }
-            params.onLaneWait?.({ waiting: false });
+            params.onLaneWait?.({ waiting: false, stage: "session-preparation" });
             return { kind: "prepared" as const, value: await prepare() };
           },
           {
             abortSignal: params.signal,
             priority: "background",
             taskIdentity: { taskKind: "cron", sessionKey: params.sessionKey },
-            onQueued: () => params.onLaneWait?.({ waiting: true }),
+            onQueued: () => params.onLaneWait?.({ waiting: true, stage: "session-preparation" }),
           },
         );
         if (result.kind === "prepared") {
           return result.value;
         }
         // Queued owners may need this lane. Await their settlement only after releasing it.
-        params.onLaneWait?.({ waiting: true });
+        params.onLaneWait?.({ waiting: true, stage: "session-preparation" });
         await racePromiseWithAbortSignal(result.release, params.signal, (signal) =>
           toErrorObject(signal.reason, "Queued command aborted"),
         );
@@ -152,18 +156,6 @@ export type CronRunContinuationSession = {
   ) => Promise<void>;
   seal: (options?: { basePersisted?: boolean }) => Promise<void>;
 };
-
-export class CronSessionLifecycleClaimError extends Error {
-  readonly admissionDisposition = "session-conflict" as const;
-
-  constructor(
-    sessionKey: string,
-    message = `Session "${sessionKey}" changed while starting work. Retry.`,
-  ) {
-    super(message);
-    this.name = "CronSessionLifecycleClaimError";
-  }
-}
 
 function resolveCronLifecycleRevisionIdentity(lifecycleRevision: string): string {
   return `cron-lifecycle-revision:${lifecycleRevision}`;
@@ -458,10 +450,11 @@ export function createCronRunContinuationSession(params: {
     delete source.createdVia;
     delete source.createdActor;
     delete source.createdAt;
-    // Node-local lineage must not leak across keys: the base row's generation
-    // chain and fork ancestry describe the cron root, not this :run: node.
+    // Node-local lineage must not leak across keys: generation history and
+    // fork ancestry describe the cron root, not this :run: node.
     delete source.previousSessionId;
     delete source.forkSource;
+    delete source.usageFamilySessionIds;
     const snapshot = { source, continuation: structuredClone(continuation) };
     if (phase === "running" && isDeepStrictEqual(snapshot, persistedSnapshot)) {
       return;
@@ -489,7 +482,13 @@ export function createCronRunContinuationSession(params: {
         persisted = true;
         return {
           ...current,
-          ...source,
+          ...(current
+            ? preserveSqliteSameKeySessionRolloverLineage({
+                next: source,
+                previous: current,
+                sessionKey: params.runSessionKey,
+              })
+            : source),
           // Snapshot merges remove cleared keys; continuity copies must carry
           // their absence too, or this row resurrects an invalid native handle.
           cliSessionBindings: source.cliSessionBindings,

@@ -2,18 +2,21 @@ import type {
   ProviderResolveDynamicModelContext,
   ProviderRuntimeModel,
 } from "openclaw/plugin-sdk/plugin-entry";
+import { resolveMergedModelProviderConfig } from "openclaw/plugin-sdk/provider-catalog-shared";
 import { resolveFamilyForwardCompatModel } from "openclaw/plugin-sdk/provider-model-shared";
 import {
   normalizeOptionalLowercaseString,
   normalizeUniqueTrimmedStringList,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { normalizeGoogleModelId } from "./model-id.js";
+import { normalizeGoogleModelId, stripGoogleProviderPrefix } from "./model-id.js";
+import { isOfficialGoogleAiStudioBaseUrl } from "./src/google-api-base-url.js";
 
 const GOOGLE_GEMINI_CLI_PROVIDER_ID = "google-gemini-cli";
 const GOOGLE_ANTIGRAVITY_PROVIDER_ID = "google-antigravity";
 const GEMINI_3_PRO_RE = /^gemini-3(?:\.\d+)?-pro(?:-|$)/;
 const GEMINI_3_FLASH_LITE_RE = /^gemini-3(?:\.\d+)?-flash-lite(?:-|$)/;
 const GEMINI_3_FLASH_RE = /^gemini-3(?:\.\d+)?-flash(?:-|$)/;
+const GEMINI_4_RE = /^gemini-4(?:[.-]|$)/;
 const GEMINI_PRO_LATEST_ID = "gemini-pro-latest";
 const GEMINI_FLASH_LATEST_ID = "gemini-flash-latest";
 const GEMINI_FLASH_LITE_LATEST_ID = "gemini-flash-lite-latest";
@@ -22,8 +25,15 @@ const GEMINI_3_1_PRO_TEMPLATE_IDS = ["gemini-3.1-pro-preview", "gemini-3-pro-pre
 const GEMINI_3_1_FLASH_LITE_TEMPLATE_IDS = ["gemini-3.1-flash-lite"] as const;
 const GEMINI_3_1_FLASH_TEMPLATE_IDS = ["gemini-3-flash-preview", "gemini-2.5-flash"] as const;
 const GEMINI_3_FLASH_ANTIGRAVITY_TEMPLATE_IDS = ["gemini-3-flash"] as const;
+const GEMINI_4_TEMPLATE_IDS = ["gemini-4-argon"] as const;
 const GOOGLE_PROVIDER_PREFIX = "google/";
-const GOOGLE_NON_TEXT_MODEL_ID_MARKERS = ["-image", "-tts", "-live", "native-audio"] as const;
+const GOOGLE_NON_TEXT_MODEL_ID_MARKERS = [
+  "-image",
+  "-tts",
+  "-live",
+  "-embedding",
+  "native-audio",
+] as const;
 
 function normalizeGeminiProRequestId(id: string): string {
   if (id.startsWith(GOOGLE_PROVIDER_PREFIX)) {
@@ -53,6 +63,46 @@ export function isGoogleTextGenerationModelId(id: string): boolean {
     return false;
   }
   return GOOGLE_FORWARD_COMPAT_CASES.some((entry) => entry.match(lower));
+}
+
+export function isGoogleFlashTextModelId(id: string): boolean {
+  const lower = normalizeOptionalLowercaseString(googleFamilyModelId(id)) ?? "";
+  return (
+    isGoogleTextGenerationModelId(lower) && /^gemini-(?:\d+(?:\.\d+)?-)?flash(?:-|$)/.test(lower)
+  );
+}
+
+export function resolveGoogleModelApi(params: {
+  provider: string;
+  modelId: string;
+  api: string;
+  baseUrl?: string;
+  providerConfig?: ProviderResolveDynamicModelContext["providerConfig"];
+}): string {
+  if (params.provider !== "google") {
+    return params.api;
+  }
+  const models = params.providerConfig?.models;
+  const model =
+    models?.find((entry) => entry.id === params.modelId) ??
+    models?.find(
+      (entry) =>
+        normalizeGoogleModelId(stripGoogleProviderPrefix(entry.id)) ===
+        normalizeGoogleModelId(stripGoogleProviderPrefix(params.modelId)),
+    );
+  // Only authored config is an explicit API choice; a catalog donor's API
+  // describes its endpoint, not an operator's replacement endpoint.
+  const explicitApi = model?.api ?? params.providerConfig?.api;
+  if (explicitApi) {
+    return explicitApi;
+  }
+  if (params.api !== "google-generative-ai" && params.api !== "google-interactions") {
+    return params.api;
+  }
+  const baseUrl = model?.baseUrl ?? params.providerConfig?.baseUrl ?? params.baseUrl;
+  return isOfficialGoogleAiStudioBaseUrl(baseUrl) && isGoogleFlashTextModelId(params.modelId)
+    ? "google-interactions"
+    : "google-generative-ai";
 }
 
 export function isGoogleNativeVideoModelId(id: string): boolean {
@@ -160,6 +210,10 @@ const GOOGLE_FORWARD_COMPAT_CASES: readonly GoogleForwardCompatCase[] = [
     ],
   },
   {
+    match: (id) => GEMINI_4_RE.test(id),
+    family: [GEMINI_4_TEMPLATE_IDS, GEMINI_4_TEMPLATE_IDS],
+  },
+  {
     match: (id) => id.startsWith(GEMMA_PREFIX),
     // Gemma has no dedicated catalog template; approximate with the Gemini flash family.
     family: [GEMINI_3_1_FLASH_TEMPLATE_IDS, GEMINI_3_1_FLASH_TEMPLATE_IDS],
@@ -225,7 +279,25 @@ export function resolveGoogleGeminiForwardCompatModel(params: {
           family,
         });
       },
-      patch,
+      patch: (context) => ({
+        ...(typeof patch === "function" ? patch(context) : patch),
+        ...(params.providerId === "google"
+          ? {
+              api: resolveGoogleModelApi({
+                provider: params.providerId,
+                modelId: trimmed,
+                api: "google-generative-ai",
+                baseUrl: context.template?.baseUrl,
+                providerConfig:
+                  params.ctx.providerConfig ??
+                  resolveMergedModelProviderConfig(params.ctx.config, params.providerId),
+              }),
+            }
+          : // A configured google row may carry Interactions; other providers never use it.
+            context.template?.api === "google-interactions"
+            ? { api: "google-generative-ai" }
+            : {}),
+      }),
     })),
   });
 }
@@ -235,6 +307,7 @@ export function isModernGoogleModel(modelId: string): boolean {
   return (
     lower.startsWith("gemini-2.5") ||
     lower.startsWith("gemini-3") ||
+    GEMINI_4_RE.test(lower) ||
     lower === GEMINI_PRO_LATEST_ID ||
     lower === GEMINI_FLASH_LATEST_ID ||
     lower === GEMINI_FLASH_LITE_LATEST_ID ||

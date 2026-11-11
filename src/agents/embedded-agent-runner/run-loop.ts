@@ -40,6 +40,7 @@ import {
   beginRunAttempt,
   createRunRetryBudget,
   isRunRetryBudgetExhausted,
+  recordRunModelProgress,
   recordRunRetry,
 } from "./run/retry-budget.js";
 import { handleRetryLimitExhaustion } from "./run/retry-limit.js";
@@ -74,12 +75,16 @@ export async function runPreparedEmbeddedLoop(
   } = input;
   const { notifyExecutionPhase } = input.progressController;
   let startupStagesEmitted = false;
+  const abortSignal = input.laneController.abortSignal;
+  params = { ...params, abortSignal };
   const preparedRuntime = await measureEmbeddedAgentPreparation(
     "runtime",
     () =>
       prepareEmbeddedRunRuntime({
         ...input,
         assertCurrent: input.laneController.throwIfAborted,
+        getAuthDeadline: input.laneController.getExecutionDeadline,
+        runParams: params,
         hookContext: preReplyGeneration?.assertCurrent
           ? withClaimingHookAdmission(
               { ...hookCtx },
@@ -91,7 +96,6 @@ export async function runPreparedEmbeddedLoop(
       }),
     { config: params.config },
   );
-  const abortSignal = input.laneController.abortSignal;
   params = { ...params, admittedRunContext: preparedRuntime.admittedRunContext, abortSignal };
   const accountingAuthority = getAdmittedRunDelegatedAuthority(preparedRuntime.admittedRunContext);
   const assertAdmittedActive = resolveAdmittedRunActiveAssertion(
@@ -355,6 +359,9 @@ export async function runPreparedEmbeddedLoop(
       const { dispatchedAttempt, runtimePlan } = dispatch;
       const refusal = await providerReview.settle(dispatchedAttempt.rawAttempt);
       failoverRetryController.observeAttempt(dispatchedAttempt.rawAttempt);
+      if (dispatchedAttempt.rawAttempt.hasSuccessfulModelResponse) {
+        recordRunModelProgress(runRetryBudget);
+      }
       const rawAttempt = refresh.applyDeliveryState(dispatchedAttempt.rawAttempt);
       attemptCarryover.apply(rawAttempt);
       // Attempt subscriptions reset on retry; the reply owner retains final source
@@ -475,6 +482,7 @@ export async function runPreparedEmbeddedLoop(
         overloadProfileRotations,
         previousRetryFailoverReason: lastRetryFailoverReason,
         failover: failoverRetryController,
+        rateLimitRetriesExhausted: failoverRetryController.rateLimitRetriesExhausted,
         traceAttempts,
         suspensionSessionId: sessionPromptState.sessionId ?? params.sessionId,
       });
@@ -502,6 +510,7 @@ export async function runPreparedEmbeddedLoop(
             attemptCompactionCount,
           },
           terminalBase: {
+            rateLimitRetriesExhausted: failoverRetryController.rateLimitRetriesExhausted,
             mergeToolMedia: refresh.mergeToolMedia,
             runParams: params,
             provider,
@@ -597,7 +606,20 @@ export async function runPreparedEmbeddedLoop(
       if (terminalResolution.action === "retry") {
         continue;
       }
-      return providerReview.finish(terminalResolution.result);
+      // Diagnostics-only final-message fact from terminal preparation; terminal
+      // resolution builds the rest of the completed result.
+      const { result } = terminalResolution;
+      return providerReview.finish(
+        terminalPrepared.finalAssistantMessageRawText === undefined
+          ? result
+          : {
+              ...result,
+              meta: {
+                ...result.meta,
+                finalAssistantMessageRawText: terminalPrepared.finalAssistantMessageRawText,
+              },
+            },
+      );
     }
   } finally {
     // Successful registration already cleared the marker; every earlier exit

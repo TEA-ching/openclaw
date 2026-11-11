@@ -1784,6 +1784,29 @@ describe("mcp loopback server", () => {
     );
   });
 
+  it("bounds capture draining by elapsed time after a wall-clock rollback", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
+    const captureKey = "clock-rollback";
+    beginMcpLoopbackToolCallCapture({ captureKey, onToolCallResult: vi.fn() });
+    markMcpLoopbackToolCallStarted({ captureKey, toolName: "message", args: {} });
+    const settled = vi.fn();
+    const idle = waitForMcpLoopbackToolCallCaptureIdle(captureKey, {
+      timeoutMs: 120,
+      admissionGraceMs: 0,
+    }).then(settled);
+    try {
+      vi.setSystemTime(Date.now() - 60_000);
+      await vi.advanceTimersByTimeAsync(119);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledWith(false);
+    } finally {
+      clearMcpLoopbackToolCallCapture(captureKey);
+      await idle;
+      vi.useRealTimers();
+    }
+  });
+
   it("waits through a quiet admission grace before clearing a failed-turn capture", async () => {
     const captureKey = "admission-grace";
     beginMcpLoopbackToolCallCapture({
@@ -1950,6 +1973,21 @@ describe("mcp loopback server", () => {
       body: "{}",
     });
     expect(response.status).toBe(415);
+  });
+
+  it.each([
+    ["Application/JSON", 200],
+    ["Application/XML", 415],
+  ] as const)("handles mixed-case content type %s", async (contentType, status) => {
+    const { port } = await startLoopbackServerForTest();
+    const runtime = getActiveMcpLoopbackRuntime();
+    const response = await sendRaw({
+      port,
+      token: runtime?.ownerToken,
+      headers: { "content-type": contentType },
+      body: mcpToolsListBody(),
+    });
+    expect(response.status).toBe(status);
   });
 
   it("returns JSON-RPC parse errors only for invalid JSON", async () => {

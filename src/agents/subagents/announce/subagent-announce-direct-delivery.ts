@@ -1,6 +1,7 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { completionRequiresMessageToolDelivery } from "../../../auto-reply/reply/completion-delivery-policy.js";
+import type { RestartRecoveryTerminalDeliveryEvidence } from "../../../config/sessions/restart-recovery-types.js";
 import { readSessionEntriesFromStoreInWorker } from "../../../config/sessions/session-entry-read-runtime.js";
 import { bindInProcessSessionRun } from "../../../gateway/in-process-session-run.js";
 import { stringifyRouteThreadId } from "../../../plugin-sdk/channel-route.js";
@@ -62,7 +63,7 @@ import {
   loadRequesterSessionEntry,
   resolveExternalBestEffortDeliveryTarget,
   resolveQueueSettings,
-  withSubagentRequesterSource,
+  withSubagentRequesterDelivery,
 } from "./subagent-announce-delivery.runtime.js";
 import { createDirectAnnounceResponseClassifier } from "./subagent-announce-direct-response.js";
 import {
@@ -123,23 +124,10 @@ function completionHandoffPendingResult(): SubagentAnnounceDeliveryResult {
 export async function sendSubagentAnnounceDirectly(
   params: SubagentAnnounceDirectParams,
 ): Promise<SubagentAnnounceDeliveryResult> {
-  return withSubagentRequesterSource(
+  return withSubagentRequesterDelivery(
     params.targetRequesterSessionKey,
-    params.requesterAgentId,
-    async (
-      isRequesterCurrent,
-    ): Promise<Awaited<ReturnType<typeof sendSubagentAnnounceDirectly>>> => {
-      const guardedParams = isRequesterCurrent
-        ? {
-            ...params,
-            isSourceSessionEffectsAllowed: () =>
-              isRequesterCurrent() && params.isSourceSessionEffectsAllowed?.() !== false,
-            isSourceSessionAdmissionAllowed: () =>
-              isRequesterCurrent() && params.isSourceSessionAdmissionAllowed?.() !== false,
-          }
-        : params;
-      return sendSubagentAnnounceDirectlyBound(guardedParams);
-    },
+    params,
+    sendSubagentAnnounceDirectlyBound,
   );
 }
 
@@ -241,8 +229,8 @@ async function sendSubagentAnnounceDirectlyBound(
       params.targetRequesterSessionKey,
       requester,
     );
-    // Private findings bind to the requester incarnation that produced them,
-    // including a deliverable settle continuation that is no longer parentOnly.
+    // Settlement and private findings bind to the captured requester incarnation,
+    // including a visible continuation after the spawning turn has yielded.
     const requesterSessionBound =
       parentOnly ||
       (sourceToolId === "subagent_settle" && params.completionRequesterSessionId !== undefined);
@@ -256,7 +244,7 @@ async function sendSubagentAnnounceDirectlyBound(
         delivered: false,
         path: "none",
         reason: "completion_handoff_unavailable",
-        error: "private completion requester session is unavailable or replaced",
+        error: "completion requester session is unavailable or replaced",
         terminal: true,
         disposition: "intentional_non_delivery",
       };
@@ -297,7 +285,7 @@ async function sendSubagentAnnounceDirectlyBound(
     // A recovered requester already owns this admitted input. Reuse its final
     // receipt through the normal delivery checks; never execute the old wake again.
     const recovery =
-      !parentOnly && (sourceToolId === "subagent_settle" || isSubagentCompletion)
+      sourceToolId === "subagent_settle" || isSubagentCompletion
         ? resolveRequesterRecoveryDelivery(requesterEntry, params.directIdempotencyKey)
         : undefined;
     if (recovery?.kind === "delivery") {
@@ -455,7 +443,10 @@ async function sendSubagentAnnounceDirectlyBound(
         runId: params.directIdempotencyKey,
       });
     }
+    const inputReplyExpectation =
+      params.expectsCompletionMessage || params.requireVisibleReply ? "required" : "optional";
     const classifyResponse = createDirectAnnounceResponseClassifier({
+      replyExpectation: inputReplyExpectation,
       params,
       parentOnly,
       requesterSessionBound,
@@ -471,6 +462,24 @@ async function sendSubagentAnnounceDirectlyBound(
       textCompletionDirectDeliveryKind,
       tryTextCompletionDirectDelivery,
     });
+    const classifyRecoveredResult = (result: RestartRecoveryTerminalDeliveryEvidence) => {
+      if (parentOnly && (!result.captured || result.meta?.error || result.meta?.aborted)) {
+        return {
+          delivered: false,
+          path: "direct",
+          reason: "completion_handoff_pending",
+          error: "recovered private requester did not complete successfully",
+          disposition: "permanent_failure",
+        } satisfies SubagentAnnounceDeliveryResult;
+      }
+      // Recovery processed the same private input. Its retained result replaces
+      // the original RPC receipt without admitting that terminal run again.
+      return classifyResponse({
+        status: "ok",
+        result,
+        ...(parentOnly ? { inputProcessingCompleted: true } : {}),
+      });
+    };
     let directAnnounceResponse: unknown;
     let directFailure: SubagentAnnounceDeliveryResult | undefined;
     try {
@@ -488,6 +497,9 @@ async function sendSubagentAnnounceDirectlyBound(
               }
               return await runAnnounceAgentCall({
                 agentParams: directAgentParams,
+                // Individual result delivery and an owed public synthesis remain
+                // required; optional settle intake may complete without repeating it.
+                replyExpectation: inputReplyExpectation,
                 // A resumed parent has no inbound channel dispatcher to keep activity visible.
                 typing:
                   sourceToolId === "subagent_settle" &&
@@ -583,13 +595,16 @@ async function sendSubagentAnnounceDirectlyBound(
       };
     }
 
-    const classified = directFailure ?? classifyResponse(directAnnounceResponse);
+    const classified =
+      directFailure ??
+      (recoveredResult
+        ? classifyRecoveredResult(recoveredResult)
+        : classifyResponse(directAnnounceResponse));
     const delivery = classified instanceof Promise ? await classified : classified;
     const originalOutcome = buildAgentRunTerminalOutcomeFromWaitResult(
       asOptionalRecord(directAnnounceResponse),
     );
     if (
-      parentOnly ||
       (sourceToolId !== "subagent_settle" && !isSubagentCompletion) ||
       recoveredResult !== undefined ||
       requesterCanonicalKey !== canonicalRequesterSessionKey ||
@@ -665,7 +680,7 @@ async function sendSubagentAnnounceDirectlyBound(
     // their normal receipt classifier never dispatches or sends the input again.
     return settledRecovery.kind === "delivery"
       ? settledRecovery.delivery
-      : classifyResponse({ status: "ok", result: settledRecovery.result });
+      : classifyRecoveredResult(settledRecovery.result);
   } catch (err) {
     params.onDeliveryError?.(err);
     const disposition = hasAnnounceSendEvidence(err)

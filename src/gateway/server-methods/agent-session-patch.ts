@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { resolveTrustedGroupId } from "../../agents/agent-tools.policy.js";
 import { clearAllCliSessions } from "../../agents/cli-session.js";
 import { buildMainSessionRecoveryClearPatch } from "../../agents/main-session-recovery/main-session-recovery-clear.js";
+import { clearRotatedSessionMetadata } from "../../agents/session-reset-metadata.js";
 import { evaluateSessionFreshness, type SessionFreshness } from "../../config/sessions.js";
 import { hasProviderOwnedSession } from "../../config/sessions/entry-freshness.js";
 import { resolveSessionLifecycleTimestampsAsync } from "../../config/sessions/lifecycle-read.js";
@@ -31,13 +32,13 @@ import { resolveSessionStoreKey } from "../session-store-key.js";
 import { loadGatewaySessionEntryReadOnlyInWorker } from "../session-utils-store-worker.js";
 import {
   normalizeTrustedGroupMetadata,
-  requestGroupMatchesTrusted,
-  resolveTrustedGroupMetadata,
+  resolveAgentSessionGroup,
   type TrustedGroupMetadata,
 } from "./agent-subagent-registration.js";
 
 export type AgentSessionPatchBuild = {
   patch: Partial<SessionEntry>;
+  automaticResetReason?: "idle" | "daily";
   spawnedBy: string | undefined;
   groupId: string | undefined;
   groupChannel: string | undefined;
@@ -142,14 +143,23 @@ export async function evaluateAgentSessionReuse(params: AgentSessionReuseInput) 
     params.requestedSessionId && (!params.freshEntry?.sessionId || canReuseSession)
       ? params.requestedSessionId
       : undefined;
+  const automaticResetReason =
+    !canReuseSession &&
+    !usableRequestedSessionId &&
+    !(failedSession && !metadata?.present) &&
+    !terminalMainTranscriptNewerThanRegistry
+      ? freshness?.staleReason
+      : undefined;
   const sessionId =
-    usableRequestedSessionId ?? (canReuseSession ? params.freshEntry?.sessionId : undefined);
+    usableRequestedSessionId ??
+    (canReuseSession || automaticResetReason ? params.freshEntry?.sessionId : undefined);
   const isNewSession =
     !params.freshEntry ||
     (!canReuseSession && !usableRequestedSessionId) ||
     Boolean(usableRequestedSessionId && params.freshEntry?.sessionId !== usableRequestedSessionId);
   return {
     lifecycleTimestamps,
+    automaticResetReason,
     freshness,
     recoverableTerminalSession,
     canReuseSession,
@@ -172,6 +182,7 @@ export async function buildAgentSessionPatch(
   },
 ): Promise<AgentSessionPatchBuild> {
   const reuse = await evaluateAgentSessionReuse(params);
+  const automaticResetReason = reuse.automaticResetReason;
   const storedSpawnedBy = normalizeOptionalString(params.freshEntry?.spawnedBy);
   const freshSpawnedBy = storedSpawnedBy
     ? resolveSessionStoreKey({
@@ -204,36 +215,13 @@ export async function buildAgentSessionPatch(
       }
     }
   }
-  const trustedGroup = resolveTrustedGroupMetadata({
+  const nextGroup = resolveAgentSessionGroup({
     sessionKey: params.canonicalSessionKey,
     spawnedBy: freshSpawnedBy,
     stored: storedGroup,
     inherited: inheritedGroup,
+    requested: params.normalizedSpawned,
   });
-  const validatedGroup = trustedGroup.groupId
-    ? resolveTrustedGroupId({
-        groupId: trustedGroup.groupId,
-        sessionKey: params.canonicalSessionKey,
-        spawnedBy: freshSpawnedBy,
-      })
-    : undefined;
-  const trustRequestSelectors =
-    Boolean(trustedGroup.groupId) &&
-    requestGroupMatchesTrusted({
-      requestGroupId: params.normalizedSpawned.groupId,
-      trustedGroupId: trustedGroup.groupId,
-    });
-  const nextGroup = validatedGroup?.dropped
-    ? { groupId: undefined, groupChannel: undefined, groupSpace: undefined }
-    : {
-        groupId: trustedGroup.groupId,
-        groupChannel:
-          trustedGroup.groupChannel ??
-          (trustRequestSelectors ? params.normalizedSpawned.groupChannel : undefined),
-        groupSpace:
-          trustedGroup.groupSpace ??
-          (trustRequestSelectors ? params.normalizedSpawned.groupSpace : undefined),
-      };
 
   const effectiveDelivery = mergeDeliveryContext(
     deliveryContextFromSession(params.freshEntry),
@@ -278,6 +266,13 @@ export async function buildAgentSessionPatch(
     ? buildMainSessionRecoveryClearPatch(params.freshEntry)
     : {};
   const patch: Partial<SessionEntry> = {
+    ...(automaticResetReason && !freshSessionRotatedSinceLoad && params.freshEntry
+      ? {
+          ...clearRotatedSessionMetadata(params.freshEntry),
+          lifecycleRevision: randomUUID(),
+          agentHarnessId: undefined,
+        }
+      : {}),
     sessionId: patchSessionId,
     updatedAt: params.now,
     ...(reuse.isNewSession && !freshSessionRotatedSinceLoad
@@ -326,6 +321,7 @@ export async function buildAgentSessionPatch(
   }
   return {
     patch,
+    ...(automaticResetReason && !freshSessionRotatedSinceLoad ? { automaticResetReason } : {}),
     spawnedBy: freshSpawnedBy,
     ...nextGroup,
     freshSessionRotatedSinceLoad,

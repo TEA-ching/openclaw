@@ -1,4 +1,5 @@
 /** Validate guest JavaScript before execution. */
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { parseCodeModeScriptSyntax } from "./code-mode-script-syntax.js";
 import {
   CODE_MODE_SHELL_SOURCE_ERROR,
@@ -42,6 +43,13 @@ function containsModuleAccess(node: import("acorn").AnyNode): boolean {
   return false;
 }
 
+// Existing test assertions match the leading sentence; keep it verbatim.
+export const CODE_MODE_MODULE_ACCESS_ERROR =
+  "code mode module access is disabled. " +
+  "Call an enabled async tool global from guest JavaScript; use " +
+  "catalog.search(query) when the bounded quick index omits it. " +
+  "Do not retry the same source with require() or an import.";
+
 export function prepareSource(code: string): string {
   const parsed = parseCodeModeScriptSyntax(code);
   if (isShellLikeCodeModeSource(code)) {
@@ -49,7 +57,7 @@ export function prepareSource(code: string): string {
   }
   if (!parsed.ok) {
     // Keep parser text bounded: some diagnostics include a user-sized identifier.
-    const message = parsed.message.slice(0, 240);
+    const message = truncateUtf16Safe(parsed.message, 240);
     throw new ToolInputError(
       `SyntaxError at openclaw-code-mode:user.js:${parsed.line}:${parsed.column + 1}: ${message}. No tools were dispatched; correct the JavaScript source and submit it again.`,
     );
@@ -59,7 +67,7 @@ export function prepareSource(code: string): string {
     (code.includes("import") || code.includes("require") || code.includes("\\u")) &&
     containsModuleAccess(parsed.program)
   ) {
-    throw new ToolInputError("code mode module access is disabled.");
+    throw new ToolInputError(CODE_MODE_MODULE_ACCESS_ERROR);
   }
   return code;
 }

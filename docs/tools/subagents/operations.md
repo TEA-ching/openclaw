@@ -40,6 +40,11 @@ Suspended completion deliveries do not block new work. Native subagents, ACP
 sessions, and visible sessions retain their normal active-run limits and
 authorization checks independently of the delivery backlog.
 
+If a completed child's ownership changes while a reply reactivates it, that
+continuation ends with a normal error before the model starts. Your message stays
+in the child session's history, and the current child owner remains unchanged.
+Inspect the session before sending another instruction.
+
 OpenClaw warns when the delivery backlog reaches 25. Within a Gateway process,
 unchanged backlog counts do not repeat the warning every sweep. A count change
 at or above 25, or a return to that threshold after recovery, produces a new
@@ -85,6 +90,13 @@ of automatically relaunched. Their results tell the parent that execution was
 interrupted and that partially completed actions need checking. A parent waiting
 for its child batch receives the settled results, including children that finished
 before the restart, and decides what work remains.
+
+Visible and private requester-settle completions retain their processing outcome
+across restart. A replay of the same frozen child batch acknowledges an already
+completed requester turn without executing or delivering it again. Unfinished
+main-session turns continue through normal restart recovery with the original
+operator restrictions. If the original authority is unavailable, the task stays
+owed instead of running with broader permissions.
 
 An already-admitted completion turn for a yielded nested requester is different
 from an orphaned child launch. Its frozen child-result batch retains the exact
@@ -279,3 +291,9 @@ in file logs; console output includes the first six stack lines. Direct announce
 and requester-settle retry warnings
 also include the requester and delivery idempotency key so retries can be traced
 without logging message content.
+
+## Retention during shutdown
+
+When shutdown begins, an active retention sweep finishes its current cleanup
+instead of draining the entire expired backlog. Remaining run records stay saved
+for cleanup after restart, including partially cleaned collector groups.

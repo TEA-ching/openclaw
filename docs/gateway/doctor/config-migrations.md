@@ -18,6 +18,40 @@ Doctor keeps plugin repair and diagnostic contracts available through later heal
 checks and service finalization. It releases its private plugin resources when
 the flow ends, including failed runs.
 
+## Group allowlist fallback
+
+For channels that support legacy DM sender fallback, Doctor copies `allowFrom`
+into an absent `groupAllowFrom`. It preserves explicit lists, including `[]`, at
+channel and account scope, and accounts keep inherited explicit channel lists.
+The migration also leaves lists absent when the effective account, channel, or
+global-default `groupPolicy` disables groups. Explicit policy overrides still
+apply. Update-time Doctor repair follows the same rules.
+
+## Cloud setup secret migration
+
+The Crabbox plugin retires `cloudWorkers.profiles.<id>.settings.setupEnv`.
+Run `openclaw doctor --fix` to replace each legacy environment name with a
+same-name store SecretRef under `settings.setupSecrets`. The shared-store entry
+must already be protected (`kind: "secret"`) and have explicit destination
+bindings. Doctor compares a legacy host environment value when one is present;
+a conflicting value leaves the profile unchanged. It also preserves an existing
+conflicting `setupSecrets` mapping instead of granting a different secret.
+
+Doctor reports missing protected entries, missing bindings, conflicting values,
+and unavailable store inspection without exposing secret values. It never
+creates store entries, overwrites values, or infers allowed hosts. Repair the
+store through `openclaw secrets`, then rerun Doctor. A profile migrates only when
+every selected entry is ready; unrelated profiles may migrate independently.
+Audit and dry-run inspection leave authored config untouched.
+
+The plugin returns the repaired config to Doctor's existing backed-up,
+include-aware writer. Update-time Doctor uses the same plugin health repair when
+that phase is admitted. An update that defers it records the repair warning;
+run `openclaw doctor --fix` afterward. Unrepaired `setupEnv` profiles refuse new
+provisioning, with no plaintext fallback. Existing lease inspection and cleanup
+remain available. Protected setup secrets keep snapshots enabled; old plaintext
+setup image identities are not adopted as protected images.
+
 ## Runtime config migration
 
 Runtime config reads require per-model context budgets and current GitHub Copilot
@@ -293,7 +327,7 @@ Doctor also refuses these retired config inputs:
 - Agent `model.timeoutMs` and `subagents.model.timeoutMs`, including defaults.
   Timeouts on tool-model selectors remain supported.
 - `memorySearch.store.path`, including its agent and `memory.search` forms.
-- `plugins.installs`, `gateway.webchat`, `session.parentForkMaxTokens`,
+- Nonempty or malformed `plugins.installs`, `gateway.webchat`, `session.parentForkMaxTokens`,
   `browser.relayBindHost`, and `browser.ssrfPolicy.allowPrivateNetwork`.
 - Extension browser profiles with a legacy `cdpUrl`. Current extension profiles
   discover their relay endpoint automatically; the extension driver remains supported.
@@ -324,6 +358,11 @@ succeed. Doctor preserves the config and stops with recovery guidance instead
 of stripping these settings or replacing them with a backup. For an older installation,
 [upgrade through `2026.9.5`](/install/updating#upgrading-very-old-versions)
 and run its Doctor migrations before installing the latest version.
+
+An empty `plugins.installs: {}` contains no install records. `openclaw doctor --fix`
+backs up the config and removes this retired key, preserving the SQLite plugin
+index and any settings retained for pending plugin migrations. Runtime config
+validation still rejects the key until Doctor repairs it.
 
 WhatsApp's `exposeErrorText` has been ignored since April 2026. Remove it from
 the reported channel or account path before retrying; removing this no-op does
@@ -676,6 +715,21 @@ and differing selections are both supported configurations. This notice proposes
 no repair and does not rewrite the config; ACP turns keep their configured harness
 selection.
 
+## Saved model output caps
+
+OpenClaw's default output cap for a model with no authored, provider, or catalog
+`maxTokens` is 32768 tokens, or half the context window when that window is below
+65,536 tokens (never below 8192 unless the window is smaller). Earlier releases used
+8192, and onboarding saved 4096 (custom-provider wizard) or 8192 (self-hosted setup)
+into model rows.
+
+Doctor reports model rows under `models.providers.*.models` that still pin
+`maxTokens` to 4096 or 8192 as information (`core/doctor/legacy-output-cap`), grouped
+per provider, when removing the value would raise the cap. It skips providers with a
+provider-level `maxTokens` and Mistral, whose 8192 cap is intentional. A saved cap may
+be deliberate, so Doctor proposes no repair and never rewrites it: remove `maxTokens`
+from those rows to use the catalog limit or the new default.
+
 ## Missing plugins during migration
 
 Doctor owns deferred plugin migrations. Normal CLI commands, Gateway startup,
@@ -808,6 +862,22 @@ for the publication contract and the remaining risk for an old CLI stalled
 beyond the grace period.
 
 ## Native Codex recovery after Tasks removal
+
+The Codex plugin's `codex-native-assignment-repair` runs during
+`openclaw doctor --fix` and update-time Doctor, after session repair. It collapses
+proven duplicate assignments for the same child and native turn and removes
+assignments whose requester session, lifecycle, or connection is provably
+obsolete. Compatible aliases retain their receipt and recorded-result metadata;
+conflicting facts produce a recoverable warning without changing the row.
+Separate pending turns of one child are preserved. Repairs use the
+existing SQLite backup and exact-row compare-and-apply owner; no database schema
+or assignment format changes. Ordinary Gateway startup does not run this repair.
+
+Unknown or malformed ownership and bindings changed during repair are preserved
+with recoverable warnings, allowing updates to finish best effort. Retry
+`openclaw doctor --fix` after resolving those warnings. Historical retry exhaustion
+without durable evidence stays unresolved: neither the age of an assignment nor
+a child's completed execution proves its result was delivered or abandoned.
 
 The Codex plugin's `codex-native-task-assignments` Doctor migration preserves
 recoverable native child work when upgrading from the Tasks runtime. It runs
@@ -964,7 +1034,7 @@ against the current SQLite owners before the import can rename profiles.
 
     A tool policy scope with nonempty `allow` and `alsoAllow` lists fails validation. `doctor --fix` merges the lists only when the effective profile grants remain unchanged for every agent and provider that inherits the extras. It retains `alsoAllow: []` as an explicit override so inherited extras cannot reappear. If the extras may extend a profile or grant Gateway configuration-read access, Doctor leaves the conflicting scope untouched and reports the exact keys and values to review manually. This applies at the root `tools` policy, per-agent and per-provider policies, and channel or gateway tool policies. Sandbox lists remain untouched because `allow` and `alsoAllow` inherit independently; conflicting sandbox lists still require manual repair. Plugin-owned `plugins.entries.*.config` is left to the owning plugin's doctor contract. Gateway startup leaves these conflicts unchanged and directs the operator to Doctor; unresolved conflicts still require operator guidance before the config can validate.
 
-    `doctor --fix` removes `workspace: null` from `agents.entries.<id>` so normal workspace resolution can apply. It also removes invalid `heartbeat.activeHours` windows from agent entries and `agents.defaults`, preserving other heartbeat settings. Reconfigure a valid window if needed; without an explicit or inherited window, heartbeat hours are unrestricted. These repairs also apply after migrating a legacy `agents.list` roster.
+    `doctor --fix` removes `workspace: null` from `agents.entries.<id>` so normal workspace resolution can apply. Invalid `heartbeat.activeHours` windows in agent entries and `agents.defaults` stay unchanged and invalid: Doctor reports the exact field and value instead of falling back to inherited or unrestricted hours. Correct the reported window to valid `HH:MM` values, then rerun `openclaw doctor --fix`. These repairs also apply after migrating a legacy `agents.list` roster.
 
   </Accordion>
   <Accordion title="2. Legacy config key migrations">

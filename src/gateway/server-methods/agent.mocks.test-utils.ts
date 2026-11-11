@@ -19,6 +19,7 @@ import type { stageSessionPendingInput } from "../../config/sessions/session-acc
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createPluginMetadataSnapshotFixture } from "../../plugins/plugin-metadata.test-support.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
+import { createSessionResetFixture } from "./agent.session-reset-mock.test-support.js";
 import {
   createAgentTestUserTurnRecorder,
   getAgentTestStorePath,
@@ -27,6 +28,10 @@ import {
 const mocks = vi.hoisted(() => ({
   loadSessionEntry: vi.fn(),
   updateSessionStore: vi.fn(),
+  resetSessionEntryLifecycle:
+    vi.fn<
+      typeof import("../../config/sessions/session-accessor.lifecycle.js").resetSessionEntryLifecycle
+    >(),
   applySessionEntryReplacements: vi.fn(),
   patchSessionEntryTarget: vi.fn(),
   persistSessionTranscriptTurn: vi.fn(),
@@ -102,21 +107,15 @@ export function resolveAgentTestConfig(
 }
 
 function loadAgentSessionFixture(
-  ...args: Parameters<typeof import("../session-utils.js").loadSessionEntry>
-): ReturnType<typeof import("../session-utils.js").loadSessionEntry> {
-  const loaded = mocks.loadSessionEntry(...args) as ReturnType<
-    typeof import("../session-utils.js").loadSessionEntry
+  ...args: Parameters<typeof import("../session-entry-load.test-support.js").loadSessionEntryAsync>
+): Awaited<
+  ReturnType<typeof import("../session-entry-load.test-support.js").loadSessionEntryAsync>
+> {
+  const loaded = mocks.loadSessionEntry(...args) as Awaited<
+    ReturnType<typeof import("../session-entry-load.test-support.js").loadSessionEntryAsync>
   >;
   return { ...loaded, cfg: resolveAgentTestConfig(loaded.cfg) };
 }
-
-vi.mock("../session-utils.js", async () => {
-  const actual = await vi.importActual<typeof import("../session-utils.js")>("../session-utils.js");
-  return {
-    ...actual,
-    loadSessionEntry: loadAgentSessionFixture,
-  };
-});
 
 vi.mock("../session-utils-store-worker.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../session-utils-store-worker.js")>()),
@@ -178,6 +177,12 @@ vi.mock("../../config/sessions.js", async () => {
 });
 
 // mock-isolation: Handler fixtures supply lifecycle timestamps without opening transcript readers.
+vi.mock("../../config/sessions/session-accessor.lifecycle.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../config/sessions/session-accessor.lifecycle.js")>()),
+  resetSessionEntryLifecycle: mocks.resetSessionEntryLifecycle,
+}));
+
+// mock-isolation: Handler lifecycle timestamps come from fixture mocks without reading real transcripts.
 vi.mock("../../config/sessions/lifecycle-read.js", () => ({
   hasTerminalMainSessionTranscriptNewerThanRegistryAsync: async () => false,
   resolveSessionLifecycleTimestampsAsync: async (
@@ -552,6 +557,9 @@ function selectFreshestTargetFixtureEntry(
 }
 
 export function resetSessionAccessorMocks() {
+  mocks.resetSessionEntryLifecycle
+    .mockReset()
+    .mockImplementation(createSessionResetFixture(mocks.patchSessionEntryTarget));
   // These handler fixtures own an in-memory store. Real admission durability
   // and execution-time promotion are covered by the gateway-server suites.
   mocks.stageSessionPendingInput.mockReset().mockImplementation(async (_scope, options) => {
@@ -681,8 +689,9 @@ export function resetSessionAccessorMocks() {
         replaceEntry?: boolean;
         onCommitted?: (entry: Record<string, unknown>) => void;
       } = {},
-    ) =>
-      await mocks.updateSessionStore(
+    ) => {
+      let committed: Record<string, unknown> | undefined;
+      const result = await mocks.updateSessionStore(
         scope.storePath,
         async (store: SessionStoreFixture) => {
           const existing = selectFreshestTargetFixtureEntry(store, scope.target);
@@ -705,11 +714,16 @@ export function resetSessionAccessorMocks() {
             delete store[key];
           }
           store[scope.target.canonicalKey] = next;
-          options.onCommitted?.(structuredClone(next));
+          committed = next;
           return next;
         },
         options,
-      ),
+      );
+      if (committed) {
+        options.onCommitted?.(committed);
+      }
+      return result;
+    },
   );
 }
 

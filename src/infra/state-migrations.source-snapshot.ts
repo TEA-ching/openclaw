@@ -8,6 +8,7 @@ import {
   moveLegacyMigrationFileNoReplace,
   recoverLegacyMigrationLinkedMove,
 } from "./state-migrations.no-replace-move.js";
+import { decodeUtf8Input } from "./utf8-input.js";
 
 /** The stable source identity every doctor-owned import verifies before cleanup. */
 export type LegacyMigrationSourceSnapshot = {
@@ -274,7 +275,13 @@ export async function readLegacyMigrationSourceSnapshot(params: {
     resolveLegacyMigrationRelativePath(params.stateDir, params.sourcePath, params.label),
     { hardlinks: "reject", maxBytes: params.maxBytes, symlinks: "reject" },
   );
-  const raw = opened.buffer.toString("utf8");
+  // Recovery compares text fingerprints before domain parsing can validate the bytes.
+  const raw = params.hashDecodedText
+    ? decodeUtf8Input(
+        opened.buffer,
+        `Back up legacy ${params.label} source ${params.sourcePath}, replace it with a corrected copy, and retry Doctor; the input`,
+      )
+    : opened.buffer.toString("utf8");
   return {
     buffer: opened.buffer,
     dev: opened.exactIdentity.dev,
@@ -300,9 +307,9 @@ export function readLegacyMigrationSourceSnapshotSync(params: {
     filePath: params.followSymlinks ? fs.realpathSync(params.sourcePath) : params.sourcePath,
     maxBytes: params.maxBytes,
   });
-  const raw = buffer.toString("utf8");
+  const raw = decodeUtf8Input(buffer, `Legacy ${params.label} source`);
   return {
-    buffer: Buffer.from(raw),
+    buffer,
     dev: exactIdentity.dev,
     ino: exactIdentity.ino,
     mtimeMs: stat.mtimeMs,

@@ -1,4 +1,4 @@
-import { isSupportedOpenClawNodeVersion, parseNodeReleaseVersion } from "./node-version.mjs";
+import { isSupportedOpenClawNodeVersion, SUPPORTED_NODE_VERSION_RANGE } from "./node-version.mjs";
 
 // Self-contained so a different runtime can execute exactly the same probe with -e.
 function probeSqlite(DatabaseSync) {
@@ -168,18 +168,11 @@ export function nodeRuntimeFailure(version, probe) {
   if (!probe.version || !isSqliteWalResetSafeVersion(probe.version)) {
     return `${label}: SQLite ${probe.version ?? "unknown"} is not WAL-reset-safe; use SQLite 3.51.3+, 3.50.7+, or 3.44.6+ on its patched release line.`;
   }
-  // Node 22/23 remain excluded until their separate compatibility work is complete.
-  const release = parseNodeReleaseVersion(version);
-  if (!release || release.major < 24) {
-    return `${label}: openclaw requires Node >=24.16.0 <25, or >=26.1.0.`;
+  // Keep incompatible Node release lines excluded even when a vendor binding passes.
+  if (!isSupportedOpenClawNodeVersion(version)) {
+    return `${label}: openclaw requires Node ${SUPPORTED_NODE_VERSION_RANGE.replace(" || ", ", or ")}.`;
   }
   return null;
-}
-
-export function nodeRuntimeNote(version, probe) {
-  return !nodeRuntimeFailure(version, probe) && !isSupportedOpenClawNodeVersion(version)
-    ? `Node ${version}: unsupported version, capability check passed. Supported releases: 24.16+/26.1+.`
-    : null;
 }
 
 export const SQLITE_CAPABILITY_PROBE = `(${probeSqlite.toString()})(require("node:sqlite").DatabaseSync)`;

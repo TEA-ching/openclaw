@@ -172,6 +172,7 @@ const changedPaths = (() => {
 })();
 const docsOnly = parseCiEnvFlag(process.env.OPENCLAW_CI_DOCS_ONLY);
 const docsChanged = parseCiEnvFlag(process.env.OPENCLAW_CI_DOCS_CHANGED);
+const rootProseOnly = parseCiEnvFlag(process.env.OPENCLAW_CI_DOCS_ROOT_PROSE_ONLY);
 const releaseGate = parseCiEnvFlag(process.env.OPENCLAW_CI_RELEASE_GATE) && !ciQualification;
 const compactPullRequest = isCanonicalRepository && eventName === "pull_request";
 const runtimePullRequest = isCanonicalRepository && (compactPullRequest || releaseGate);
@@ -200,6 +201,9 @@ if (
   );
 }
 const npmQualification = releaseScope === "npm-beta" || releaseScope === "npm-stable";
+// Stable tags also ship the macOS app, and its post-tag validation is too late
+// to block the tag, so only beta defers macOS Swift proof.
+const deferMacosSwift = releaseScope === "npm-beta";
 const fullNativeValidation =
   eventName === "workflow_dispatch" && !mainValidation && !releaseGate && releaseScope === "full";
 if (releaseScope !== "full" && !npmQualification) {
@@ -374,6 +378,10 @@ const supportsCurrentMacosSwiftCi =
   existsSync("scripts/install-swift-tools.sh") &&
   existsSync("scripts/lint-swift.sh") &&
   existsSync("scripts/format-swift.sh");
+const runMacosSwift =
+  runMacos &&
+  !deferMacosSwift &&
+  (!frozenTarget || compatibilityTarget || supportsCurrentMacosSwiftCi);
 const supportsIosBuild = hasPackageScript("ios:build");
 const supportsCurrentIosCi = supportsIosBuild && supportsCurrentMacosSwiftCi;
 const iosBuildScope =
@@ -451,12 +459,12 @@ const includeReleaseOnlyUiTests =
     compatibilityTarget ||
     changedPaths === null);
 // Ordinary CI shares eight 16-class browser jobs; full inventories retain
-// twelve. Private source-server projects keep their own one-worker limit.
+// thirteen. Private source-server projects keep their own one-worker limit.
 const compactUiE2e = supportsUiE2eProjects && !includeReleaseOnlyUiTests;
 let uiE2eJobCount = compactUiE2e
   ? 9
   : supportsUiE2eProjects
-    ? 13
+    ? 14
     : usesHostedRunnerProfile
       ? 14
       : 4;
@@ -952,8 +960,20 @@ const runSqliteSessionLifecycle =
   (changedScopeHasSqliteSessionLifecycleImpact ||
     selectedOwnerTest("test/scripts/sqlite-sessions-transcripts-flip-proof.built-cli.e2e.test.ts"));
 const postgresConformancePaths = [
+  "src/state/openclaw-state-db*",
+  "src/state/openclaw-state-feature-schema-ensure.ts",
+  "src/state/user-profiles-schema.ts",
+  "src/snapshot/**",
+  "src/infra/backup-*.ts",
+  "src/infra/update-database-*.ts",
+  "src/cli/update-cli/**",
+  "src/commands/backup*.ts",
+  "src/state/openclaw-state-snapshot-sanitizer.ts",
   "scripts/generate-postgres-schema.mts",
   "scripts/lib/postgres-schema-catalog.mts",
+  "scripts/lib/postgres-schema-triggers.mts",
+  "scripts/lib/postgres-agent-conformance.mts",
+  "src/state/openclaw-agent-schema.sql",
   "test/scripts/generate-postgres-schema.test.ts",
   "src/state/*schema*",
   "src/state/openclaw-state-db-contract.ts",
@@ -973,9 +993,12 @@ const runPostgresConformance =
   existsSync("scripts/test-database-conformance.mjs") &&
   (eventName === "schedule" ||
     ((eventName === "pull_request" || releaseGate) &&
+      !docsOnly &&
       (changedPaths === null ||
-        changedPaths.some((file) =>
-          postgresConformancePaths.some((pattern) => matchesGlob(file, pattern)),
+        changedPaths.some(
+          (file) =>
+            !changedNodeTestPlan.isCiDocumentationPath?.(file) &&
+            postgresConformancePaths.some((pattern) => matchesGlob(file, pattern)),
         ))));
 const runBuildArtifacts =
   publishedDriverUpdate ||
@@ -998,6 +1021,12 @@ const runQaSmokeCi =
   runNodeFull &&
   changedScopeHasQaImpact &&
   (!frozenTarget || existsSync("extensions/qa-lab/src/ci-smoke-plan.ts"));
+const nodeWorkerE2eShards =
+  runNodeFull &&
+  !runtimePullRequest &&
+  typeof changedNodeTestPlan.createNodeWorkerE2eTestShards === "function"
+    ? changedNodeTestPlan.createNodeWorkerE2eTestShards()
+    : [];
 const rawNodeTestShards = runNodeFull
   ? changedNodeTestShards
     ? changedNodeTestShards
@@ -1014,9 +1043,11 @@ const rawNodeTestShards = runNodeFull
           // the complete compact inventory within its 77-row main-tier cap.
           compact: compactPlanMode !== undefined,
           compactMode: mainValidation ? "pull-request" : compactPlanMode,
-          compactNodeJobCap: nodeMatrixLimit,
+          mainValidation,
+          compactNodeJobCap: nodeMatrixLimit - nodeWorkerE2eShards.length,
           runnerBackend: nodeRunnerBackend,
         }),
+        ...nodeWorkerE2eShards,
       ]
   : [];
 if (
@@ -1123,15 +1154,31 @@ const testRuntimePolicyPath = "./scripts/lib/ci-test-runtime.mts";
 const testRuntimePolicy = existsSync(testRuntimePolicyPath)
   ? await importTargetPlan(testRuntimePolicyPath)
   : null;
+const trialRuntimePolicy =
+  workflowEventName === "workflow_dispatch"
+    ? process.env.OPENCLAW_CI_TEST_RUNTIME_POLICY?.trim()
+    : "";
+if (trialRuntimePolicy && !["bun-all", "dual-all"].includes(trialRuntimePolicy)) {
+  throw new Error("test_runtime_policy must be empty, bun-all, or dual-all");
+}
+if (trialRuntimePolicy && !testRuntimePolicy?.resolveCiTestRuntimePolicy) {
+  throw new Error("The selected checkout does not support test_runtime_policy trials");
+}
+if (trialRuntimePolicy) {
+  testRuntimePolicy.resolveCiTestRuntimePolicy({
+    OPENCLAW_CI_TEST_RUNTIME_POLICY: trialRuntimePolicy,
+  });
+}
 const testRuntimeMode = testRuntimePolicy
-  ? eventName === "pull_request" || releaseGate
-    ? "bun-compatible"
-    : eventName === "workflow_dispatch" && !mainValidation
-      ? "dual"
-      : "node"
+  ? trialRuntimePolicy ||
+    (eventName === "pull_request" || releaseGate
+      ? "bun-compatible"
+      : eventName === "workflow_dispatch" && !mainValidation
+        ? "dual"
+        : "node")
   : "node";
 const uiTestRuntimePolicy =
-  !compatibilityTarget &&
+  (!compatibilityTarget || Boolean(trialRuntimePolicy)) &&
   testRuntimePolicy?.ciTestShardRequiresBun(
     {
       configs: ["ui/vitest.config.ts"],
@@ -1192,7 +1239,7 @@ const nodeTestShards = targetNodeTestShards
       groups?.length && nodeTestGroupsCodec ? encodeNodeTestGroups(groups) : undefined;
     const row = {
       check_name: shard.checkName,
-      test_runtime_policy: testRuntimeMode,
+      test_runtime_policy: trialRuntimePolicy && shard.requiresDist ? "node" : testRuntimeMode,
       requires_bun:
         !shard.requiresDist &&
         Boolean(testRuntimePolicy?.ciTestShardRequiresBun(shard, testRuntimeMode)),
@@ -1229,7 +1276,10 @@ const nodeTestShards = targetNodeTestShards
           "src/agents/sessions/tools/grep.byte-path.test.ts",
           "src/agents/filesystem-tools-output-contract.test.ts",
           "test/scripts/check-database-worker-ratchet.test.ts",
+          "test/scripts/pr-baseline-publication.test.ts",
+          "test/scripts/pr-baseline-signing.test.ts",
           "test/scripts/pr-baseline-successor.test.ts",
+          "test/scripts/pr-correction-continuation.test.ts",
         ],
         (plan) =>
           ["agentic-agents-support", "agentic-agents-core-runtime"].includes(
@@ -1246,6 +1296,11 @@ const nodeTestShards = targetNodeTestShards
       ),
     };
     if (compactReleaseMatrixRows || (packedGroups && !frozenTarget)) {
+      // Full manual matrices repeat this default for every row; the workflow
+      // already resolves an absent runtime policy to Node. Keep explicit trials.
+      if (compactReleaseMatrixRows && row.test_runtime_policy === "node") {
+        delete row.test_runtime_policy;
+      }
       // The workflow treats absent feature flags as false and history as [].
       // Encoded groups own their names; the outer name is only a legacy fallback.
       for (const key of [
@@ -1542,6 +1597,7 @@ const manifest = {
   shared_sdk_declarations: sharedSdkDeclarations,
   check_additional_matrix: createMatrix(runNodeFull && !releaseFastLane ? additionalChecks : []),
   run_check_docs: docsChanged && eventName !== "push",
+  run_docs_content: !(ordinaryPullRequest && docsOnly && rootProseOnly),
   run_format_check: runFormatCheck,
   run_control_ui_i18n: runControlUiI18n,
   run_ui_tests: runUiTests,
@@ -1601,11 +1657,8 @@ const manifest = {
           [{ check_name: "macos-node", runtime: "node", task: "test" }]
       : [],
   ),
-  run_macos_swift:
-    runMacos &&
-    !npmQualification &&
-    (!frozenTarget || compatibilityTarget || supportsCurrentMacosSwiftCi),
-  run_openclawkit_tests: runMacos && !npmQualification && supportsOpenClawKitTests,
+  run_macos_swift: runMacosSwift,
+  run_openclawkit_tests: runMacos && !deferMacosSwift && supportsOpenClawKitTests,
   run_ios_build: runIosBuild,
   run_ios_voice_cleanup_tests: iosSimulatorSelection.voice.selected,
   run_ios_lifecycle_tests: iosSimulatorSelection.lifecycle.selected,
@@ -1753,7 +1806,6 @@ if (hybridHostedEligible) {
   }).reduce((total, rows) => total + rows, 0);
   hybridHostedOffloadRows =
     1 +
-    count(manifest.run_ui_tests, 3) +
     count(
       manifest.run_ui_e2e && !compatibilityTarget,
       manifest.ui_e2e_matrix.include.filter((row) => row.task === "browser-extension").length,
@@ -1943,9 +1995,11 @@ if (process.env.GITHUB_STEP_SUMMARY) {
   appendFileSync(
     process.env.GITHUB_STEP_SUMMARY,
     `### CI release qualification\n\n- Scope: \`${releaseScope}\`\n- Target: \`${checkoutRevision}\`\n` +
-      (npmQualification
+      (deferMacosSwift
         ? "- Native app qualification: deferred; Linux, macOS, and Windows Node coverage retained.\n"
-        : ""),
+        : npmQualification
+          ? "- Native app qualification: deferred except macOS Swift; Linux, macOS, and Windows Node coverage retained.\n"
+          : ""),
   );
 }
 

@@ -184,8 +184,12 @@ incompatible settings, or a changed model, route, session, or auth profile start
 a fresh request using the selected effort. Older transcripts without this
 metadata also start fresh after transport expiry.
 
-The native [Codex harness](/plugins/codex-harness) owns its own Responses loop;
-these built-in-runtime capabilities do not imply native Codex support.
+The native [Codex harness](/plugins/codex-harness) owns its own Responses loop.
+OpenClaw enables its cache-preserving reasoning-effort updates for managed
+threads, including when native code mode is disabled. Codex uses its model
+catalog to decide eligibility and keeps unsupported models on ordinary
+request-level effort. This does not enable the built-in-runtime async-tool or
+steering implementation inside Codex.
 
 ## GPT-6.1 Sol
 
@@ -271,8 +275,8 @@ and [access guide](https://help.openai.com/en/articles/20001325-a-preview-of-gpt
 OpenAI's [GPT-5.6 Sol model page](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
 documents the bare `openai/gpt-5.6` id as a supported alias for Sol. Fresh
 API-key and ChatGPT/Codex OAuth setup use `openai/gpt-6-astra`. Existing
-GPT-5.6 selections retain their canonical Sol identity. Run
-`openclaw doctor --fix` to rewrite persisted bare OpenAI refs to that canonical
+GPT-5.6 selections retain their full Sol identity. Run
+`openclaw doctor --fix` to rewrite persisted bare OpenAI refs to that full
 identity. The native Codex catalog can show the exact Sol, Terra, and Luna ids depending on
 workspace access. Check the current account with:
 

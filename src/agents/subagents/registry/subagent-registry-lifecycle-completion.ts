@@ -222,7 +222,6 @@ export async function completeSubagentRunAttempt(
     };
     assertCurrent();
     let settled: ReturnType<typeof planTerminalCompletion>;
-    let terminalGeneration = 0;
     let publishesTerminalSignal = false;
     try {
       const commit = () =>
@@ -305,11 +304,7 @@ export async function completeSubagentRunAttempt(
         );
       settled = collectorSession ? await collectorSession.withPublication(commit) : await commit();
       if (settled) {
-        const bindingChanged =
-          completeParams.sessionEffects !== undefined &&
-          context.getSessionEffects(settled.entry) !== completeParams.sessionEffects;
         context.bindTerminalSessionEffects(settled.entry, completeParams.sessionEffects);
-        terminalGeneration = context.bumpTerminalGeneration(settled.entry, bindingChanged);
         if (settled.replacedProvisionalKill) {
           context.bumpCleanupGeneration(settled.entry);
         }
@@ -328,7 +323,6 @@ export async function completeSubagentRunAttempt(
     await completeTerminalEffects(context, {
       completeParams,
       ...settled,
-      terminalGeneration,
       stateContext,
       assertCurrent,
       loadCleanupBrowserSessionsForLifecycleEnd:
@@ -440,10 +434,12 @@ function planTerminalCompletion(
     if (
       !entry.collect &&
       entry.expectsCompletionMessage === false &&
-      entry.completionRequesterSessionId &&
-      entry.completionRequesterLifecycleRevision
+      entry.completionRequesterSessionId
     ) {
       // The original requester owns this notice even when the child was replaced.
+      // Sessions created without a lifecycle revision (for example by the `agent`
+      // RPC) bind by session id plus the absent revision; a later reset assigns one,
+      // so the requester identity check still rejects replacements.
       entry.completionTarget = "parent";
       entry.requesterTurnRunId = undefined;
     }
@@ -459,12 +455,9 @@ function planTerminalCompletion(
         entry.killReconciliation === undefined &&
         entry.pauseReason === undefined &&
         typeof entry.execution.endedAt === "number" &&
-        Number.isFinite(entry.execution.endedAt) &&
-        typeof entry.cleanupCompletedAt === "number" &&
-        Number.isFinite(entry.cleanupCompletedAt) &&
-        entry.cleanupCompletedAt >= entry.execution.endedAt))
+        Number.isFinite(entry.execution.endedAt)))
   ) {
-    // A delayed abort must not replace a finalized result or reopen a cleaned cancellation.
+    // A delayed abort must not replace a finalized result or reopen a confirmed cancellation.
     return undefined;
   }
   if (shouldPreservePublishedExplicitRunTimeout(entry)) {

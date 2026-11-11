@@ -28,6 +28,25 @@ API calls, not exported OpenClaw functions.
   details in core.
 </Tip>
 
+Auth methods can return `agentRuntimeId` with `defaultModel` when sign-in belongs
+to a native harness. Model Setup applies that runtime to the selected agent's
+model entry, not to global model defaults.
+
+## Keep provider transports within their scope
+
+`normalizeTransport` may receive another provider's transport. Return nothing
+unless the context names your provider or already targets its endpoint. Core
+ignores another plugin's change that moves the transport to a different origin;
+same-origin path and API cleanup remain supported. The provider's own hook and
+an explicit `models.providers` entry retain control of the destination.
+
+`augmentModelCatalog` and `resolveExternalAuthProfiles` run as global discovery.
+Return only catalog rows and auth profiles for providers your plugin owns.
+
+When verifying a provider, enable the bundled plugins users run alongside it,
+save credentials through the normal provider setup flow, and confirm the
+request targets the intended provider endpoint.
+
 ## Import an existing credential during sign-in
 
 An auth method can declare `credentialImport` with a `migrationProviderId`,
@@ -334,7 +353,7 @@ a saved policy is not proof that the running Gateway applied it.
     from `openclaw/plugin-sdk/agent-runtime`. It reads persisted profiles in a
     database worker and preserves the optional third `env` argument for
     service-owned state directories. The synchronous `loadAuthProfileStoreForRuntime`
-    is deprecated and will be removed at the next Plugin SDK major.
+    is deprecated through 2026-12-31 and will be removed in the first January 2027 stable release.
 
     `createProviderApiKeyAuthMethod` accepts an optional `validateApiKey` callback.
     Return an error message to reject a resolved key before any auth profile is
@@ -549,6 +568,10 @@ This keeps shared request shaping and output normalization active, including
 MiMo reasoning replay and final-answer handling. Without the flag, a replacement
 stream keeps the existing behavior of taking ownership of those compatibility
 policies. Returning the original stream or no wrapper also preserves them.
+
+`applyOpenAICompletionsToolReasoning` shares the native tools/reasoning wire
+policy with pass-through adapters through that private seam. Callers qualify
+the endpoint and normalize vendor-prefixed model IDs before applying it.
 
 ## Next steps
 

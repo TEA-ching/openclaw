@@ -2,7 +2,6 @@ import {
   embeddedAgentLog,
   type AgentHarnessRuntimeArtifactBinding,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
-import { createNativeSessionBindingAuthority } from "openclaw/plugin-sdk/agent-harness-session-runtime";
 import { captureSessionEntryCurrentCheckAsync } from "openclaw/plugin-sdk/session-binding-runtime";
 import { isIncognitoSessionKey } from "openclaw/plugin-sdk/session-key-runtime";
 import {
@@ -39,6 +38,7 @@ import {
   reportCodexBackgroundCleanupFailure,
   runCodexCleanupStep,
 } from "./run-attempt-lifecycle.js";
+import { resolveCodexNativeModelAdmission } from "./run-attempt-native-model-admission.js";
 import type { CodexAttemptPrompt } from "./run-attempt-prompt.js";
 import {
   releaseCodexSandboxExecServerEnvironment,
@@ -52,7 +52,6 @@ import {
 } from "./shared-client.js";
 import type {
   CodexAppServerThreadLifecycleBinding,
-  CodexStartOrResumeThreadParams,
   CodexThreadFinalConfigPatchDecision,
 } from "./thread-lifecycle-types.js";
 import {
@@ -62,6 +61,14 @@ import {
 import { isCodexNativeDelegationDisabledForRun } from "./thread-requests.js";
 import { createCodexTrajectoryRecorder } from "./trajectory.js";
 import type { CodexAppServerTurnRouter, CodexThreadRouteReservation } from "./turn-router.js";
+
+const CODEX_ONE_SHOT_CLIENT_CLOSE_OPTIONS = {
+  exitTimeoutMs: 6_000,
+  // A clean Codex shutdown can spend several seconds flushing its state database
+  // after stdin closes under release-path load. Preserve a bounded grace period
+  // so that work is not converted into a forced, uncertain cleanup receipt.
+  forceKillDelayMs: 5_000,
+} as const;
 
 export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
   const { context } = prompt;
@@ -78,31 +85,24 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     options,
     nativeHookRelayEvents,
   } = connection;
-  const modelAdmissionSource = runtime.nativeToolSurfaceEnabled
-    ? params.hostCapabilities.retainSourceAuthority?.()
-    : undefined;
-  let nativeModelAdmission: CodexStartOrResumeThreadParams["nativeModelAdmission"];
-  try {
-    nativeModelAdmission = modelAdmissionSource
-      ? modelAdmissionSource.modelPolicyRequired !== false
-        ? "required"
-        : options.nativeHookRelay?.enabled === false
-          ? "disabled"
-          : "optional"
-      : undefined;
-  } finally {
-    modelAdmissionSource?.release();
-  }
+  const nativeModelAdmission = resolveCodexNativeModelAdmission(
+    runtime.nativeToolSurfaceEnabled,
+    params.hostCapabilities,
+    options.nativeHookRelay?.enabled,
+  );
   let nativeProcessAuthorityReleased = false;
   // Cancellation still owes cleanup. Keep host/lineage authority until this
   // resource owner closes, without inheriting the foreground abort signal.
-  const cleanupAuthority = createNativeSessionBindingAuthority(connection.authority.lineage, () => {
+  const cleanupAuthority = connection.authority.withLiveness(() => {
     params.hostCapabilities.assertActive();
     if (nativeProcessAuthorityReleased) {
       throw new Error("Codex attempt cleanup authority has ended");
     }
   });
+  // Temporary threads own no durable binding. Their subscription can be released
+  // without clearing the conversation's predecessor.
   const clearThreadBinding = () =>
+    state.thread.lifecycle.preserveExistingBinding ||
     clearCodexBindingForClient(
       connection.bindingStore,
       connection.bindingIdentity,
@@ -192,9 +192,9 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     // Retained peers prevent retirement; preserve their client without treating
     // missing close evidence as a completed one-shot cleanup.
     const result = retired.closed
-      ? await state.client.closeAndWait({ exitTimeoutMs: 2_000, forceKillDelayMs: 250 })
+      ? await state.client.closeAndWait(CODEX_ONE_SHOT_CLIENT_CLOSE_OPTIONS)
       : undefined;
-    if (params.oneShotCliRun && result?.cleanup !== "closed") {
+    if (params.oneShotCliRun && (!result || result.cleanup === "uncertain")) {
       throw new Error("Codex one-shot client cleanup could not be confirmed");
     }
   };
@@ -212,11 +212,8 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
       const ownedClient = state.releaseSharedClientLease ? state.client : undefined;
       releaseSharedClientLeaseOnce();
       if (ownedClient) {
-        const result = await ownedClient.closeAndWait({
-          exitTimeoutMs: 2_000,
-          forceKillDelayMs: 250,
-        });
-        if (params.oneShotCliRun && result.cleanup !== "closed") {
+        const result = await ownedClient.closeAndWait(CODEX_ONE_SHOT_CLIENT_CLOSE_OPTIONS);
+        if (params.oneShotCliRun && result.cleanup === "uncertain") {
           throw new Error("Codex isolated client cleanup could not be confirmed");
         }
       }
@@ -332,6 +329,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
           requesterSessionKey: params.sessionKey,
           requesterTurnRunId: params.runId,
           requestCustody,
+          nativeProcessAuthority,
           completionScope: params.agentHarnessCompletionScope,
           historyOwner,
           submissionStore,

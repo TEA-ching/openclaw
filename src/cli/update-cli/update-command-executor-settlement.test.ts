@@ -65,10 +65,12 @@ type SettlementStore = Pick<
   | "release"
   | "releaseAll"
   | "bindUpdateChildren"
+  | "processIdentity"
   | "cancelUpdate"
   | "current"
   | "owns"
   | "isProcessIdentityCurrent"
+  | "inspectProcessIdentity"
   | "acceptParentBoundExecutor"
 >;
 const rows = new Map<string, ManagedHandoffLease>();
@@ -129,6 +131,7 @@ beforeEach(() => {
     release: (candidate: ManagedHandoffLease) => current(candidate) && rows.delete(candidate.key),
     releaseAll,
     bindUpdateChildren: (children) => (children.every(current) ? children : null),
+    processIdentity: (pid) => ({ pid: pid ?? process.pid, startIdentity: "synthetic" }),
     cancelUpdate: (original, retained) =>
       current(original) && (!retained || current(retained))
         ? {
@@ -142,6 +145,7 @@ beforeEach(() => {
     current,
     owns: current,
     isProcessIdentityCurrent: () => true,
+    inspectProcessIdentity: () => "live",
     acceptParentBoundExecutor: current,
   };
   boundaries.store.mockResolvedValue(store);
@@ -234,7 +238,7 @@ it.each([
 ] as const)(
   "cancels the admitted $kind child at its activation deadline and joins $cleanupResult cleanup",
   async ({ kind, cleanupResult }) => {
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     const admitted = createDeferredCore();
     const cancelled = createDeferredCore();
     const cleanup = createDeferredCore<"forced" | "uncertain">();
@@ -311,7 +315,7 @@ afterEach(() => {
 it.each(["direct", "delegated"] as const)(
   "delivers a bounded %s timeout while its callback remains pending",
   async (kind) => {
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     const admitted = createDeferredCore();
     const finish = createDeferredCore();
     let signal: AbortSignal | undefined;
@@ -463,12 +467,12 @@ it.each(["forced", "uncertain"] as const)(
         admitted.resolve();
         return { status: "probe-failed", error: new Error("configured runtime probe timed out") };
       })
-      .mockResolvedValueOnce({ status: "supported", version: "24.16.0" });
+      .mockResolvedValueOnce({ status: "supported", version: "24.22.1" });
     const work = withUpdateCommandExecutor("run", async (executor) => {
       const fence = await executor.enter(root, { preflight: true });
       const runtime = await resolvePackageRuntimePreflight({
         root,
-        target: { version: "2026.9.17", nodeEngine: ">=24.16.0" },
+        target: { version: "2026.9.17", nodeEngine: ">=24.22.1" },
         fallbackNodeRunner,
         alreadyCurrent: true,
         shouldRestart: true,
@@ -509,7 +513,7 @@ it.each(["forced", "uncertain"] as const)(
 );
 
 it("preserves activation timeout provenance without a cause cycle after uncertain cleanup", async () => {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
   const deadline = createUpdateOperationDeadline();
   const admitted = createDeferredCore();
   const cancelled = createDeferredCore();

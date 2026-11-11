@@ -36,6 +36,8 @@ final class DashboardManager {
     @ObservationIgnored let connectionProvider: @Sendable (DashboardGatewayTarget) async -> GatewayConnection
     @ObservationIgnored let browserIdentityURLProvider:
         @Sendable (DashboardGatewayTarget, GatewayConnection.Config) async throws -> URL?
+    @ObservationIgnored let controlUiBasePathProvider:
+        @Sendable (DashboardGatewayTarget, GatewayConnection.Config) async throws -> String?
     @ObservationIgnored let legacyCredentialsProvider:
         @Sendable (DashboardGatewayTarget, GatewayConnection.EndpointSnapshot) async throws
         -> DashboardNativeGatewayAuth.LegacyCredentials
@@ -73,6 +75,8 @@ final class DashboardManager {
         },
         browserIdentityURLProvider: (@Sendable (DashboardGatewayTarget, GatewayConnection.Config) async throws
             -> URL?)? = nil,
+        controlUiBasePathProvider: (@Sendable (DashboardGatewayTarget, GatewayConnection.Config) async throws
+            -> String?)? = nil,
         legacyCredentialsProvider: (@Sendable (DashboardGatewayTarget, GatewayConnection.EndpointSnapshot) async throws
             -> DashboardNativeGatewayAuth.LegacyCredentials)? = nil,
         routeProbe: @escaping @Sendable (DashboardRouteProbePurpose) async -> Void = { purpose in
@@ -104,6 +108,10 @@ final class DashboardManager {
         self.browserIdentityURLProvider = browserIdentityURLProvider ?? { target, config in
             let connection = await connectionProvider(target)
             return try await connection.controlUiBrowserIdentityURL(config: config)
+        }
+        self.controlUiBasePathProvider = controlUiBasePathProvider ?? { target, config in
+            let connection = await connectionProvider(target)
+            return try await connection.controlUiBasePath(config: config)
         }
         self.legacyCredentialsProvider = legacyCredentialsProvider ?? { target, endpoint in
             let connection = await connectionProvider(target)
@@ -352,10 +360,12 @@ final class DashboardManager {
                 controller.documentHost.nativeGatewayAuthProvider = configuration.nativeAuthProvider
                 controller.documentHost.legacyNativeCredentials = configuration.legacyNativeCredentials
                 let updateBridgeEnabled = controller === self.controller && Self.updateBridgeEnabled(mode: mode)
-                if configuration.url == controller.currentURL {
-                    controller.setUpdateBridgeEnabled(updateBridgeEnabled)
-                } else if auth.hasCredential || auth.hasAcceptedNativeBinding || auth.usesBrowserIdentity {
+                // Reconcile failed documents even when the route is unchanged;
+                // update preserves live content and loads already in flight.
+                if auth.hasCredential || auth.hasAcceptedNativeBinding || auth.usesBrowserIdentity {
                     controller.update(url: configuration.url, auth: auth, updateBridgeEnabled: updateBridgeEnabled)
+                } else if configuration.url == controller.currentURL {
+                    controller.setUpdateBridgeEnabled(updateBridgeEnabled)
                 }
                 self.displayedPrimaryRoutes[key] = (routeRevision, previousRoute?.authority)
             }

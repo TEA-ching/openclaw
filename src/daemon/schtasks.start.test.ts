@@ -70,12 +70,14 @@ vi.mock("node:child_process", async (original) => ({
 }));
 // mock-isolation: Native enable and Run mutations update only the selected task fixture.
 vi.mock("./schtasks-exec.js", () => ({
+  execScheduledTaskEnabledChange: async (taskName: string, enabled: boolean) => {
+    native.calls.push(["/Change", "/TN", taskName, enabled ? "/ENABLE" : "/DISABLE"]);
+    native.enabled = enabled;
+    await native.afterEnable?.();
+    return { code: 0, stdout: "", stderr: "" };
+  },
   execSchtasks: vi.fn(async (args: string[]) => {
     native.calls.push(args);
-    if (args[0] === "/Change" && args.includes("/ENABLE")) {
-      native.enabled = true;
-      await native.afterEnable?.();
-    }
     if (args[0] === "/Run") {
       if (!native.enabled) {
         return { code: 1, stdout: "", stderr: "The scheduled task is disabled." };
@@ -191,6 +193,27 @@ it.each(["owned", "foreign", "missing launcher"] as const)(
     }
   },
 );
+
+it("rechecks start authority after awaited task enable before native Run", async () => {
+  const { env } = await fixture();
+  let retired = false;
+  native.afterEnable = async () => {
+    await Promise.resolve();
+    retired = true;
+  };
+  await expect(
+    startScheduledTask({
+      env,
+      stdout: new PassThrough(),
+      beforeEffect: () => {
+        if (retired) {
+          throw new Error("stop intent retired");
+        }
+      },
+    }),
+  ).rejects.toThrow("stop intent retired");
+  expect(native.calls.some((args) => args[0] === "/Run")).toBe(false);
+});
 
 it("explicitly starts a disabled registered node without replacing its launcher", async () => {
   const { env, file } = await fixture("node");

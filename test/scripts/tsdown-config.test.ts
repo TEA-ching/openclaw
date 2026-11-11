@@ -23,7 +23,10 @@ import {
 } from "../../scripts/lib/tsdown-config-groups.mts";
 import { WORKER_DEPLOY_OPTIONAL_NATIVE_MODULE_ID } from "../../scripts/lib/worker-deploy-build-plugin.mts";
 import { importFreshModule } from "../../src/plugin-sdk/test-helpers/import-fresh.js";
-import { WORKER_BUNDLE_CHUNK_PATH_PATTERN } from "../../src/shared/worker-bundle-hash.js";
+import {
+  WORKER_BUNDLE_CHUNK_PATH_PATTERN,
+  WORKER_BUNDLE_WINDOWS_SECURITY_HELPER_PATH,
+} from "../../src/shared/worker-bundle-hash.js";
 import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import buildConfigs from "../../tsdown.config.ts";
 import { copyFsSafePackageFixture } from "./fs-safe-package.test-support.js";
@@ -87,7 +90,12 @@ const workerBuildTargets = [
   ],
 ] as const;
 const isWorkerBuildConfig = (config: TsdownConfig) =>
-  workerBuildTargets.some(([, entry, source]) => hasWorkerEntry(config, entry, source));
+  workerBuildTargets.some(([, entry, source]) => hasWorkerEntry(config, entry, source)) ||
+  (typeof config.entry === "object" &&
+    config.entry !== null &&
+    !Array.isArray(config.entry) &&
+    Object.keys(config.entry).length > 0 &&
+    Object.keys(config.entry).every((name) => name.startsWith("worker/")));
 
 function findWorkerBuildConfig(target: string) {
   const selected = workerBuildTargets.find(([name]) => name === target);
@@ -654,6 +662,7 @@ describe("tsdown config", () => {
           files.every(
             (file) =>
               file === `${entry}.mjs` ||
+              file === `worker/${WORKER_BUNDLE_WINDOWS_SECURITY_HELPER_PATH}` ||
               (file.startsWith("worker/") && WORKER_BUNDLE_CHUNK_PATH_PATTERN.test(file.slice(7))),
           ),
         ).toBe(true);
@@ -683,12 +692,22 @@ describe("tsdown config", () => {
               "--eval",
               `
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { createRequire, isBuiltin, registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
 const entry = pathToFileURL(process.argv[1]);
+const installedRoot = pathToFileURL(process.cwd() + "/").href;
+// Workspace-local TMPDIR must not let the relocated package borrow ancestor dependencies.
+registerHooks({ resolve(specifier, context, nextResolve) {
+  const resolved = nextResolve(specifier, context);
+  if (!isBuiltin(resolved.url) && !resolved.url.startsWith(installedRoot)) {
+    throw Object.assign(new Error("Outside relocated package: " + specifier), { code: "MODULE_NOT_FOUND" });
+  }
+  return resolved;
+} });
 assert.throws(() => createRequire(entry).resolve("tree-sitter-bash"), { code: "MODULE_NOT_FOUND" });
-const { parseBashForCommandExplanation } = await import(entry.href);
-const tree = await parseBashForCommandExplanation('printf "%s" "$(whoami)" | cat');
+const { getBashParserForCommandExplanation } = await import(entry.href);
+const parse = await getBashParserForCommandExplanation();
+const tree = parse('printf "%s" "$(whoami)" | cat');
 try {
   assert.equal(tree.rootNode.hasError, false);
   assert.deepEqual(tree.rootNode.descendantsOfType("command").map(node => node.childForFieldName("name").text), ["printf", "whoami", "cat"]);

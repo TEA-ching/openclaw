@@ -145,11 +145,25 @@ or is restored from browser history. If an update finished while the tab was sus
 can recover without receiving the original update notification or opening a new tab.
 
 Automatic build-recovery reloads spread their first page check over up to two seconds
-and reload only once per target build. Reloads wait for the page to be reachable
+and reload at most once per target build every 30 seconds. Reloads wait for the page to be reachable
 and respect unsaved-work protection.
 The current route and stored drafts survive the reload. If browser storage is unavailable
 or reload protection blocks recovery, reload the tab after saving your work;
 do not clear site data while drafts or queued messages still need recovery.
+
+If a view or stylesheet download fails during a network interruption, the open
+page keeps checking reachability with a backoff capped at 15 seconds. Coming
+back online or returning to the tab wakes that check early. Once the document
+is reachable, the UI reloads to recover failed browser module downloads; it
+does not retry those imports inside the same document. Unsaved-work protection
+still applies, and the manual **Reload** action remains available.
+
+During startup, slow app downloads keep the **Control UI is still loading**
+notice without interrupting the download. After the document finishes loading,
+the app gets another 12 seconds to render before recovery starts. If the
+Gateway is unreachable, startup recovery keeps probing with a backoff capped
+at 15 seconds. It allows up to three automatic recovery navigations; if fresh
+pages still cannot start, use **Try again** or the troubleshooting guide.
 
 Unsaved file edits block automatic and in-app reloads, even after you close their
 previews or switch conversations. Reopen each edited file and save or discard its
@@ -192,9 +206,22 @@ embedded dashboard. Connection status does not replace the Gateway name in the a
 The client retries ordinary connection loss automatically with randomized backoff: the first
 retry waits 800–960 ms, and sustained failures spread retries across 12.5–15 seconds.
 Server retry hints remain minimum waits and can extend beyond that normal cap, with up to
-20% additional spread. The connection watchdog allows two advertised heartbeat
-intervals of silence before reconnecting. An individual request timeout does not
-reset a socket that is still receiving traffic. Reconnecting does not replay
+20% additional spread. The Gateway's WebSocket ping/pong keepalive detects dead
+peers on the server, but browsers cannot observe those frames or receive a close
+over a silently dead link. A connected, visible tab checks inbound silence every
+five seconds. After two advertised heartbeat intervals (60 seconds by default),
+or 15 seconds after the first request sent since the last inbound frame, it sends
+one read-only `health` request without active integration probing. Sent requests
+still count after they time out; any inbound event or response resets that clock.
+It reconnects only if no event or response
+arrives during the next 10 seconds. A locally closed socket is retired immediately;
+recovery does not wait for an unreachable peer to finish the WebSocket closing handshake.
+Any inbound traffic proves the link is alive;
+a responsive but busy Gateway is not reconnected just because application ticks
+are delayed. Hidden tabs do not probe; returning to a suspended tab uses the
+existing wake recovery after two advertised heartbeat intervals of silence.
+An individual request timeout does not reset a socket that is receiving traffic.
+Reconnecting does not replay
 arbitrary requests; read owners retry their reads, and write owners reconcile
 uncertain outcomes. Gateway startup hints keep their separate bounded timing
 (100–2000 ms), with up to 20% additional spread across reconnecting tabs.
@@ -279,7 +306,8 @@ actions to open Main or browse sessions. A connection failure or a conversation
 missing from the current sidebar page does not count as deletion.
 
 Opening a view for the first time can fail if its interface files cannot be downloaded.
-Check the connection, then use **Reload**. The same error can occur after an update;
+The UI waits for reachability and reloads automatically, subject to reload protection
+and the 30-second loop guard. You can also use **Reload**. The same error can occur after an update;
 it does not by itself mean a new version was installed. If unsaved work blocks the
 reload, follow the displayed save or cancel guidance, then try again.
 
@@ -365,9 +393,11 @@ while the connection is available, without sending the message again. Timed-out
 receipt reads retry with backoff; they do not release later queued messages ahead
 of the uncertain input or overwrite a newer draft.
 
-If the connection drops before a send is acknowledged, reconnect checks the transcript and
-the session's active or last run ID for delivery proof. A matching run confirms receipt even
-before its transcript row appears. Without proof, an attempted message stays in the conversation
+If the connection drops before a send is acknowledged, reconnect checks delivery proof.
+Ordinary chat sends require an exact input receipt or a user transcript row whose
+idempotency key is the submission's `runId` or `runId:user`. A matching active or
+last run ID alone confirms only commands, not ordinary chat sends.
+Without proof, an attempted message stays in the conversation
 with an amber **Delivery unconfirmed** footer, **Retry**, and **Discard**. Check the conversation and retry only
 if the message did not arrive. Discard removes the pending copy from this browser's outbox; it does not
 undo or cancel work the Gateway already accepted. Later queued messages stay paused until the earlier

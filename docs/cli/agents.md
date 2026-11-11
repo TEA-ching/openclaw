@@ -10,6 +10,10 @@ title: "Agents"
 
 Manage isolated agents (workspaces + auth + routing). Running `openclaw agents` with no subcommand is equivalent to `openclaw agents list`.
 
+Creation summaries strip terminal escape sequences and show embedded newlines,
+tabs, and carriage returns as `\n`, `\t`, and `\r`. Workspace paths and other
+values in saved configuration and `--json` output retain their original contents.
+
 ## Examples
 
 ```bash
@@ -176,6 +180,7 @@ Options: `--force`, `--json`.
 - Workspace, agent state, and session transcript directories move to Trash, not hard-deleted. If Trash is unavailable, the agent is removed from config but cleanup remains pending. After config publication succeeds, Gateway deletion returns `UNAVAILABLE` with the path failures in its error message and the existing `removed` and `failed` details attached to the error response. Offline deletion reports those path outcomes through `--json`.
 - Gateway deletion durably closes new sessions, turns, and automations, then aborts and waits for active turns and background memory/session work to settle before retiring storage. In a shared session store, deletion cancels only the deleted agent's work; surviving agents remain admitted. Already accepted storage work settles before retirement. Late session writes are refused as soon as draining starts without interrupting cleanup. The Gateway resumes interrupted deletions after restart, including journals from older versions.
 - While deletion cleanup is pending, new session writes remain refused even if draining or restart recovery fails. Resolve the reported failure and retry deletion. Workspace, agent-directory, and session-store relocation is also refused until cleanup finishes; updates that leave the storage targets unchanged remain available.
+- Gateway deletion gives active runs 15 seconds to drain. If a run does not stop after cancellation, deletion reports its session ID and preserves the agent's configuration and storage. Wait for the named run to end, then retry deletion.
 - Deletion closes every terminal for the agent, including detached terminals and terminals opened without a chat session, and waits for their processes to exit before retiring storage. Terminals for surviving agents remain usable.
 - Independent background commands are also cancelled and drained when their agent is deleted. Idle MCP runtimes retire before storage, while active MCP views keep deletion pending; close those views and retry. Tracked browser tabs use the same best-effort cleanup as session deletion.
 - During an upgrade, Doctor backs up and prepares a resumable pending deletion's old database schema under deletion ownership. Gateway recovery then completes normal session cleanup, including native bindings and related state, before applying the recorded file-removal choice.
@@ -279,6 +284,7 @@ Avatar paths resolve relative to the workspace root and cannot escape it, even t
 
 - `--agent` or `--workspace` selects the target agent. If `--workspace` matches more than one agent, the command fails and asks you to pass `--agent`.
 - `--workspace` and `--identity-file` only select the agent or identity file. They do not change `agents.entries.*.workspace`.
+  Explicitly empty or whitespace-only values are rejected; omit the flag to use the default identity location.
   For `--json`, `workspace` is the resolved identity directory: the `--workspace` locator, the parent of `--identity-file`, or the agent's workspace when identity is read from there. It is `null` only when identity is supplied through flags with no identity directory. `storedWorkspace` reports the agent's persisted workspace.
 - Relocate an existing agent with `openclaw config set agents.entries.<id>.workspace <dir>`, then follow the CLI restart hint and confirm with `openclaw agents list`.
 - Local workspace-relative avatar image files are limited to 2 MB. HTTP(S) URLs and `data:` URIs are not checked against the local file-size limit.

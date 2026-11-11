@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { asOptionalRecord as asRecord } from "@openclaw/normalization-core/record-coerce";
 import { containsAsciiControlCharacter } from "@openclaw/normalization-core/string-normalization";
+import { LruCache } from "../infra/lru-cache.js";
 import {
   COMMAND_PALETTE_SHORTCUTS,
   createKeyboardShortcutMatcher,
@@ -23,6 +24,8 @@ const SANDBOX_HOST_CSP_QUERY = "csp";
 const SANDBOX_HOST_CSP_MAX_JSON_BYTES = 5 * 1024;
 const SANDBOX_HOST_CSP_MAX_HEADER_BYTES = 6 * 1024;
 const SANDBOX_HOST_CSP_MAX_ENCODED_BYTES = Math.ceil(SANDBOX_HOST_CSP_MAX_JSON_BYTES / 3) * 4 + 4;
+// The complete policy keys immutable public URLs; shell code changes retire this process cache.
+const sandboxHostPaths = new LruCache<string>(64);
 
 function buildSandboxShortcutBridgeHtml(): string {
   return `<script>(()=>{
@@ -215,15 +218,19 @@ export function normalizeSandboxHostCsp(value: unknown): SandboxHostCsp | undefi
 
 export function buildSandboxHostPath(csp?: SandboxHostCsp): string {
   const normalized = normalizeSandboxHostCsp(csp);
+  const policy = normalized ? JSON.stringify(normalized) : "";
+  const cached = sandboxHostPaths.get(policy);
+  if (cached !== undefined) {
+    return cached;
+  }
   const query = new URLSearchParams();
   if (normalized) {
-    query.set(
-      SANDBOX_HOST_CSP_QUERY,
-      Buffer.from(JSON.stringify(normalized)).toString("base64url"),
-    );
+    query.set(SANDBOX_HOST_CSP_QUERY, Buffer.from(policy).toString("base64url"));
   }
   query.set("v", buildSandboxHostDocument(normalized).version);
-  return `${SANDBOX_HOST_PATH}?${query}`;
+  const pathname = `${SANDBOX_HOST_PATH}?${query}`;
+  sandboxHostPaths.set(policy, pathname);
+  return pathname;
 }
 
 /** Version the public shell and its security headers together, never widget content. */
@@ -303,9 +310,11 @@ function buildSandboxHostProxyHtml(csp?: SandboxHostCsp): string {
   if (window.self === window.top) throw new Error("invalid MCP App sandbox host");
   let hostOrigin;
   try {
-    const referrer = new URL(document.referrer);
-    if (referrer.protocol !== "http:" && referrer.protocol !== "https:") throw new Error();
-    hostOrigin = referrer.origin;
+    // WebKit sends no referrer when an attached iframe is navigated later, so bind
+    // the browser-reported parent origin; browsers without it keep the referrer.
+    const parent = new URL(location.ancestorOrigins?.[0] ?? document.referrer);
+    if (parent.protocol !== "http:" && parent.protocol !== "https:") throw new Error();
+    hostOrigin = parent.origin;
   } catch { throw new Error("invalid MCP App sandbox parent"); }
   try { void window.top.document; throw new Error("MCP App sandbox isolation failed"); } catch (error) {
     if (error instanceof Error && error.message === "MCP App sandbox isolation failed") throw error;

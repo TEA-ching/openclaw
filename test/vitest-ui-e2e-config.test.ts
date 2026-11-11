@@ -26,6 +26,7 @@ afterEach(() => {
 const standaloneFile = "ui/src/e2e/board-fixture.e2e.test.ts";
 const bundledFile = "ui/src/e2e/mount-fallback.e2e.test.ts";
 const serialBundledFile = "ui/src/e2e/chat-stream-runtime-budgets.e2e.test.ts";
+const workboardFile = "ui/src/pages/workboard/workboard-distribution.e2e.test.ts";
 const qaLabFiles = [
   "extensions/qa-lab/src/control-ui-automation-management.real-gateway.e2e.test.ts",
   "extensions/qa-lab/src/control-ui-media-transcript.real-gateway.e2e.test.ts",
@@ -41,7 +42,9 @@ const realGatewayFiles = [
   "chat-composer-websearch-kill-switch.real-gateway",
   "chat-flow.catalog-bootstrap",
   "chat-loading-performance.real-gateway",
+  "chat-managed-media-order.real-gateway",
   "chat-project-media.real-gateway",
+  "chat-session-diff-folding.real-gateway",
   "chat-stop-finished-run.real-gateway",
   "chat-stop-owned-exec.real-gateway",
   "chat-thinking-metadata.real-gateway",
@@ -70,7 +73,7 @@ const realGatewayFiles = [
   "worker-initial-setup.real-gateway",
 ]
   .map((name) => `ui/src/e2e/${name}.e2e.test.ts`)
-  .concat(qaLabFiles);
+  .concat(qaLabFiles, workboardFile);
 const mcpFile = "ui/src/e2e/mcp-app-conformance.e2e.test.ts";
 const builtGatewayFile = "ui/src/e2e/chat-widget-sandbox.real-gateway.e2e.test.ts";
 const prebuiltBuildInfo = { buildId: "prepared-ui-build", version: "2026.9.23" };
@@ -103,6 +106,7 @@ type OwnershipProbe = {
 function probeOwnership(
   options: {
     prebuilt?: boolean;
+    virtualCpus?: number;
     filters?: string[];
     cli?: string[];
     project?: string[];
@@ -192,7 +196,14 @@ function probeOwnership(
     `
     import fs from "node:fs";
     import path from "node:path";
-    import { createVitest, parseCLI } from "vitest/node";
+    import os from "node:os";
+    import { syncBuiltinESMExports } from "node:module";
+    if (${JSON.stringify(options.virtualCpus)} !== undefined) {
+      os.availableParallelism = () => ${JSON.stringify(options.virtualCpus)};
+      os.cpus = () => Array.from({ length: ${JSON.stringify(options.virtualCpus)} }, () => ({ model: "fixture", speed: 1, times: {} }));
+      syncBuiltinESMExports();
+    }
+    const { createVitest, parseCLI } = await import("vitest/node");
     const filters = ${JSON.stringify(options.filters ?? [])};
     const args = ["run", ...filters, ...${JSON.stringify(options.cli ?? [])}];
     process.argv = [process.execPath, "vitest", ...args];
@@ -273,6 +284,15 @@ function probeOwnership(
       timeout: DEFAULT_VITEST_TEST_TIMEOUT_MS,
       env: {
         ...process.env,
+        // Native configuration resolves a persistent API token even without tests.
+        HOME: directory,
+        USERPROFILE: directory,
+        LOCALAPPDATA: directory,
+        APPDATA: directory,
+        XDG_DATA_HOME: directory,
+        XDG_CONFIG_HOME: directory,
+        XDG_CACHE_HOME: directory,
+        XDG_STATE_HOME: directory,
         // Discovery runs no tests; keep scheduling stable across subprocesses
         // instead of comparing different snapshots of the host's current load.
         CI: "1",
@@ -289,6 +309,25 @@ function probeOwnership(
 }
 
 describe("Control UI E2E resource ownership", () => {
+  it.each([false, true])("preserves explicit caps on a 32-CPU host (prebuilt=%s)", (prebuilt) => {
+    for (const workers of [undefined, 3]) {
+      const result = probeOwnership({
+        prebuilt,
+        virtualCpus: 32,
+        cli: workers ? ["--maxWorkers", String(workers)] : [],
+      });
+      expect(result.rootWorkers).toBe(workers ?? 2);
+      expect(result.files.some((entry) => entry.phase === (prebuilt ? 2 : 0))).toBe(true);
+      for (const entry of result.files) {
+        expect(entry.workers, entry.project).toBe(entry.phase === 1 ? 1 : (workers ?? 2));
+        if (entry.phase === 1) {
+          expect(entry.fileParallelism).toBe(false);
+        }
+      }
+      expect(result.canonicalAssetsIntact).toBe(true);
+    }
+  });
+
   it("refuses a selected project before acquiring fixtures when environment preflight fails", () => {
     const result = probeOwnership({ filters: [bundledFile], failure: "preflight" });
     expect(result.setupError).toBe("fixture preflight failed");
@@ -445,6 +484,20 @@ describe("Control UI E2E resource ownership", () => {
           fileParallelism: false,
         },
         {
+          file: "ui/src/e2e/chat-managed-media-order.real-gateway.e2e.test.ts",
+          project: "ui-e2e-serial-standalone",
+          phase: 1,
+          workers: 1,
+          fileParallelism: false,
+        },
+        {
+          file: "ui/src/e2e/chat-session-diff-folding.real-gateway.e2e.test.ts",
+          project: "ui-e2e-serial-standalone",
+          phase: 1,
+          workers: 1,
+          fileParallelism: false,
+        },
+        {
           file: "ui/src/e2e/chat-stop-owned-exec.real-gateway.e2e.test.ts",
           project: "ui-e2e-serial-standalone",
           phase: 1,
@@ -509,6 +562,13 @@ describe("Control UI E2E resource ownership", () => {
         },
         {
           file: "ui/src/e2e/session-roster-request-rate.real-gateway.e2e.test.ts",
+          project: "ui-e2e-serial-standalone",
+          phase: 1,
+          workers: 1,
+          fileParallelism: false,
+        },
+        {
+          file: workboardFile,
           project: "ui-e2e-serial-standalone",
           phase: 1,
           workers: 1,

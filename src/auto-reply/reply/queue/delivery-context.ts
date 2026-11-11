@@ -1,5 +1,6 @@
 import { expectDefined, stableStringify } from "@openclaw/normalization-core";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import type { RuntimeContextFragment } from "../../../agents/internal-runtime-context.js";
 import { withSandboxRuntimeStatusesInWorker } from "../../../agents/sandbox/runtime-status.js";
 import { withPreparedSessionCapabilityRead } from "../../../agents/subagents/spawn/subagent-session-store.js";
 import { readToolAllowlistIntersection } from "../../../agents/tool-policy.js";
@@ -14,6 +15,7 @@ import {
   resolveReplyPersonalToolTargets,
   resolveReplyToolAuthorityContext,
 } from "../reply-tool-authority.js";
+import { updateFollowupRetryHeartbeats } from "./lifecycle.js";
 import {
   FollowupRunDeferredError,
   isFollowupRunAborted,
@@ -192,50 +194,59 @@ export async function prepareNextDeliveryGroup(
       }
     }
   };
-  assertCurrent();
-  if (items.length <= 1) {
-    return { items, assertCurrent };
-  }
-  const policyItems = items.filter((item) => item.run.gatewayUiCommandTarget && !item.disableTools);
-  const statuses = await withSandboxRuntimeStatusesInWorker(
-    policyItems.map(({ run }) => ({
-      cfg: run.config,
-      agentId: run.agentId,
-      sessionKey: run.sessionKey,
-      classificationSessionKey: run.runtimePolicySessionKey ?? run.sessionKey,
-    })),
-    { env: { ...process.env }, cwd: process.cwd(), assertCurrent },
-    (prepared) => prepared,
-  );
-  return withPreparedSessionCapabilityRead(() => {
-    const group: FollowupRun[] = [];
-    let firstKey: string | undefined;
-    for (const item of items) {
-      const index = policyItems.indexOf(item);
-      const profile =
-        index < 0
-          ? undefined
-          : resolveReplyToolAuthorityContext(
-              item,
-              undefined,
-              expectDefined(statuses[index], "prepared sandbox status"),
-            ).capabilityProfile;
-      const storageKey = resolveFollowupDeliveryStorageKey(item);
-      const personalTargets = profile ? resolveReplyPersonalToolTargets(item, profile) : undefined;
-      const key = JSON.stringify([
-        storageKey,
-        personalTargets ? stableStringify(personalTargets.screenTarget ?? null) : "null",
-        personalTargets?.themeProfileId ?? "",
-      ]);
-      if (firstKey !== undefined && key !== firstKey) {
-        break;
-      }
-      firstKey = key;
-      group.push(item);
-    }
+  try {
     assertCurrent();
-    return { items: group, assertCurrent };
-  });
+    if (items.length <= 1) {
+      return { items, assertCurrent };
+    }
+    const policyItems = items.filter(
+      (item) => item.run.gatewayUiCommandTarget && !item.disableTools,
+    );
+    const statuses = await withSandboxRuntimeStatusesInWorker(
+      policyItems.map(({ run }) => ({
+        cfg: run.config,
+        agentId: run.agentId,
+        sessionKey: run.sessionKey,
+        classificationSessionKey: run.runtimePolicySessionKey ?? run.sessionKey,
+      })),
+      { env: { ...process.env }, cwd: process.cwd(), assertCurrent },
+      (prepared) => prepared,
+    );
+    return await withPreparedSessionCapabilityRead(() => {
+      const group: FollowupRun[] = [];
+      let firstKey: string | undefined;
+      for (const item of items) {
+        const index = policyItems.indexOf(item);
+        const profile =
+          index < 0
+            ? undefined
+            : resolveReplyToolAuthorityContext(
+                item,
+                undefined,
+                expectDefined(statuses[index], "prepared sandbox status"),
+              ).capabilityProfile;
+        const storageKey = resolveFollowupDeliveryStorageKey(item);
+        const personalTargets = profile
+          ? resolveReplyPersonalToolTargets(item, profile)
+          : undefined;
+        const key = JSON.stringify([
+          storageKey,
+          personalTargets ? stableStringify(personalTargets.screenTarget ?? null) : "null",
+          personalTargets?.themeProfileId ?? "",
+        ]);
+        if (firstKey !== undefined && key !== firstKey) {
+          break;
+        }
+        firstKey = key;
+        group.push(item);
+      }
+      assertCurrent();
+      return { items: group, assertCurrent };
+    });
+  } catch (error) {
+    updateFollowupRetryHeartbeats(error, items);
+    throw error;
+  }
 }
 
 export function resolveFollowupReplyAnchor(run: FollowupRun): string | undefined {
@@ -279,11 +290,13 @@ type FollowupRuntimeMetadata = Pick<
   | "runObservers"
 >;
 
-function collectCurrentInboundContext(items: FollowupRun[]): FollowupRun["currentInboundContext"] {
+export function collectCurrentInboundContext(
+  items: FollowupRun[],
+): FollowupRun["currentInboundContext"] {
   const contexts = items.flatMap((item, index) =>
     item.currentInboundContext ? [{ context: item.currentInboundContext, index }] : [],
   );
-  if (contexts.length <= 1) {
+  if (items.length <= 1) {
     return contexts[0]?.context;
   }
   const renderField = (field: "text" | "resumableText") => {
@@ -304,10 +317,15 @@ function collectCurrentInboundContext(items: FollowupRun[]): FollowupRun["curren
   return {
     text,
     ...(resumableText ? { resumableText } : {}),
-    fragments: contexts.flatMap(
-      ({ context }) =>
-        context.fragments ?? [{ kind: "conversation-data" as const, text: context.text }],
-    ),
+    fragments: contexts.flatMap(({ context, index }) => {
+      const label: RuntimeContextFragment = {
+        kind: "runtime-instruction",
+        text: `Queued #${index + 1} context:`,
+      };
+      return [label].concat(
+        context.fragments ?? [{ kind: "conversation-data", text: context.text }],
+      );
+    }),
     promptJoiner: "\n\n",
     ...(injectedGoalContexts.length > 0 ? { injectedGoalContexts } : {}),
   };
@@ -364,6 +382,11 @@ export function collectRuntimeMetadata(
   // Delivery-key equality proves every source has the same turn authority.
   // Preserve the exact carrier (including hidden intersections); never derive it from identity evidence.
   const authoritySource = items.at(-1);
+  const terminalObservers = items.flatMap((item) =>
+    item.runObservers?.onAgentRunTerminalOutcome
+      ? [item.runObservers.onAgentRunTerminalOutcome]
+      : [],
+  );
   const deliveryCorrelations = items.flatMap((item) => item.deliveryCorrelations ?? []);
   const explicitSkillSelections = [
     ...new Map(
@@ -397,7 +420,25 @@ export function collectRuntimeMetadata(
     turnAdoptionLifecycle: items.length === 1 ? items[0]?.turnAdoptionLifecycle : undefined,
     replyOperationRunStates: items.flatMap((item) => item.replyOperationRunStates ?? []),
     queuedFollowupReplyDisposition: collectReplyDisposition(items),
-    runObservers: items.at(-1)?.runObservers,
+    runObservers:
+      terminalObservers.length === 0
+        ? authoritySource?.runObservers
+        : {
+            ...authoritySource?.runObservers,
+            onAgentRunTerminalOutcome: (outcome) => {
+              const failures: unknown[] = [];
+              for (const observer of terminalObservers) {
+                try {
+                  observer(outcome);
+                } catch (error) {
+                  failures.push(error);
+                }
+              }
+              if (failures.length > 0) {
+                throw failures[0];
+              }
+            },
+          },
   };
 }
 
@@ -426,6 +467,7 @@ export function getFollowupOriginRouting(source: FollowupRun) {
 export function createOverflowSummaryRetrySource(source: FollowupRun): FollowupRun {
   return {
     prompt: source.prompt,
+    currentInboundContext: source.currentInboundContext,
     sourceTurnId: source.sourceTurnId,
     admissionSessionId: source.admissionSessionId,
     operatorAuthority: source.operatorAuthority,

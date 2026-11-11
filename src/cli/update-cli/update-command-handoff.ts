@@ -1,7 +1,10 @@
 import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import { GATEWAY_SERVICE_RUNTIME_PID_ENV, isGatewayServiceEnv } from "../../daemon/constants.js";
 import { resolveGatewayInstallEntrypoint } from "../../daemon/gateway-entrypoint.js";
-import { inspectServiceProcessMembershipSync } from "../../daemon/service-process-membership.js";
+import {
+  inspectServiceProcessMembershipSync,
+  resolveServiceProcessMembershipBlock,
+} from "../../daemon/service-process-membership.js";
 import {
   resolveManagedGatewayServiceCommand,
   type GatewayServiceState,
@@ -75,22 +78,17 @@ export function gatewayServiceMembershipBlock(
       process.platform === "win32"
         ? "outside"
         : inspectServiceProcessMembershipSync(gatewayPid, process.platform, systemdControlGroup);
-    if (membership === "inside") {
-      return servicePreflightFailure("inside-gateway-service");
-    }
-    if (membership === "unknown") {
-      return servicePreflightFailure("service-membership-unverified");
-    }
     const unverified =
       !ancestry.complete &&
       (process.platform !== "win32" ||
         (isGatewayServiceEnv(process.env) &&
           parsePositivePid(process.env[GATEWAY_SERVICE_RUNTIME_PID_ENV]) === gatewayPid &&
           isPidAlive(gatewayPid)));
-    if (!unverified && membership === "absent") {
+    const block = resolveServiceProcessMembershipBlock(membership, !unverified);
+    if (!block && membership === "absent") {
       onAbsentSource?.();
     }
-    return unverified ? servicePreflightFailure("service-ancestry-unverified") : undefined;
+    return block ? servicePreflightFailure(block) : undefined;
   }
   // Shared by doctor and update: never advise stopping the service from here,
   // because the stop would kill the caller and nothing restarts the gateway.
@@ -226,10 +224,7 @@ export async function handoffUpdateFromGateway(params: {
     meta: { runId: params.opts.run?.runId },
   });
   if (started.status === "joined") {
-    throw new UpdatePreMutationError(
-      "managed-service-handoff-already-running",
-      "Another managed update is already running. Check progress with `openclaw update status`.",
-    );
+    throw new UpdatePreMutationError("managed-service-handoff-already-running", started.message);
   }
   const identity = {
     kind: "managed-update-handoff" as const,

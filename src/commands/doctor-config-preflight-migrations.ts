@@ -27,6 +27,7 @@ export async function prepareDoctorMigrationPlugins(params: {
   cfg: OpenClawConfig;
   env: NodeJS.ProcessEnv;
   retainedPluginIds?: readonly string[];
+  deferPackageRepair?: boolean;
   measure?: ConfigSnapshotReadMeasure;
   snapshotRead: ConfigPreflightSnapshotRead;
   readRefreshedSnapshot: () => Promise<ConfigPreflightSnapshotRead>;
@@ -34,14 +35,17 @@ export async function prepareDoctorMigrationPlugins(params: {
     pending: readonly DeferredPluginMigration[],
     inspection?: PluginMigrationInspection,
   ) => Promise<void>;
-}): Promise<ConfigPreflightSnapshotRead> {
+}): Promise<{ snapshotRead: ConfigPreflightSnapshotRead; warnings: string[] }> {
   const convergence = await runDoctorPluginConvergence(params);
   setActiveDegradedPlugins(convergence.quarantinedPlugins);
   await params.onDeferredPlugins(
     convergence.deferredPlugins ?? [],
     convergence.migrationInspection,
   );
-  return await params.readRefreshedSnapshot();
+  return {
+    snapshotRead: await params.readRefreshedSnapshot(),
+    warnings: convergence.warnings ?? [],
+  };
 }
 
 export async function assertDoctorPreflightMigrationsComplete(params: {

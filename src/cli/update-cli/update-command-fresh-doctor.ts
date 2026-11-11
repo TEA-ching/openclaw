@@ -4,8 +4,7 @@ import path from "node:path";
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
-  UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR_ENV,
-  UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV,
+  isUpdateDoctorInspectionReportMode,
   UPDATE_POST_CORE_CONVERGENCE_ENV,
 } from "../../commands/doctor/shared/update-phase.js";
 import { readConfigFileSnapshot } from "../../config/config.js";
@@ -23,6 +22,7 @@ import { readUpdateStateDatabaseSizes } from "../../infra/update-candidate-state
 import { UPDATE_RUN_ID_ENV } from "../../infra/update-control-plane-sentinel.js";
 import type { UpdateDatabaseBackup } from "../../infra/update-database-backup.js";
 import { hasDeferredUpdateModelRetirement } from "../../infra/update-deferred-model-retirement.js";
+import { createDoctorServiceInspectionBudget } from "../../infra/update-doctor-deadline.js";
 import {
   collectUpdateDoctorFailureFacts,
   consumeUpdatePostInstallDoctorResult,
@@ -32,6 +32,7 @@ import {
   UPDATE_POST_INSTALL_DOCTOR_ADVISORY_EXIT_CODE,
   UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV,
   UpdateDoctorError,
+  UpdateDoctorDeferredInspectionCheckIdsSchema,
   type UpdatePostInstallDoctorResult,
 } from "../../infra/update-doctor-result.js";
 import { createUpdateDoctorSectionTiming } from "../../infra/update-doctor-section-timing.js";
@@ -84,17 +85,11 @@ import {
 } from "./update-command-service-env.js";
 import { captureUpdateFinalizationDoctorOutput } from "./update-finalization-output.js";
 
-export async function withPrePluginUpdateDoctorEnv<T>(run: () => Promise<T>): Promise<T> {
-  return await withUpdateEnv(
-    {
-      OPENCLAW_UPDATE_IN_PROGRESS: "1",
-      [UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR_ENV]: "1",
-      [UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV]: "1",
-      [UPDATE_POST_CORE_CONVERGENCE_ENV]: undefined,
-    },
-    run,
-  );
-}
+export { withPrePluginUpdateDoctorEnv } from "./update-command-fresh-doctor-env.js";
+
+// Isolated workers serve an older updater whose executor fence is not admitted here.
+const servesOlderUpdater = () =>
+  Reflect.get(globalThis, Symbol.for("openclaw.updateCompat.olderUpdater")) === true;
 
 export async function runUpdateFinalizationDoctorInFreshProcess(params: {
   phase: "pre-plugin" | "post-plugin";
@@ -109,6 +104,7 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
   json: boolean;
   workspaceSuggestions?: boolean;
   timeoutMs?: number;
+  serviceInspectionDeadlineAtMs?: number;
   nodeRunner?: string;
   entryPath?: string;
   onWarnings?: (warnings: string[]) => void;
@@ -116,6 +112,11 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
   /** Propagate a refused child authority to the finalization owner without retrying it. */
   onAuthorityRefused?: () => void;
 }): Promise<PluginUpdateWarning | void> {
+  const requestedTimeoutMs = parseUpdateTimeoutMs(params.opts?.timeout) ?? params.timeoutMs;
+  const serviceInspectionDeadlineAtMs =
+    params.serviceInspectionDeadlineAtMs ??
+    (requestedTimeoutMs === undefined ? undefined : Date.now() + requestedTimeoutMs);
+  const remaining = createDoctorServiceInspectionBudget(serviceInspectionDeadlineAtMs);
   const {
     run,
     executorFence,
@@ -155,9 +156,7 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
   try {
     const commandOptions: CommandOptions = {
       cwd: params.root,
-      // Normal updates also carry a default step allowance. Only operator opts
-      // may impose a Doctor deadline; standalone finalization supplies its own.
-      timeoutMs: params.opts ? parseUpdateTimeoutMs(params.opts.timeout) : params.timeoutMs,
+      timeoutMs: remaining(),
       maxOutputBytes: 4 * 1024 * 1024,
       terminateOnOutputLimit: true,
       onOutputChunk: captureUpdateFinalizationDoctorOutput(params.phase),
@@ -191,7 +190,7 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
           workerCommand,
           {
             cwd: params.root,
-            timeoutMs: params.timeoutMs,
+            timeoutMs: remaining(),
             baseEnv,
             env: commandOptions.env,
           },
@@ -204,7 +203,7 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       env: { ...commandOptions.env, ...sectionTiming.env },
     };
     const doctorArgv =
-      doctorConfigWrites && executorFence && runId
+      doctorConfigWrites && executorFence && runId && !servesOlderUpdater()
         ? [...workerCommand, "--doctor"]
         : [params.nodeRunner ?? resolveNodeRunner(), ...args];
     doctorStartedAt = Date.now();
@@ -216,7 +215,7 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       exitCode: null,
     };
     let child: Awaited<ReturnType<typeof runUpdateDoctorProcess>>;
-    if (doctorConfigWrites && executorFence && runId) {
+    if (doctorConfigWrites && executorFence && runId && !servesOlderUpdater()) {
       const snapshot = await readUpdateConfigSnapshot(resolveConfigPath());
       assertCurrent();
       child = await withUpdateDoctorChild(
@@ -237,6 +236,10 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
             repair: true,
             databaseGenerations:
               params.databaseBackup?.migration?.to ?? params.databaseBackup?.sourceGenerations,
+            get serviceInspectionDeadlineAtMs() {
+              const budget = remaining();
+              return budget === undefined ? undefined : Date.now() + budget;
+            },
             yes: params.yes,
             workspaceSuggestions: params.workspaceSuggestions === true,
             ...(params.phase === "post-plugin" && process.env[POST_CORE_UPDATE_ENV] === "1"
@@ -244,7 +247,8 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
               : {}),
           },
         },
-        (runCommand) => sectionTiming.wrap(runCommand)(doctorArgv, doctorOptions),
+        (runCommand) =>
+          sectionTiming.wrap(runCommand)(doctorArgv, { ...doctorOptions, timeoutMs: remaining() }),
       );
     } else {
       // A valid legacy target contract retains its shipped CLI Doctor. This is
@@ -261,7 +265,7 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
           argv,
           options,
         ),
-      )(doctorArgv, doctorOptions);
+      )(doctorArgv, { ...doctorOptions, timeoutMs: remaining() });
     }
     result = child;
     doctorStep.exitCode = child.code;
@@ -438,15 +442,12 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       params.onDoctorStep?.(doctorStep);
     }
     if (params.databaseBackup) {
-      const step: UpdateStepResult = {
-        name: "database migration writes",
-        command: "record Doctor database write fingerprints",
-        cwd: params.root,
-        durationMs: 0,
-        exitCode: 0,
-      };
-      recordUpdateDatabaseWrites(params.databaseBackup, doctorResult?.databaseWrites, step);
-      params.onDoctorStep?.(step);
+      const receipt = recordUpdateDatabaseWrites(
+        params.databaseBackup,
+        doctorResult?.databaseWrites,
+        { name: `${params.phase} doctor` },
+      );
+      params.onDoctorStep?.(receipt);
     }
     if (doctorResult?.warnings?.length) {
       params.onWarnings?.(doctorResult.warnings);
@@ -575,6 +576,7 @@ export async function completePostCorePluginUpdate(
   let pluginUpdate = params.pluginUpdate;
   let entryPath: string | undefined;
   let freshConfigValidation: PostPluginConfigValidation | undefined;
+  let includeOptionalInspections = false;
   if (pluginUpdate.status !== "error") {
     try {
       entryPath = await resolveGatewayInstallEntrypoint(params.root);
@@ -592,8 +594,15 @@ export async function completePostCorePluginUpdate(
       assertCurrent();
       if (freshDoctorRequired) {
         await params.beforeDoctor?.();
+        let inspectionCheckIds: string[] | null | undefined;
         const warning = await runUpdateFinalizationDoctorInFreshProcess({
           ...params,
+          onDoctorStep: (step) => {
+            if (step.deferredInspectionCheckIds !== undefined) {
+              inspectionCheckIds = step.deferredInspectionCheckIds;
+            }
+            params.onDoctorStep?.(step);
+          },
           assertCurrent,
           onAuthorityRefused: () => {
             authorityFailed = true;
@@ -601,6 +610,10 @@ export async function completePostCorePluginUpdate(
           entryPath,
           phase: "post-plugin",
         });
+        // A child without usable selectors cannot leave diagnostics for after ready.
+        includeOptionalInspections =
+          isUpdateDoctorInspectionReportMode(process.env) &&
+          !UpdateDoctorDeferredInspectionCheckIdsSchema.safeParse(inspectionCheckIds).success;
         if (warning) {
           pluginUpdate = {
             ...pluginUpdate,
@@ -705,6 +718,7 @@ export async function completePostCorePluginUpdate(
         entryPath,
         pluginUpdate,
         timeoutMs: checkTimeoutMs,
+        includeOptionalInspections,
         ...(params.nodeRunner ? { nodeRunner: params.nodeRunner } : {}),
       });
     }

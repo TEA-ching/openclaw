@@ -4,7 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
 import { expectDefined } from "@openclaw/normalization-core";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFailed, vi } from "vitest";
 import { z } from "zod";
 import { isInternalRuntimeContextCarrierText } from "../../../../extensions/qa-lab/api.js";
 import { createQaLiveLaneGateway } from "../../../../extensions/qa-lab/runtime-api.js";
@@ -37,9 +37,11 @@ type MockRequestSnapshot = {
   body?: Record<string, unknown>;
   cursor?: number;
   plannedToolArgs?: Record<string, unknown>;
+  plannedToolCallId?: string;
   plannedToolName?: string;
   prompt?: string;
   toolOutput?: string;
+  toolOutputCallId?: string;
 };
 
 type GatewayHandle = Awaited<
@@ -269,7 +271,7 @@ async function sendAndWait(params: {
     { runId: started.runId, timeoutMs: 30_000 },
     { timeoutMs: 35_000 },
   )) as GatewayChatRun;
-  expect(terminal.status).toBe("ok");
+  expect(terminal, JSON.stringify(terminal)).toMatchObject({ status: "ok" });
 }
 
 async function readMockJson<T>(baseUrl: string, requestPath: string): Promise<T> {
@@ -728,6 +730,75 @@ describe("Gateway chat RPCs", () => {
   );
 
   it(
+    "denies a model-planned dynamic predicate in a separate Gateway process",
+    { timeout: 120_000 },
+    async () => {
+      harness = await startChatGateway({
+        mutateConfig: (config) => ({
+          ...config,
+          tools: {
+            ...config.tools,
+            exec: { host: "gateway", security: "allowlist", ask: "off", safeBins: [] },
+          },
+        }),
+      });
+      const { gateway, mock } = harness;
+      if (!mock) {
+        throw new Error("mock provider did not start");
+      }
+      onTestFailed(() => {
+        process.stderr.write(gateway.logs().slice(-12_000) + "\n");
+      });
+      await fs.writeFile(`${gateway.workspaceDir}/proof.txt`, "fixture");
+      const policy = (await gateway.call("exec.approvals.get", {})) as { hash: string };
+      await gateway.call("exec.approvals.set", {
+        baseHash: policy.hash,
+        file: {
+          version: 1,
+          defaults: { security: "allowlist", ask: "off", askFallback: "deny" },
+        },
+      });
+
+      const run = async (command: string) => {
+        const cursor = await readMockJson<MockRequestCursor>(mock.baseUrl, "/debug/request-cursor");
+        await sendAndWait({
+          gateway,
+          sessionKey: `agent:qa:predicate-proof-${randomUUID()}`,
+          message: [
+            "Tool progress QA check.",
+            `Call the exec tool exactly once with this exact command before answering: \`${command}\`.`,
+            "Reply exactly `PREDICATE_PROOF_DONE`.",
+          ].join(" "),
+        });
+        const requests = await readMockJson<MockRequestSnapshot[]>(
+          mock.baseUrl,
+          `/debug/requests?after=${cursor.cursor}`,
+        );
+        const planned = expectDefined(
+          requests.find(
+            (request) =>
+              request.plannedToolName === "exec" && request.plannedToolArgs?.command === command,
+          ),
+          "model-planned exec call",
+        );
+        const callId = expectDefined(planned.plannedToolCallId, "model-planned exec call id");
+        const result = expectDefined(
+          requests.find((request) => request.toolOutputCallId === callId),
+          "paired exec result",
+        );
+        return expectDefined(result.toolOutput, "paired exec output");
+      };
+
+      const staticOutput = await run("test -e proof.txt && pwd");
+      expect(staticOutput).toContain(gateway.workspaceDir);
+
+      const dynamicOutput = await run("test -e *.txt && pwd");
+      expect(dynamicOutput).toContain("exec denied: allowlist miss");
+      expect(dynamicOutput).not.toContain(gateway.workspaceDir);
+    },
+  );
+
+  it(
     "enforces admitted session settings at final effect and rejects stale sends before dispatch",
     { timeout: 120_000 },
     async () => {
@@ -743,6 +814,9 @@ describe("Gateway chat RPCs", () => {
       }
 
       const sessionKey = `agent:qa:gateway-settings-authority-${randomUUID()}`;
+      onTestFailed(() => {
+        process.stderr.write(gateway.logs().slice(-12_000) + "\n");
+      });
       await sendAndWait({ gateway, sessionKey, message: "Create the proof session." });
       await expect(
         gateway.call("sessions.patch", {

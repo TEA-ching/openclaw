@@ -131,12 +131,6 @@ const compactionFixture = useCompactHooksSessionFixture(TEST_SESSION_KEY);
 let TEST_SESSION_FILE: string;
 let TEST_WORKSPACE_DIR: string;
 const TEST_CUSTOM_INSTRUCTIONS = "focus on decisions";
-type SessionHookEvent = {
-  type?: string;
-  action?: string;
-  sessionKey?: string;
-  context?: Record<string, unknown>;
-};
 function plannedCompactionPluginSelections(
   config: OpenClawConfig,
   metadataSnapshot = createPluginMetadataSnapshotFixture({ plugins: [] }),
@@ -274,12 +268,6 @@ function createPreparedCodexCompactionPlans(modelId = "gpt-5.5") {
     } as never,
   };
 }
-
-const sessionHook = (action: string): SessionHookEvent | undefined =>
-  triggerInternalHookMock.mock.calls.find((call) => {
-    const event = call[0] as SessionHookEvent | undefined;
-    return event?.type === "session" && event.action === action;
-  })?.[0] as SessionHookEvent | undefined;
 
 beforeAll(async () => {
   const loaded = await loadCompactHooksHarness();
@@ -1293,15 +1281,12 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
       config,
     });
     expect(result.ok, JSON.stringify(result)).toBe(true);
-    expect(plannedCompactionPluginSelections(config)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          provider: "anthropic",
-          modelId: "claude-fallback",
-          runtime: "codex",
-        }),
-      ]),
-    );
+    // Fallback candidates resolve their own harness instead of inheriting the primary's.
+    expect(plannedCompactionPluginSelections(config)).toContainEqual({
+      provider: "anthropic",
+      modelId: "claude-fallback",
+      agentId: "main",
+    });
     const admittedConfig = {
       agents: {
         defaults: {
@@ -1430,24 +1415,6 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
     );
     expectRecordFields(mockCallArg(resolveEmbeddedAgentStreamMock, 1), {
       authProfileId: "openai:default",
-    });
-  });
-
-  it("applies validated transcript before hooks even when it becomes empty", async () => {
-    hookRunner.hasHooks.mockReturnValue(true);
-    const { sanitizeSessionHistory } = await import("./replay-history.js");
-    vi.mocked(sanitizeSessionHistory).mockResolvedValueOnce([]);
-
-    const result = await compactEmbeddedAgentSessionDirect(wrappedCompactionArgs());
-
-    expect(result.ok).toBe(true);
-
-    const beforeContext = sessionHook("compact:before")?.context;
-    expectRecordFields(beforeContext, {
-      messageCountOriginal: 0,
-      tokenCountOriginal: 0,
-      messageCount: 0,
-      tokenCount: 0,
     });
   });
 

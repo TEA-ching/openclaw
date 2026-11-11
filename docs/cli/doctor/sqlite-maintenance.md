@@ -128,6 +128,13 @@ migration sources. Hot transcript JSONL files are imported and archived after
 successful import; archive-tier JSONL files remain support artifacts, not
 runtime fallbacks.
 
+Session-import archive filenames stay within 255 UTF-8 bytes. Long names retain
+a readable prefix and a stable hash; migration receipts retain the original paths
+and session keys. If an older receipt names an overlong destination, Doctor treats
+that destination as absent and verifies the surviving source before archiving it
+under a bounded name. Keep the original files and receipts. After upgrading from
+an update blocked by `ENAMETOOLONG`, rerun `openclaw update repair`.
+
 Older V2 migration receipts can record completed index moves without file identity.
 Doctor compares a surviving archive with the current `sessions.json`: different
 content imports as a new legacy index. If the archive is identical or missing,
@@ -273,12 +280,30 @@ are named in the warning; retained historical conflicts do not block update's
 post-session plugin repair. Preserve the originals and migration manifests while
 resolving those conflicts, then rerun `openclaw doctor --fix`.
 
+If you deleted a retained historical archive, Doctor keeps a warning and completes
+verified plugin session repair. History available only in that missing file cannot
+be recovered; Doctor does not recreate it or resurrect deleted sessions. Remaining
+originals and their recovery references stay protected.
+
+Duplicate settlement indexes retained artifact paths and manifest moves once per
+inventory instead of rescanning the full history for each duplicate. File-identity
+and source-byte checks still run before originals are retired.
+
 Normal Doctor output and `openclaw update status` show at most five
 `historical_transcript_deferred` examples per session store. Larger groups include
 the total and omitted counts; other warning types remain visible. For every
 finding, run `openclaw doctor --session-sqlite dry-run --session-sqlite-all-agents --json`.
 This summary does not retire recovery references or make missing archives eligible
 for cleanup. Preserve the remaining originals and migration manifests for recovery.
+
+`openclaw update status` rechecks recorded transcript findings against the current
+files and the read-only session store. It omits resolved findings, including JSONL
+originals that no longer exist and missing transcripts now present in SQLite or
+whose canonical session row was pruned. Unreadable stores, uncertain legacy keys,
+and unresolved originals keep their warnings. Replayed JSONL findings recommend
+inspection before choosing recovery; they do not ask you to stop the Gateway
+based only on a historical report. Migration manifests remain unchanged as proof
+for recovery and `openclaw update cleanup`.
 
 ### Changed archived registry
 
@@ -403,6 +428,9 @@ the store's owning state directory before maintaining another installation.
 Existing hard-linked targets are rejected because another path can share the
 same database inode outside the locked state directory. The same ownership
 checks cover SQLite WAL, shared-memory, and rollback-journal sidecars.
+Automatic all-agent import still checks discovered paths of databases retained
+after agent deletion for symbolic aliases before importing or settling archives,
+while excluding those databases from mutation.
 
 Each import writes a manifest under
 `~/.openclaw/session-sqlite-migration-runs/` before moving transcript artifacts

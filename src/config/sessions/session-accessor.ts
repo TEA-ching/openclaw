@@ -1,3 +1,4 @@
+export { recoverSessionTranscriptProjection } from "./session-transcript-projection-recovery.js";
 /**
  * Stable storage-neutral session and transcript access API.
  *
@@ -103,7 +104,6 @@ export type {
   SessionTranscriptVisibleMessageEventRow,
   SessionTranscriptWriteLockAccessorContext,
   SessionTranscriptWriteScope,
-  SessionTranscriptWriteTransactionContext,
   TranscriptEvent,
   TranscriptMessageAppendOptions,
   TranscriptMessageAppendResult,
@@ -249,16 +249,15 @@ export {
   readTranscriptStatsBatchReadOnlySync,
   readTranscriptStatsSync,
   validatePreparedAssistantAppendSync,
-  replaceSessionWithBranchedTranscript,
   replaceTranscriptSuffixEventsSync,
   rewriteTranscriptEventRowsExact,
   rewriteTranscriptMessageAtAnchor,
   rewriteAssistantTranscriptMessageForRun,
   resolveTranscriptSessionKeyBySessionId,
+  resolveTranscriptSessionKeyBySessionIdAsync,
   trimSessionTranscriptForManualCompact,
   withTranscriptWriteLock,
   withTranscriptWriteSequence,
-  withTranscriptWriteTransaction,
 } from "./session-accessor.transcript.js";
 export {
   appendTranscriptMessages,

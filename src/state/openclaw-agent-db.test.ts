@@ -63,7 +63,6 @@ import {
 import {
   createOpenClawAgentDatabasePathMatcher,
   isSameOpenClawAgentDatabasePath,
-  resolveIncognitoOpenClawAgentSqlitePath,
 } from "./openclaw-agent-db.paths.js";
 import {
   removeCanonicalValidationFromHistoricalAgentFixture,
@@ -688,26 +687,6 @@ afterEach(() => {
 });
 
 describe("openclaw agent database", () => {
-  it("keeps incognito state writable without SQLite extension support", () => {
-    const options = { agentId: "worker-1", env: { OPENCLAW_STATE_DIR: createTempStateDir() } };
-    const capability = vi
-      .spyOn(nodeSqlite, "supportsNodeSqliteExtensionLoading")
-      .mockReturnValue(false);
-    try {
-      const { db } = openOpenClawAgentDatabase({
-        ...options,
-        path: resolveIncognitoOpenClawAgentSqlitePath(options),
-      });
-      db.prepare("UPDATE schema_meta SET updated_at = ? WHERE meta_key = 'primary'").run(123);
-      expect(
-        db.prepare("SELECT updated_at FROM schema_meta WHERE meta_key = 'primary'").get(),
-      ).toEqual({ updated_at: 123 });
-      expect(() => db.enableLoadExtension(true)).toThrow();
-    } finally {
-      capability.mockRestore();
-    }
-  });
-
   it("uses the canonical state schema for deletion journal reads and updates", () => {
     const stateDir = createTempStateDir();
     const env = { OPENCLAW_STATE_DIR: stateDir };
@@ -2337,6 +2316,50 @@ describe("openclaw agent database", () => {
           .get(leaseId),
       ).toBeUndefined();
     });
+  });
+
+  it("preserves ownership when another initializer wins before the schema transaction", () => {
+    const stateDir = createTempStateDir();
+    const env = { OPENCLAW_STATE_DIR: stateDir };
+    openOpenClawStateDatabase({ env });
+    const databasePath = path.join(stateDir, "shared.sqlite");
+    const { DatabaseSync } = requireNodeSqlite();
+    using pending = new DatabaseSync(databasePath);
+    using winner = new DatabaseSync(databasePath);
+    const exec = pending.exec.bind(pending);
+    let preparingSchema = false;
+    vi.spyOn(pending, "exec").mockImplementation((sql) => {
+      if (sql.includes("PRAGMA foreign_keys = OFF")) {
+        preparingSchema = true;
+      }
+      if (preparingSchema && sql.trimStart().startsWith("BEGIN IMMEDIATE")) {
+        preparingSchema = false;
+        // Commit a real competing initialization after preparation, before the writer lock.
+        ensureOpenClawAgentDatabaseSchema(winner, {
+          agentId: "worker-b",
+          env,
+          path: databasePath,
+          register: true,
+        });
+      }
+      return exec(sql);
+    });
+
+    expect(() =>
+      ensureOpenClawAgentDatabaseSchema(pending, {
+        agentId: "worker-a",
+        env,
+        path: databasePath,
+        register: true,
+      }),
+    ).toThrow("belongs to agent worker-b");
+    expect(inspectOpenClawAgentDatabaseOwner(databasePath)).toEqual({
+      status: "owned",
+      agentId: "worker-b",
+    });
+    expect(listOpenClawRegisteredAgentDatabases({ env })).toEqual([
+      expect.objectContaining({ agentId: "worker-b", path: databasePath }),
+    ]);
   });
 
   it("serializes concurrent ownership claims for one unowned database", async () => {

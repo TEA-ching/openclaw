@@ -390,7 +390,12 @@ export async function runGlobalPackageUpdateSteps(params: {
     steps.push(updateStep);
     let finalInstallStep = updateStep;
     if (updateStep.exitCode !== 0) {
-      if (updateStep.failureFacts?.some((fact) => fact.code === UPDATE_GLOBAL_PERMISSION_REASON)) {
+      if (
+        updateStep.failureFacts?.some((fact) => fact.code === UPDATE_GLOBAL_PERMISSION_REASON) ||
+        [updateStep.stdoutTail, updateStep.stderrTail].some((output) =>
+          output?.includes("[update-schema-bump-unfenced]"),
+        )
+      ) {
         return await packageUpdateFailure(updateStep, steps);
       }
       const cleanupFailure = await cleanupStage();
@@ -566,9 +571,13 @@ export async function runGlobalPackageUpdateSteps(params: {
         return await packageUpdateFailure(lifecycle.step, steps);
       }
     }
+    const verificationWarnings: string[] = [];
     if (!params.expectedGitCheckout && verificationErrors.length === 0) {
       verificationErrors.push(
-        ...(await collectPackageDistContentInventoryErrors(verificationPackageRoot)),
+        ...(await collectPackageDistContentInventoryErrors(
+          verificationPackageRoot,
+          verificationWarnings,
+        )),
       );
     }
     if (verificationErrors.length > 0) {
@@ -579,6 +588,15 @@ export async function runGlobalPackageUpdateSteps(params: {
           params.env,
         ),
       );
+    } else if (verificationWarnings.length) {
+      steps.push({
+        name: "package-verify",
+        command: `verify ${verificationPackageRoot}`,
+        cwd: verificationPackageRoot,
+        durationMs: 0,
+        exitCode: 0,
+        warnings: verificationWarnings,
+      });
     }
     let failedVerification = verificationErrors.length > 0;
     if (verificationErrors.length === 0) {

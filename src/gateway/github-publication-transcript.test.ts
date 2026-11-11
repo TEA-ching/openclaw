@@ -1,5 +1,4 @@
 import "../test-utils/prepare-compiled-subprocesses.js";
-import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,13 +11,14 @@ import {
   upsertSessionEntryCore,
 } from "../config/sessions/session-accessor.js";
 import { replaceTranscriptEvents } from "../config/sessions/session-accessor.sqlite-transcript-write.test-support.js";
-import { withIncognitoSessionBinding } from "../config/sessions/session-incognito-binding.js";
+import { memorySessionActorOwners } from "../config/sessions/session-actor-memory-owner.js";
+import { readSessionActorStorageResult } from "../config/sessions/session-actor-storage-result.js";
 import { CURRENT_SESSION_VERSION } from "../config/sessions/version.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
-import { captureOpenClawAgentDatabaseExecution } from "../state/openclaw-agent-execution.js";
+import { resolveIncognitoOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { reportGitHubPublicationTranscript } from "./github-publication-transcript.js";
@@ -39,25 +39,61 @@ afterEach(() => {
 });
 
 describe("GitHub publication transcript reporting", () => {
-  it("commits one bound private report before marking its publication receipt", async () => {
-    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-      const authority = { assertCurrent() {} };
-      const actor = await captureOpenClawAgentDatabaseExecution({
-        kind: "ephemeral",
-        agentId: "main",
-        env: state.env,
-        authority,
+  it("retires a delayed report after a reset keeps the session ID but rotates its lifecycle", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      setRuntimeConfigSnapshot({});
+      const identity = { agentId: "main", sessionKey: "agent:main:main", sessionId: "same-id" };
+      await upsertSessionEntryCore(identity, {
+        sessionId: identity.sessionId,
+        lifecycleRevision: "after-reset",
+        updatedAt: 1,
       });
-      assert(actor);
+      const markReportedAsync = vi.fn().mockResolvedValue(undefined);
+      await reportGitHubPublicationTranscript(
+        () => import("./session-utils.js"),
+        { markReportedAsync, readReportLifecycleAsync: async () => "before-reset" },
+        {
+          ...identity,
+          result: {
+            requestId: "delayed-before-reset",
+            status: "failed",
+            code: "push_rejected",
+            message: "Failed",
+            nextAction: "Retry",
+          },
+        },
+      );
+      expect(await loadTranscriptEvents(identity)).toEqual([]);
+      expect(markReportedAsync).toHaveBeenCalledWith("delayed-before-reset");
+    });
+  });
+  it("commits one memory-only private report before marking its publication receipt", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      const authority = { assertCurrent() {}, authorize() {} };
       const session = {
         agentId: "main",
         sessionKey: "agent:main:dashboard:incognito-publication-transcript",
         sessionId: "private-publication",
       };
-      await actor.sessions.create(authority, {
-        sessionKey: session.sessionKey,
-        entry: { sessionId: session.sessionId, updatedAt: Date.now() },
-      });
+      const location = {
+        agentId: session.agentId,
+        path: resolveIncognitoOpenClawAgentSqlitePath({ agentId: session.agentId, env: state.env }),
+      };
+      const owner = memorySessionActorOwners.get(location);
+      const actor = await owner.acquire(
+        { database: owner.identity, sessionKey: session.sessionKey },
+        { assertCurrent() {}, assertReadable() {} },
+      );
+      readSessionActorStorageResult(
+        await actor.storage!.mutate(
+          {
+            type: "session.entry.create",
+            input: { entry: { sessionId: session.sessionId, updatedAt: Date.now() } },
+          },
+          authority,
+        ),
+      );
+      await actor.release();
       const result = {
         requestId: "private-result",
         status: "published" as const,
@@ -72,38 +108,36 @@ describe("GitHub publication transcript reporting", () => {
       const markReportedAsync = vi.fn().mockResolvedValue(undefined);
       const sql = observeHostDataSql();
       try {
-        await withIncognitoSessionBinding({ actor }, async () => {
-          await reportGitHubPublicationTranscript(
-            loadRuntime,
-            { markReportedAsync },
-            { ...session, result },
-          );
-          await reportGitHubPublicationTranscript(
-            loadRuntime,
-            { markReportedAsync },
-            { ...session, result },
-          );
-          const events = await loadTranscriptEvents({
-            ...session,
-            storePath: actor.path,
-            env: state.env,
-          });
-          const reports = events.filter(
-            (event) =>
-              isRecord(event) &&
-              event.type === "message" &&
-              isRecord(event.message) &&
-              event.message.responseId === `github-publication:${result.requestId}`,
-          );
-          expect(reports).toHaveLength(1);
-          expect(JSON.stringify(reports[0])).toContain(result.url);
-          expect(markReportedAsync).toHaveBeenCalledTimes(2);
-          expect(loadRuntime).not.toHaveBeenCalled();
-          expect(sql.queries).toEqual([]);
+        await reportGitHubPublicationTranscript(
+          loadRuntime,
+          { markReportedAsync, readReportLifecycleAsync: async () => null },
+          { ...session, result },
+        );
+        await reportGitHubPublicationTranscript(
+          loadRuntime,
+          { markReportedAsync, readReportLifecycleAsync: async () => null },
+          { ...session, result },
+        );
+        const events = await loadTranscriptEvents({
+          ...session,
+          storePath: location.path,
+          env: state.env,
         });
+        const reports = events.filter(
+          (event) =>
+            isRecord(event) &&
+            event.type === "message" &&
+            isRecord(event.message) &&
+            event.message.responseId === `github-publication:${result.requestId}`,
+        );
+        expect(reports).toHaveLength(1);
+        expect(JSON.stringify(reports[0])).toContain(result.url);
+        expect(markReportedAsync).toHaveBeenCalledTimes(2);
+        expect(loadRuntime).not.toHaveBeenCalled();
+        expect(sql.queries).toEqual([]);
       } finally {
         sql.restore();
-        await actor.close();
+        memorySessionActorOwners.closeDatabase(location);
       }
     });
   });
@@ -242,7 +276,10 @@ describe("GitHub publication transcript reporting", () => {
         expect(encoded?.count).toBe(encoding === "compressed" ? 3 + beforeTail.length : 0);
         await reportGitHubPublicationTranscript(
           () => import("./session-utils.js"),
-          { markReportedAsync: vi.fn().mockResolvedValue(undefined) },
+          {
+            markReportedAsync: vi.fn().mockResolvedValue(undefined),
+            readReportLifecycleAsync: async () => null,
+          },
           { ...identity, result },
         );
         const reports = (await loadTranscriptEvents(identity)).filter(
@@ -277,7 +314,7 @@ describe("GitHub publication transcript reporting", () => {
         await expect(
           reportGitHubPublicationTranscript(
             () => import("./session-utils.js"),
-            { markReportedAsync },
+            { markReportedAsync, readReportLifecycleAsync: async () => null },
             {
               ...identity,
               result: {
@@ -329,7 +366,7 @@ describe("GitHub publication transcript reporting", () => {
         await expect(
           reportGitHubPublicationTranscript(
             () => import("./session-utils.js"),
-            { markReportedAsync },
+            { markReportedAsync, readReportLifecycleAsync: async () => null },
             { ...identity, result },
           ),
         ).rejects.toThrow("report insert failed");
@@ -340,7 +377,7 @@ describe("GitHub publication transcript reporting", () => {
       }
       await reportGitHubPublicationTranscript(
         () => import("./session-utils.js"),
-        { markReportedAsync },
+        { markReportedAsync, readReportLifecycleAsync: async () => null },
         { ...identity, result },
       );
       expect(markReportedAsync).toHaveBeenCalledOnce();
@@ -403,12 +440,12 @@ describe("GitHub publication transcript reporting", () => {
       const markReportedAsync = vi.fn().mockResolvedValue(undefined);
       await reportGitHubPublicationTranscript(
         () => import("./session-utils.js"),
-        { markReportedAsync },
+        { markReportedAsync, readReportLifecycleAsync: async () => null },
         { ...identity, result },
       );
       await reportGitHubPublicationTranscript(
         () => import("./session-utils.js"),
-        { markReportedAsync },
+        { markReportedAsync, readReportLifecycleAsync: async () => null },
         { ...identity, result },
       );
       expect(readEvidence().slice(0, before.length)).toEqual(before);
@@ -459,12 +496,12 @@ describe("GitHub publication transcript reporting", () => {
         const markReportedAsync = vi.fn().mockResolvedValue(undefined);
         await reportGitHubPublicationTranscript(
           () => import("./session-utils.js"),
-          { markReportedAsync },
+          { markReportedAsync, readReportLifecycleAsync: async () => null },
           { sessionId, sessionKey, agentId: "main", result },
         );
         await reportGitHubPublicationTranscript(
           () => import("./session-utils.js"),
-          { markReportedAsync },
+          { markReportedAsync, readReportLifecycleAsync: async () => null },
           { sessionId, sessionKey, agentId: "main", result },
         );
 

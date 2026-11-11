@@ -8,6 +8,7 @@ import {
   dockerReleaseArtifactName,
   preparedDockerEvidenceFromFullRelease,
   publishDockerRelease,
+  readDockerGithubJson,
   sealDockerRelease,
   validateDockerReleaseIdentity,
   validateDockerReleaseManifest,
@@ -149,6 +150,13 @@ async function createPreparedRelease(includeBrowser = true, version = "2026.8.1-
     conclusion: "success",
     head_sha: toolingSha,
   };
+  const architectureJobs = ["amd64", "arm64"].map((architecture, index) =>
+    Object.assign({}, job, {
+      id: 20 + index,
+      name: `Prepare Docker / Prepare Docker images (${architecture})`,
+      check_run_url: `https://api.github.com/repos/${repository}/check-runs/${20 + index}`,
+    }),
+  );
   const run = {
     id: Number(runId),
     run_attempt: Number(runAttempt),
@@ -179,17 +187,24 @@ async function createPreparedRelease(includeBrowser = true, version = "2026.8.1-
     if (endpoint.endsWith("/actions/jobs/7")) {
       return job;
     }
+    const architectureJob = architectureJobs.find((candidate) =>
+      endpoint.endsWith(`/actions/jobs/${candidate.id}`),
+    );
+    if (architectureJob) {
+      return architectureJob;
+    }
     if (endpoint.includes("/jobs?")) {
       return {
         jobs: [
           job,
+          ...architectureJobs,
           {
             ...job,
             id: 8,
             check_run_url: `https://api.github.com/repos/${repository}/check-runs/8`,
           },
         ],
-        total_count: 2,
+        total_count: 4,
       };
     }
     if (endpoint.endsWith(`/actions/runs/${runId}/attempts/${runAttempt}`)) {
@@ -375,6 +390,57 @@ function registryWrites(calls: string[][]) {
 }
 
 describe("prepared Docker publication", () => {
+  it("retries transient GitHub 5xx identity reads with a fresh request", () => {
+    const responses = [new Error("gh: Server Error (HTTP 502)"), '{"head_sha":"fresh"}'];
+    const runCommand = vi.fn(() => {
+      const response = responses.shift();
+      if (response instanceof Error) {
+        throw response;
+      }
+      return response!;
+    });
+    const sleep = vi.fn();
+
+    expect(
+      readDockerGithubJson("repos/openclaw/openclaw/actions/runs/100", {
+        runCommand,
+        sleep,
+        retryDelaysMs: [25],
+      }),
+    ).toEqual({ head_sha: "fresh" });
+    expect(runCommand).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(25);
+  });
+
+  it("does not retry Docker identity reads after an authorization failure", () => {
+    const failure = new Error("gh: Resource not accessible by integration (HTTP 403)");
+    const runCommand = vi.fn(() => {
+      throw failure;
+    });
+
+    expect(() =>
+      readDockerGithubJson("repos/openclaw/openclaw/actions/runs/100", {
+        runCommand,
+        sleep: vi.fn(),
+        retryDelaysMs: [0],
+      }),
+    ).toThrow(failure);
+    expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry an invalid Docker identity response", () => {
+    const runCommand = vi.fn(() => "not-json");
+
+    expect(() =>
+      readDockerGithubJson("repos/openclaw/openclaw/actions/runs/100", {
+        runCommand,
+        sleep: vi.fn(),
+        retryDelaysMs: [0],
+      }),
+    ).toThrow(SyntaxError);
+    expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false])(
     "publishes authenticated candidate bytes with original-attempt recovery=%s",
     async (recovered) => {
@@ -774,8 +840,7 @@ describe("prepared Docker publication", () => {
         { preparedRunId: "0" },
         { preparedRunAttempt: 2 },
         { preparedRunAttempt: "0" },
-        { preparedRunAttempt: "1" },
-        { preparedArtifactName: dockerReleaseArtifactName(sourceSha, "3") },
+        { preparedArtifactName: dockerReleaseArtifactName(toolingSha, "3") },
         { preparedManifestSha256: "invalid" },
       ]) {
         expect(() =>

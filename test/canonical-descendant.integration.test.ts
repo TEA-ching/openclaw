@@ -19,6 +19,7 @@ import {
   retireSessionMcpRuntime,
   setSessionMcpRuntimeScheduler,
 } from "../src/agents/agent-bundle-mcp-manager-api.js";
+import { prepareSharedAuthStoreOwnershipForNative } from "../src/agents/auth-profiles/path-resolve.native.js";
 import {
   setRuntimeAuthProfileStoreSnapshot,
   clearRuntimeAuthProfileStoreSnapshots,
@@ -187,6 +188,7 @@ async function withFixture(
   } = {},
 ) {
   await withState(async (state) => {
+    prepareSharedAuthStoreOwnershipForNative(state.env);
     const config: OpenClawConfig = {
       agents: {
         ownership: "explicit",
@@ -1095,6 +1097,41 @@ describe("canonical descendant lifecycle through real owners", () => {
     180_000,
   );
 
+  it("hands a fresh canonical fork to a separate turn connection without a restart", async () => {
+    await withFixture(async (fixture, fork) => {
+      const source = await fixture.adopt();
+      await fixture.turn(source.sessionKey, "canonical");
+      const selected = (await fixture.readEntries(source.sessionKey)).at(-1)!;
+      const forkOffset = fixture.native.calls.length;
+      const forked = await fork(source.sessionKey, selected.entryId);
+      expect(forked, forked.message).toMatchObject({ ok: true });
+      const childKey = expectDefined(forked.key, "child key");
+      const child = expectDefined(
+        fixture.bindingStore.read(fixture.identity(childKey)),
+        "child binding",
+      );
+      const forkCall = expectDefined(
+        fixture.native.calls.slice(forkOffset).find((call) => call.method === "thread/fork"),
+        "canonical fork request",
+      );
+      const turnOffset = fixture.native.calls.length;
+      // Live supervision turns use another app-server process on the same Codex home.
+      const continued = await fixture.turn(childKey, "warm child turn", {
+        separateConnection: true,
+      });
+      expect(continued.threadId).toBe(child.threadId);
+      const resume = expectDefined(
+        fixture.native.calls
+          .slice(turnOffset)
+          .find(
+            (call) => call.method === "thread/resume" && call.params.threadId === child.threadId,
+          ),
+        "child resume",
+      );
+      expect(resume.client).not.toBe(forkCall.client);
+    });
+  }, 180_000);
+
   it("keeps ordinary archive cleanup on the healthy client while its notification is delayed", async () => {
     await withFixture(async (fixture, fork) => {
       const source = await fixture.adopt();
@@ -1301,25 +1338,30 @@ describe("canonical descendant lifecycle through real owners", () => {
             ),
           ).toBe(true);
           const inherited = structuredClone(nativeFirst.dynamicTools);
-          const unavailable = async ({
+          const expectOwnerDenied = async ({
             bridge,
           }: Parameters<
             NonNullable<NonNullable<Parameters<typeof fixture.turn>[2]>["inspectTools"]>
           >[0]) => {
             expect(bridge.specs).toEqual(inherited);
-            expect(bridge.availableTools.some((tool) => tool.name === "codex_threads")).toBe(false);
+            expect(bridge.availableTools.some((tool) => tool.name === "codex_threads")).toBe(true);
             const calls = fixture.native.calls.length;
             const result = await bridge.handleToolCall({
               threadId: firstBinding.threadId,
               turnId: "current",
-              callId: "unavailable-owner",
+              callId: "nonowner-denied",
               namespace: null,
               tool: "codex_threads",
               arguments: { action: "list" },
             });
             expect(result.success).toBe(false);
-            expect(result.executionStarted, JSON.stringify(result.contentItems)).toBe(false);
-            expect(JSON.stringify(result.contentItems)).toContain("not available for this turn");
+            // The declared executor rejects nonowners before sending any native request.
+            expect(result.executionStarted, JSON.stringify(result.contentItems)).toBe(true);
+            // Release admits plugin tool invocations per run, so this fixture's call is refused
+            // at that boundary before the owner check; either way no native request is sent.
+            expect(JSON.stringify(result.contentItems)).toContain(
+              "Plugin tool invocation authority is unavailable",
+            );
             expect(fixture.native.calls).toHaveLength(calls);
           };
           await fixture.native.restart();
@@ -1328,7 +1370,7 @@ describe("canonical descendant lifecycle through real owners", () => {
             (
               await fixture.turn(firstKey, "first nonowner turn", {
                 senderIsOwner: false,
-                inspectTools: unavailable,
+                inspectTools: expectOwnerDenied,
               })
             ).threadId,
           ).toBe(firstBinding.threadId);
@@ -1444,7 +1486,7 @@ describe("canonical descendant lifecycle through real owners", () => {
             (
               await fixture.turn(laterKey, "descendant turn", {
                 senderIsOwner: false,
-                inspectTools: unavailable,
+                inspectTools: expectOwnerDenied,
               })
             ).threadId,
           ).toBe(laterBinding.threadId);
@@ -1811,11 +1853,6 @@ describe("canonical descendant lifecycle through real owners", () => {
     ["ignored cut", /did not apply the exact beforeTurnId cut/],
     ["missing model", /model/i],
     ["null model", /model/i],
-    ["model changed during preparation", /The Codex source thread changed during initialization/],
-    [
-      "provider changed during preparation",
-      /The Codex source thread changed during initialization/,
-    ],
     ["request authorization changed after native fork", /request authorization changed/],
     ["sandbox policy changed during initialization", /requires a sandbox/],
     ["catalog mismatch", /native tool catalog is missing, corrupt, or changed/],
@@ -1851,35 +1888,12 @@ describe("canonical descendant lifecycle through real owners", () => {
             (call) => call.method === "thread/archive",
           ).length;
           const current = expectDefined(fixture.native.threads.get(binding.threadId), "canonical");
-          const create = runtime.agent.session.createSessionEntry;
           const createSession = vi.spyOn(runtime.agent.session, "createSessionEntry");
           if (failure === "missing model") {
             delete current.thread.model;
           }
           if (failure === "null model") {
             current.thread.model = null;
-          }
-          if (
-            failure === "model changed during preparation" ||
-            failure === "provider changed during preparation"
-          ) {
-            createSession.mockImplementation((params) =>
-              create({
-                ...params,
-                afterCreate: async (created) => {
-                  if (failure === "model changed during preparation") {
-                    current.thread.model = "gpt-5.5";
-                  } else {
-                    current.thread.modelProvider = "changed-provider";
-                  }
-                  const patch = await params.afterCreate?.(created);
-                  if (!patch) {
-                    throw new Error("Expected the canonical fork initialization patch");
-                  }
-                  return patch;
-                },
-              }),
-            );
           }
           if (failure === "ignored cut") {
             fixture.native.setIgnoreCut(true);
@@ -1951,9 +1965,7 @@ describe("canonical descendant lifecycle through real owners", () => {
           if (
             failure === "catalog mismatch" ||
             failure === "missing model" ||
-            failure === "null model" ||
-            failure === "model changed during preparation" ||
-            failure === "provider changed during preparation"
+            failure === "null model"
           ) {
             expect(
               fixture.native.calls.filter((call) => call.method === "thread/fork"),

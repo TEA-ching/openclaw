@@ -28,10 +28,17 @@ import {
   claimPreparedSessionTranscriptProjectionInTransaction,
   deletePreparedSessionTranscriptProjectionChunkInTransaction,
   finalizePreparedSessionTranscriptProjectionInTransaction,
-  prepareSessionTranscriptProjection,
+  prepareSessionTranscriptProjection as prepareStreamingProjection,
 } from "./session-transcript-projection-rebuild.js";
 import { createTranscriptEventInserter } from "./transcript-payload.js";
 import { deriveTranscriptPredicateFields } from "./transcript-predicate-fields.js";
+
+function prepareSessionTranscriptProjection(
+  ...args: Parameters<typeof prepareStreamingProjection>
+) {
+  const plan = prepareStreamingProjection(...args);
+  return plan ? { ...plan, ftsRows: [...plan.ftsRows] } : undefined;
+}
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => {
@@ -291,11 +298,9 @@ describe("exact session transcript FTS ownership", () => {
           db.exec("BEGIN");
           const result = deletePreparedSessionTranscriptProjectionChunkInTransaction(db, {
             sessionId: "target",
-            claimId,
             maxRowsPerTable: 2,
           });
           more = result.hasMore;
-          expect(result.owned).toBe(true);
           db.exec("COMMIT");
           expectMapped(
             db,
@@ -303,14 +308,11 @@ describe("exact session transcript FTS ownership", () => {
           );
         }
         db.exec("BEGIN");
-        expect(
-          appendPreparedSessionTranscriptProjectionChunkInTransaction(db, {
-            sessionId: "target",
-            claimId,
-            activeRows: claimId === -1 ? [] : plan.activeRows,
-            ftsRows: claimId === -1 ? plan.ftsRows.slice(0, 1) : plan.ftsRows,
-          }),
-        ).toBe(true);
+        appendPreparedSessionTranscriptProjectionChunkInTransaction(db, {
+          sessionId: "target",
+          activeRows: claimId === -1 ? [] : plan.activeRows,
+          ftsRows: claimId === -1 ? plan.ftsRows.slice(0, 1) : plan.ftsRows,
+        });
         if (claimId === -2) {
           expect(finalizePreparedSessionTranscriptProjectionInTransaction(db, plan, claimId)).toBe(
             true,

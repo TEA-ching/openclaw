@@ -49,6 +49,7 @@ print_release_resume_command() {
   inputs_json="$(jq -ce '.inputs | select(type == "object")' "$GITHUB_EVENT_PATH")" || return 1
   printf -v command 'printf %%s %q | gh workflow run openclaw-release-publish.yml --repo %q --ref %q --json' \
     "$inputs_json" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+  printf 'Release recovery command:\n%s\n' "$command"
   {
     printf '\n### Resume publication\n\n'
     printf 'Prepared button releases recover through a new Release Button run with the same prepared artifact. For direct publication, reconcile failed stages, then resume with these frozen inputs; the original successful npm publisher is recovered automatically.\n\n'
@@ -117,6 +118,9 @@ cleanup_clawhub_children() {
     [[ -n "$run_id" ]] || continue
     run_json="$(gh_read api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")" || { failed=1; continue; }
     [[ "$(jq -r '.status' <<< "$run_json")" != completed ]] || continue
+    # A cancel request does not end a job waiting on an environment gate
+    # (Plugin ClawHub New's clawhub-plugin-bootstrap); reject it first.
+    reject_pending_deployments "$run_id"
     if ! gh run cancel --repo "$GITHUB_REPOSITORY" "$run_id"; then
       echo "::warning::Could not cancel ClawHub child ${run_id}; inspect https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}." >&2
       failed=1
@@ -923,7 +927,7 @@ dispatch_linux_mirror() {
     --release-publish-run-id "$parent_run" --release-publish-run-attempt "$parent_attempt" \
     --release-publish-ref "$parent_ref" --release-publish-full-ref "$parent_full_ref" \
     --release-publish-parent-state-policy active-or-success || return 1
-  mirror_run_id="$(dispatch_workflow_at_ref "$parent_ref" "$parent_sha" linux-app-release.yml \
+  mirror_run_id="$(dispatch_workflow_at_ref "$parent_ref" "$parent_sha" linux-app-mirror.yml \
     -f release_tag="$RELEASE_TAG" -f source_sha="$TARGET_SHA" -f tooling_sha="$parent_sha" \
     -f release_publish_run_id="$parent_run" -f release_publish_run_attempt="$parent_attempt")" || return 1
   jq --arg runId "$mirror_run_id" '. + {state: "dispatched", childRunId: $runId}' \
@@ -946,7 +950,7 @@ NODE
   if [[ "${release_train}" != "stable" || "${RELEASE_NPM_DIST_TAG}" == "extended-stable" ]]; then
     return 0
   fi
-  jq -n --arg tag "$RELEASE_TAG" '{tag: $tag, state: "dispatch-unconfirmed"}' \
+  jq -n --arg tag "$RELEASE_TAG" --arg sourceSha "$TARGET_SHA" '{tag: $tag, sourceSha: $sourceSha, state: "dispatch-unconfirmed"}' \
     > "$RUNNER_TEMP/linux-dispatch.json"
   release_json="$(gh_read release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)" || return 1
   if ! jq -e '.isDraft == false and .isPrerelease == false' <<< "$release_json" >/dev/null; then
@@ -960,7 +964,7 @@ NODE
   if [[ "$(jq -er '.state' <<< "$publication_state")" == published &&
         "$(jq -r '.needsUpdaterPublication' <<< "$publication_state")" != true &&
         "$(jq -r '.needsChannelPublication' <<< "$publication_state")" == false ]]; then
-    jq -n --arg tag "$RELEASE_TAG" '{tag: $tag, state: "published-assets-reused"}' \
+    jq -n --arg tag "$RELEASE_TAG" --arg sourceSha "$TARGET_SHA" '{tag: $tag, sourceSha: $sourceSha, state: "published-assets-reused"}' \
       > "$RUNNER_TEMP/linux-dispatch.json"
     echo "- Linux: existing same-tag AppImage, Debian package, signed updater manifest, and checksums verified; no build requested." >> "$GITHUB_STEP_SUMMARY"
     return 0
@@ -981,8 +985,8 @@ NODE
   done
   if [[ -n "$existing_request" ]]; then
     request_run_id="$(jq -r '.id' <<< "$existing_request")"
-    jq --arg tag "$RELEASE_TAG" \
-      '{tag: $tag, state: "request-reused", requestRunId: (.id | tostring), workflowSha: .head_sha}' \
+    jq --arg tag "$RELEASE_TAG" --arg sourceSha "$TARGET_SHA" \
+      '{tag: $tag, sourceSha: $sourceSha, state: "request-reused", requestRunId: (.id | tostring), requestRunAttempt: (.run_attempt | tostring), workflowSha: .head_sha}' \
       <<< "$existing_request" > "$RUNNER_TEMP/linux-dispatch.json"
     echo "- Linux: existing same-tag request reused; no duplicate build requested. Request: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${request_run_id}; inspect Linux App Release for publication status and recovery." >> "$GITHUB_STEP_SUMMARY"
     return 0
@@ -994,10 +998,10 @@ NODE
   # validates the title, exact main SHA, release ancestry, and signing trust.
   request_run_id="$(dispatch_workflow_at_ref main "$workflow_sha" linux-app-release-request.yml \
     -f tag="$RELEASE_TAG" -f desktop-test-bundles=false)" || return 1
-  jq -n --arg tag "$RELEASE_TAG" --arg requestRunId "$request_run_id" --arg workflowSha "$workflow_sha" \
-    '{tag: $tag, state: "request-dispatched", requestRunId: $requestRunId, workflowSha: $workflowSha}' \
+  jq -n --arg tag "$RELEASE_TAG" --arg sourceSha "$TARGET_SHA" --arg requestRunId "$request_run_id" --arg workflowSha "$workflow_sha" \
+    '{tag: $tag, sourceSha: $sourceSha, state: "request-dispatched", requestRunId: $requestRunId, requestRunAttempt: "1", workflowSha: $workflowSha}' \
     > "$RUNNER_TEMP/linux-dispatch.json"
-  echo "- Linux: request dispatched; release processing is pending and verified existing bundles will be reused. Request: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${request_run_id}; publication: https://github.com/${GITHUB_REPOSITORY}/actions/workflows/linux-app-release.yml" >> "$GITHUB_STEP_SUMMARY"
+  echo "- Linux: dispatched, awaiting builder admission; release processing is pending and verified existing bundles will be reused. Request: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${request_run_id}; publication: https://github.com/${GITHUB_REPOSITORY}/actions/workflows/linux-app-release.yml" >> "$GITHUB_STEP_SUMMARY"
 }
 
 promote_windows_release_assets() {

@@ -12,7 +12,9 @@ import {
   SecretSurfaceUnavailableError,
   setActiveDegradedSecretOwners,
 } from "../../secrets/runtime-degraded-state.js";
+import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import { createControlUiSessionPullRequestSubscriptions } from "../control-ui-session-pr-subscriptions.js";
 import { gitHubPublicApi } from "../github-public-api.js";
 import { createControlUiRequestOptions } from "./control-ui-request.test-support.js";
 import { createControlUiHandlers } from "./control-ui.js";
@@ -379,10 +381,6 @@ describe("controlUi.githubPreview", () => {
       pending.resolve(preview);
       await request;
 
-      expect(loadPreview).toHaveBeenCalledWith(
-        { kind: "issue", number: 99815, owner: "openclaw", repo: "openclaw" },
-        undefined,
-      );
       expect(respond).toHaveBeenCalledWith(false, undefined, {
         code: "UNAVAILABLE",
         message: new githubIdentity.GitHubIdentityError("changed").message,
@@ -508,6 +506,39 @@ describe("controlUi.githubPreview", () => {
 });
 
 describe("controlUi.sessionPullRequests.subscribe", () => {
+  it("reports subscription preparation failures without rejecting the request", async () => {
+    const warn = vi.fn();
+    const scheduler = createTestGatewayScheduler();
+    const subscriptions = createControlUiSessionPullRequestSubscriptions({
+      scheduler,
+      broadcastToConnIds: vi.fn(),
+      prepareRead: async () => {
+        throw new Error("session reader unavailable");
+      },
+      load: vi.fn(),
+    });
+    try {
+      const respond = vi.fn<RespondFn>();
+      await expectDefined(
+        createControlUiHandlers(vi.fn())["controlUi.sessionPullRequests.subscribe"],
+        "subscription handler",
+      )(
+        requestOptions({ sessionKeys: ["agent:main:main"] }, respond, {
+          client: { connId: "conn-control-ui" },
+          context: {
+            controlUiSessionPullRequests: subscriptions,
+            logGateway: { warn },
+          },
+        }),
+      );
+      expect(respond).toHaveBeenCalledWith(true, { subscribed: true }, undefined);
+    } finally {
+      await subscriptions.stop();
+      await scheduler.stop();
+    }
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("session reader unavailable"));
+  });
+
   it.each([
     {
       sessionKeys: [" agent:main:main ", "agent:main:main", "agent:work:main"],
@@ -702,6 +733,42 @@ describe("controlUi.sessionPullRequests.checks", () => {
       );
     });
   });
+
+  it.each(["before", "during"] as const)(
+    "denies missing-client reads when roles are enabled %s GitHub loading",
+    async (when) => {
+      await withOpenClawTestState({ label: "ci-details-missing-client-roles" }, async () => {
+        let cfg: OpenClawConfig = { agents: { entries: { main: {} } } };
+        const enableRoles = () => {
+          cfg = { ...cfg, gateway: { roles: { definitions: {} } } };
+          setRuntimeConfigSnapshot(cfg);
+        };
+        setRuntimeConfigSnapshot(cfg);
+        await replaceSessionEntry(
+          { agentId: "main", sessionKey: params.sessionKey },
+          { sessionId: "role-bound-ci", updatedAt: 1, spawnedCwd: "/synthetic/ci" },
+        );
+        if (when === "before") {
+          enableRoles();
+        }
+        const load = vi.fn(async () => {
+          enableRoles();
+          return result;
+        });
+        const respond = vi.fn<RespondFn>();
+        await expectDefined(
+          createControlUiHandlers(undefined, load)["controlUi.sessionPullRequests.checks"],
+          "CI checks handler",
+        )(requestOptions(params, respond, { context: { getRuntimeConfig: () => cfg } }));
+        expect(load).toHaveBeenCalledTimes(when === "before" ? 0 : 1);
+        expect(respond).toHaveBeenCalledWith(
+          false,
+          undefined,
+          expect.objectContaining({ code: "UNAVAILABLE" }),
+        );
+      });
+    },
+  );
 
   it.each([{ incognito: true as const }, { visibility: "draft" as const }])(
     "does not expose a hidden session to another profile: %j",

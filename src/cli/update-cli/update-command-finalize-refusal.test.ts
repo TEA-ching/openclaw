@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi, type MockInstance } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import * as doctorMaintenance from "../../commands/doctor-maintenance.js";
 import { GatewayServiceStopUnsafeError } from "../../daemon/service-inspection-error.js";
 import {
   readDeferredPluginMigrations,
@@ -289,28 +290,37 @@ it.each([true, false])(
   },
 );
 
-it("keeps deferred finalization successful for an inherited update driver", async () => {
-  const run = createUpdateRun({ trigger: "cli" });
-  adoptUpdateRun(run.runId);
-  vi.stubEnv("OPENCLAW_UPDATE_RUN_ID", run.runId);
-  vi.mocked(freshDoctor.runUpdateFinalizationDoctorInFreshProcess).mockRejectedValueOnce(
-    new DoctorMaintenanceRefusalError("Synthetic maintenance contention", {
-      kind: "deferred",
-      reason: "coordinator-contention",
-    }),
-  );
+it.each(["coordinator-contention", "admission-unavailable"] as const)(
+  "keeps deferred finalization successful for an inherited update driver (%s)",
+  async (reason) => {
+    const run = createUpdateRun({ trigger: "cli" });
+    adoptUpdateRun(run.runId);
+    vi.stubEnv("OPENCLAW_UPDATE_RUN_ID", run.runId);
+    vi.mocked(freshDoctor.runUpdateFinalizationDoctorInFreshProcess).mockRejectedValueOnce(
+      new DoctorMaintenanceRefusalError("Synthetic maintenance contention", {
+        kind: "deferred",
+        reason,
+      }),
+    );
 
-  await expect(
-    updateFinalizeCommand({ json: true, yes: true, deferCompletionCache: true }),
-  ).resolves.toBeUndefined();
+    await expect(
+      updateFinalizeCommand({ json: true, yes: true, deferCompletionCache: true }),
+    ).resolves.toBeUndefined();
 
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({ status: "warning" }),
-  );
-  expect(getUpdateRun(run.runId)?.status).toBe("running");
-  expect(readDeferredPluginMigrations()).toEqual([pending]);
-  expect(plugins.updatePluginsAfterCoreUpdate).not.toHaveBeenCalled();
-});
+    expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "warning",
+        nextAction: expect.stringContaining("openclaw update repair"),
+        postUpdate: { doctor: { status: "warning", warnings: expect.any(Array) } },
+      }),
+    );
+    expect(verifyUpdateFailureRecovery).not.toHaveBeenCalled();
+    expect(getUpdateRun(run.runId)?.verification.rollbackOutcome).toBeUndefined();
+    expect(getUpdateRun(run.runId)?.status).toBe("running");
+    expect(readDeferredPluginMigrations()).toEqual([pending]);
+    expect(plugins.updatePluginsAfterCoreUpdate).not.toHaveBeenCalled();
+  },
+);
 
 it.each([
   ["stop", false],
@@ -429,5 +439,54 @@ it.each([
         expect(run.verification.readyz).not.toBe(true);
       }
     }
+  },
+);
+
+it.each([false, true])(
+  "parks the managed Gateway before repairing source artifacts (stop refusal=%s)",
+  async (failStop) => {
+    // Keep wall-clock deadlines aligned with the controlled monotonic budget.
+    const startedAt = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => startedAt + native.elapsedMs);
+    native.contend = false;
+    native.failStop = failStop;
+    const maintenance = vi.spyOn(doctorMaintenance, "beginDoctorMaintenance");
+    let runtimeStartedAt = 0;
+    let runtimeTimeoutMs = 0;
+    vi.mocked(updateCheck.resolveUpdateInstallKind).mockResolvedValue("git");
+    const afterPublication = new Error("Synthetic Doctor failure after runtime publication");
+    vi.spyOn(sourceRuntime, "completeSourceUpdateRuntime").mockImplementationOnce(
+      async ({ beforePublication, timeoutMs }) => {
+        runtimeStartedAt = Date.now();
+        runtimeTimeoutMs = timeoutMs;
+        await beforePublication?.();
+        if (!native.stopped) {
+          throw new Error("Runtime artifacts require an offline Gateway");
+        }
+        native.events.push("publish");
+        return { changed: true };
+      },
+    );
+    vi.mocked(freshDoctor.runUpdateFinalizationDoctorInFreshProcess).mockRejectedValueOnce(
+      afterPublication,
+    );
+
+    await expect(
+      updateRepairCommand({ json: true, yes: true, deferCompletionCache: true, timeout: "3600" }),
+    ).rejects.toThrow(
+      failStop ? "An admitted migration write is incomplete." : afterPublication.message,
+    );
+    expect(native.events).toEqual(
+      failStop
+        ? ["running-holder"]
+        : ["running-holder", "stop-verified", "publish", "restart", "restart-verified"],
+    );
+    expect(freshDoctor.runUpdateFinalizationDoctorInFreshProcess).toHaveBeenCalledTimes(
+      failStop ? 0 : 1,
+    );
+    expect(maintenance).toHaveBeenCalledTimes(1);
+    const inspectionDeadline = maintenance.mock.calls[0]?.[0].serviceInspectionDeadlineAtMs;
+    expect(inspectionDeadline).toBeGreaterThan(runtimeStartedAt);
+    expect(inspectionDeadline).toBeLessThanOrEqual(runtimeStartedAt + runtimeTimeoutMs);
   },
 );

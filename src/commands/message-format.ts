@@ -1,8 +1,8 @@
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { asOptionalObjectRecord, isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
+import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
 import {
   getTerminalTableWidth,
-  renderTable,
   renderTerminalSafeTable,
 } from "../../packages/terminal-core/src/table.js";
 import { isRich, theme } from "../../packages/terminal-core/src/theme.js";
@@ -61,7 +61,7 @@ function renderSummaryValue(value: unknown): string {
 
 function renderObjectSummary(payload: unknown, opts: FormatOpts): string {
   if (!payload || typeof payload !== "object") {
-    return String(payload);
+    return sanitizeTerminalText(String(payload));
   }
   const obj = payload as Record<string, unknown>;
   const keys = Object.keys(obj);
@@ -73,7 +73,7 @@ function renderObjectSummary(payload: unknown, opts: FormatOpts): string {
     const value = renderSummaryValue(obj[k]);
     return { Key: k, Value: shortenText(value, 96) };
   });
-  return renderTable({
+  return renderTerminalSafeTable({
     width: opts.width,
     columns: [
       { key: "Key", header: "Key", minWidth: 16 },
@@ -97,11 +97,19 @@ function renderMessageList(
     >;
     const id = firstNonemptyString(msg, "id", "ts", "messageId");
     const authorObj = msg.author as Record<string, unknown> | undefined;
-    const author =
+    let author =
       firstNonemptyString(msg, "authorTag") ||
       firstNonemptyString(authorObj, "username") ||
       firstNonemptyString(msg, "user");
-    const time = firstNonemptyString(msg, "timestamp", "ts");
+    if (!author) {
+      const from = asOptionalObjectRecord(msg.from);
+      author = firstNonemptyString(
+        asOptionalObjectRecord(from?.user ?? from?.application),
+        "displayName",
+        "id",
+      );
+    }
+    const time = firstNonemptyString(msg, "timestamp", "ts", "createdAt");
     const text = firstNonemptyString(msg, "content", "text");
     return {
       Time: shortenText(time, 28),
@@ -222,9 +230,18 @@ export function formatMessageCliText(
   opts?: { displayLimit?: number },
 ): string[] {
   const rich = isRich();
-  const ok = (text: string) => (rich ? theme.success(text) : text);
-  const fail = (text: string) => (rich ? theme.error(text) : text);
-  const muted = (text: string) => (rich ? theme.muted(text) : text);
+  const ok = (text: string) => {
+    const safeText = sanitizeTerminalText(text);
+    return rich ? theme.success(safeText) : safeText;
+  };
+  const fail = (text: string) => {
+    const safeText = sanitizeTerminalText(text);
+    return rich ? theme.error(safeText) : safeText;
+  };
+  const muted = (text: string) => {
+    const safeText = sanitizeTerminalText(text);
+    return rich ? theme.muted(safeText) : safeText;
+  };
   const heading = (text: string) => (rich ? theme.heading(text) : text);
 
   const width = getTerminalTableWidth();
@@ -254,7 +271,7 @@ export function formatMessageCliText(
     );
     return [
       headingLine,
-      renderTable({
+      renderTerminalSafeTable({
         width: formatOpts.width,
         columns: [
           { key: "Channel", header: "Channel", minWidth: 10 },
@@ -328,10 +345,16 @@ export function formatMessageCliText(
 
   if (result.action === "read" || result.action === "list-pins") {
     const read = result.action === "read";
-    const messages =
+    let messages =
       payload && typeof payload === "object"
         ? (payload as { messages?: unknown; pins?: unknown })[read ? "messages" : "pins"]
         : undefined;
+    if (read && !Array.isArray(messages)) {
+      const message = asOptionalObjectRecord(payload)?.message;
+      if (message && typeof message === "object") {
+        messages = [message];
+      }
+    }
     if (Array.isArray(messages)) {
       const table = renderMessageList(
         messages,
@@ -350,7 +373,13 @@ export function formatMessageCliText(
 
   if (result.action === "search") {
     const results = (payload as { results?: unknown }).results;
-    const list = extractDiscordSearchResultsMessages(results);
+    let list = extractDiscordSearchResultsMessages(results);
+    if (list === null) {
+      const messages = asOptionalObjectRecord(payload)?.messages;
+      if (Array.isArray(messages)) {
+        list = messages;
+      }
+    }
     if (list) {
       const lines = [heading("Search results"), renderMessageList(list, formatOpts, "No results.")];
       // Discord's approximate result count cannot prove another page exists.

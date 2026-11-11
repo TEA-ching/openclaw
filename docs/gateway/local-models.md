@@ -284,6 +284,17 @@ If the model loads cleanly but full agent turns misbehave, check transport first
 
 5. **Inspect the failing request and server logs.** Check the chat template, context window, memory pressure, and server errors. A successful text-only check does not prove that the model can reliably complete a multi-step agent task.
 
+## Output budgets
+
+OpenClaw sends the resolved model output limit to local model servers. Native
+Ollama receives it as `num_predict`; explicit request `maxTokens` takes precedence
+over authored `params.num_predict`, which takes precedence over the model cap.
+Discovered local Ollama models default to half of the 32,768-token local context
+cap (16,384 output tokens), or less for smaller windows. Ollama Cloud models keep
+their known output limits, or their context window if no separate limit is known.
+Set `params: { num_predict: -1 }` to request unlimited generation; an explicit
+request output cap still wins.
+
 ## Troubleshooting
 
 - **Gateway can't reach the proxy?** `curl http://127.0.0.1:1234/v1/models`.
@@ -309,6 +320,8 @@ Lean mode is an advanced troubleshooting override that explicitly restricts capa
 Setup no longer writes this flag. For older installations, `openclaw doctor --fix` removes an onboarding-owned `true` when its ownership marker still matches the default model. Explicit settings and settings with stale ownership markers are preserved. Set a retained flag to `false` to restore optional capabilities; automatic Tool Search still applies to local routes.
 
 If you already tune Tool Search globally, OpenClaw leaves that config alone. Set `tools.toolSearch: false` to opt out of the lean-mode Tool Search default.
+
+Lean Tool Search directories list tool names and owners without descriptions. Full descriptions and schemas remain available through Tool Search. Removing optional tools therefore cannot expand the remaining directory descriptions. Lean mode keeps the ordinary system instructions, skills, and workspace context.
 
 In structured `tools` mode, lean runs keep `exec` directly visible beside the Tool Search controls so coding-tuned local models can still choose their familiar shell path. This changes schema visibility only: normal tool policy, sandboxing, and exec approvals still apply. Explicit `code` and `directory` modes keep their normal compaction behavior.
 
