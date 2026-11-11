@@ -46,7 +46,7 @@ Then, without hand work:
 
 - `ui/src/i18n/.i18n/*`, `*/package.json` version bumps, `CHANGELOG*`: take upstream.
 - `pnpm-lock.yaml`: take upstream, then `pnpm install --lockfile-only --ignore-scripts`
-  (re-adds our `extensions/poolside` importer).
+  (re-adds our `extensions/vibe` importer).
 - A file deleted upstream that the fork only version-bumped (`apps/mobile/version.json`): delete it.
 
 Hand work is the customization list below. When upstream refactored a file we
@@ -58,7 +58,7 @@ old file (e.g. exa's `shared.ts` was merged into `exa-web-search-provider.ts`).
 ```sh
 pnpm install --ignore-scripts --frozen-lockfile
 pnpm tsgo:core && pnpm tsgo:extensions && pnpm tsgo:ui
-pnpm exec vitest run extensions/{exa,elevenlabs,firecrawl,mistral,cohere,poolside,acpx,openrouter} \
+pnpm exec vitest run extensions/{exa,elevenlabs,firecrawl,mistral,cohere,vibe,acpx,openrouter} \
   src/gateway/server-methods-list.test.ts src/gateway/server-http.probe.test.ts \
   src/agents/model-auth-env packages/ai/src/transports
 ```
@@ -109,7 +109,6 @@ Keys are populated at container start by `scripts/resolve-keypool-vault.mjs` (pa
 | Firecrawl        | `extensions/firecrawl/src/*` (`FIRECRAWL_API_KEYS`)                                                                                                                                                                                                                                                          |
 | ElevenLabs       | `extensions/elevenlabs/api-key-fallback.ts`, `tts.ts` (`*WithRotation`), `media-understanding-provider.ts`, `speech-provider-factory.ts`. The profile-file key fallback is deliberately out of `config-compat.ts` (keeps the doctor-contract closure free of `provider-auth-runtime`, which pulls in execa). |
 | OpenRouter       | `extensions/openrouter/stream.ts` (rotation wrapper), manifest                                                                                                                                                                                                                                               |
-| Poolside         | `extensions/poolside/*` (vendored, MIT, patched for rotation; its npm package ships only a built `dist`)                                                                                                                                                                                                     |
 | Shared transport | `packages/ai/src/transports/openai-completions-transport.ts` (rotation on the openai-completions transport)                                                                                                                                                                                                  |
 
 Tests that pin this: `extensions/*/` rotation tests, `src/agents/api-key-rotation.test.ts`,
@@ -152,6 +151,9 @@ context-output-budget resolution.
 - `extensions/signal/api.ts`: redundant static monitor/probe exports removed.
 
 ## Dropped
+
+- **Poolside provider** (`extensions/poolside`, vendored): removed. poolside.ai ended its LLM activity on
+  2026-11-01. Its two bundled-plugin guardrail failures (naming, categories) went with it.
 
 - **Custom VNC page / `desktop.observeLocal` bridge** (dropped at the 2026.11.3 sync):
   upstream's Desktop lab (`desktop.host.enabled=true`, `src/gateway/desktop/host-source.ts`)

@@ -1,5 +1,5 @@
 {
-  "name": "@sctg/vibe-provider",
+  "name": "@openclaw/vibe-provider",
   "version": "2026.11.3",
   "description": "Mistral Vibe provider for OpenClaw: Vibe API keys against api.mistral.ai with per-key rotation (fork-only).",
   "license": "MIT",
