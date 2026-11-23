@@ -125,6 +125,15 @@ model resolution in 2026.11. Keep `extensions/vibe/openclaw.plugin.json` in step
 `extensions/mistral/openclaw.plugin.json` (`providerRequest`, `providerEndpoints`) and add `vibe` to the
 `OPENCLAW_EXTENSIONS` default in the parent `Dockerfile`. Tests: `extensions/vibe/vibe.test.ts`.
 
+**Key rotation on a used-up budget.** Each Vibe key has its own budget and answers `402 Vibe budget exhausted.` when it
+is spent. The generic rotation wrapper only moves to the next key on rate-limit errors, and the failover classifier does
+not recognise that message (it classifies as `null`), so the pool never rotated: a call failed with "billing error" while
+the other keys were healthy. `createStreamApiKeyRotationWrapper(provider, { isKeyFailure, cooldownMs })`
+(`src/agents/api-key-rotation.ts`, an optional second argument: other providers are unchanged) lets a provider declare
+its own key-failure wording, and tries a failed key last for `cooldownMs` so later calls do not pay one failed request per
+spent key. `extensions/vibe` passes `isVibeKeyExhaustedError` (402, "budget exhausted", billing wording) and 10 minutes.
+Tests: `src/agents/api-key-rotation.test.ts`, `extensions/vibe/vibe.test.ts`. On a sync, keep that optional argument.
+
 ### Pool env vars are split, not passed whole
 
 `src/agents/live-auth-keys.ts` (`collectProviderApiKeys`): a manifest-declared `*_API_KEYS` variable is split

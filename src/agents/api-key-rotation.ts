@@ -135,6 +135,50 @@ export async function executeWithApiKeyRotation<T>(
   throw toLintErrorObject(lastError, "Non-Error thrown");
 }
 
+export type StreamKeyRotationOptions = {
+  /**
+   * Provider-specific wording that also means "this key cannot serve requests" (for example a per-key budget that is
+   * used up and answers 402). Rate-limit errors always rotate; anything else does not unless this accepts it.
+   */
+  isKeyFailure?: (message: string) => boolean;
+  /**
+   * A key that failed rotatably is tried after the healthy ones for this long (milliseconds). Without it every call
+   * walks the pool from its first key and pays one failed request per exhausted key. Default: no memory.
+   */
+  cooldownMs?: number;
+};
+
+// provider -> key -> time (ms) until which the key is tried last. In memory only: a restart forgets it, which costs
+// one failed request per exhausted key, never a wrong answer.
+const keyCooldowns = new Map<string, Map<string, number>>();
+
+/** Healthy keys first, keys still cooling down after them (never dropped: if all are cooling, all are tried). */
+function orderByCooldown(
+  provider: string,
+  keys: string[],
+  cooldownMs: number | undefined,
+): string[] {
+  const cooling = keyCooldowns.get(provider);
+  if (!cooldownMs || !cooling?.size) {
+    return keys;
+  }
+  const now = Date.now();
+  const isCooling = (key: string) => (cooling.get(key) ?? 0) > now;
+  return [...keys.filter((key) => !isCooling(key)), ...keys.filter(isCooling)];
+}
+
+function markCooling(provider: string, key: string, cooldownMs: number | undefined): void {
+  if (!cooldownMs) {
+    return;
+  }
+  let cooling = keyCooldowns.get(provider);
+  if (!cooling) {
+    cooling = new Map();
+    keyCooldowns.set(provider, cooling);
+  }
+  cooling.set(key, Date.now() + cooldownMs);
+}
+
 /**
  * Wraps a streaming provider's `StreamFn` so it rotates through a configured
  * API-key pool when the very first stream event is a rate-limit error, i.e.
@@ -146,13 +190,21 @@ export async function executeWithApiKeyRotation<T>(
  */
 export function createStreamApiKeyRotationWrapper(
   provider: string,
+  options: StreamKeyRotationOptions = {},
 ): (streamFn: StreamFn | undefined) => StreamFn | undefined {
   return (streamFn) => {
     if (!streamFn) {
       return undefined;
     }
-    return (model, context, options) =>
-      runStreamWithApiKeyRotation({ provider, streamFn, model, context, options });
+    return (model, context, callOptions) =>
+      runStreamWithApiKeyRotation({
+        provider,
+        streamFn,
+        model,
+        context,
+        options: callOptions,
+        rotation: options,
+      });
   };
 }
 
@@ -162,14 +214,19 @@ async function runStreamWithApiKeyRotation(params: {
   model: Model;
   context: Context;
   options?: Parameters<StreamFn>[2];
+  rotation: StreamKeyRotationOptions;
 }): Promise<AssistantMessageEventStreamLike> {
   const primaryApiKey = params.options?.apiKey;
-  const apiKeys = rotateKeysForAggressiveMode(
+  const apiKeys = orderByCooldown(
     params.provider,
-    collectProviderApiKeysForExecution({
-      provider: params.provider,
-      primaryApiKey,
-    }),
+    rotateKeysForAggressiveMode(
+      params.provider,
+      collectProviderApiKeysForExecution({
+        provider: params.provider,
+        primaryApiKey,
+      }),
+    ),
+    params.rotation.cooldownMs,
   );
   if (apiKeys.length <= 1) {
     return params.streamFn(params.model, params.context, params.options);
@@ -192,8 +249,12 @@ async function runStreamWithApiKeyRotation(params: {
     const isRotatableFailure =
       firstEvent.type === "error" &&
       firstEvent.reason === "error" &&
-      isApiKeyRateLimitError(firstEvent.error.errorMessage ?? "");
+      (isApiKeyRateLimitError(firstEvent.error.errorMessage ?? "") ||
+        (params.rotation.isKeyFailure?.(firstEvent.error.errorMessage ?? "") ?? false));
     const hasRemainingKeys = index + 1 < apiKeys.length;
+    if (isRotatableFailure) {
+      markCooling(params.provider, apiKey, params.rotation.cooldownMs);
+    }
     if (isRotatableFailure && hasRemainingKeys) {
       continue;
     }

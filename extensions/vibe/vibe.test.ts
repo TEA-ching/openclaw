@@ -8,6 +8,7 @@ import {
   VIBE_BASE_URL,
   VIBE_DEFAULT_MODEL_REF,
 } from "./api.js";
+import { isVibeKeyExhaustedError } from "./api.js";
 import vibePlugin from "./index.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
 import { VIBE_CLI_FAST_ID, VIBE_CLI_LATEST_ID } from "./provider-policy-api.js";
@@ -143,5 +144,20 @@ describe("VIBE_API_KEYS rotation pool", () => {
       "v2",
       "v1",
     ]);
+  });
+});
+
+describe("vibe key exhaustion", () => {
+  it("recognises a used-up key budget so the pool moves to the next key", () => {
+    expect(isVibeKeyExhaustedError("402 Vibe budget exhausted.")).toBe(true);
+    expect(isVibeKeyExhaustedError("HTTP 402 Payment Required")).toBe(true);
+    expect(isVibeKeyExhaustedError("vibe returned a billing error")).toBe(true);
+    expect(isVibeKeyExhaustedError("budget_exhausted")).toBe(true);
+  });
+
+  it("leaves unrelated errors to the normal handling", () => {
+    expect(isVibeKeyExhaustedError("invalid request: bad model id")).toBe(false);
+    expect(isVibeKeyExhaustedError("max 4020 tokens exceeded")).toBe(false);
+    expect(isVibeKeyExhaustedError("500 internal error")).toBe(false);
   });
 });

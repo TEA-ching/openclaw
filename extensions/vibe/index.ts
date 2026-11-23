@@ -1,6 +1,6 @@
 import { createStreamApiKeyRotationWrapper } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { defineSingleProviderPluginEntry } from "openclaw/plugin-sdk/provider-entry";
-import { applyVibeModelCompat } from "./api.js";
+import { applyVibeModelCompat, isVibeKeyExhaustedError, VIBE_KEY_COOLDOWN_MS } from "./api.js";
 import { applyVibeConnectionConfig } from "./onboard.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
 import { resolveThinkingProfile } from "./provider-policy-api.js";
@@ -11,6 +11,10 @@ import { resolveThinkingProfile } from "./provider-policy-api.js";
 // behaviour but keeps its own id, so VIBE_API_KEYS is rotated independently of MISTRAL_API_KEYS.
 // It replaces routing Vibe through the ACP harness (acp-vibe) for scheduled jobs.
 const PROVIDER_ID = "vibe";
+const VIBE_KEY_ROTATION = {
+  isKeyFailure: isVibeKeyExhaustedError,
+  cooldownMs: VIBE_KEY_COOLDOWN_MS,
+};
 export default defineSingleProviderPluginEntry({
   id: PROVIDER_ID,
   name: "Mistral Vibe Provider",
@@ -33,8 +37,9 @@ export default defineSingleProviderPluginEntry({
       sanitizeToolCallIds: true,
       toolCallIdMode: "strict9",
     }),
-    wrapStreamFn: (ctx) => createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn),
+    wrapStreamFn: (ctx) =>
+      createStreamApiKeyRotationWrapper(PROVIDER_ID, VIBE_KEY_ROTATION)(ctx.streamFn),
     wrapSimpleCompletionStreamFn: (ctx) =>
-      createStreamApiKeyRotationWrapper(PROVIDER_ID)(ctx.streamFn),
+      createStreamApiKeyRotationWrapper(PROVIDER_ID, VIBE_KEY_ROTATION)(ctx.streamFn),
   },
 });

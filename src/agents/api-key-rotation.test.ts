@@ -591,6 +591,94 @@ describe("createStreamApiKeyRotationWrapper", () => {
     expect(streamFn).toHaveBeenCalledTimes(1);
   });
 
+  it("rotates on a provider-specific key failure when the provider says so", async () => {
+    vi.stubEnv("ACME_BUDGET_API_KEYS", "key-1,key-2");
+    const streamFn = vi.fn<StreamFn>(async (_model, _context, options) =>
+      options?.apiKey === "key-1"
+        ? fakeEventStream([
+            {
+              type: "error",
+              reason: "error",
+              error: fakeAssistantMessage({ errorMessage: "402 budget exhausted." }),
+            },
+          ])
+        : fakeEventStream([
+            { type: "start", partial: fakeAssistantMessage() },
+            { type: "done", reason: "stop", message: fakeAssistantMessage() },
+          ]),
+    );
+
+    const wrapped = createStreamApiKeyRotationWrapper("acme-budget", {
+      isKeyFailure: (message) => /budget exhausted/i.test(message),
+    })(streamFn);
+    const stream = await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" });
+
+    await expect(collectEventTypes(stream!)).resolves.toEqual(["start", "done"]);
+    expect(streamFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("tries a key that just failed last, for the cooldown, then first again", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-23T10:00:00Z"));
+    try {
+      vi.stubEnv("ACME_COOL_API_KEYS", "key-1,key-2,key-3");
+      const seen: string[] = [];
+      const streamFn = vi.fn<StreamFn>(async (_model, _context, options) => {
+        seen.push(options?.apiKey ?? "");
+        return options?.apiKey === "key-1"
+          ? fakeEventStream([
+              {
+                type: "error",
+                reason: "error",
+                error: fakeAssistantMessage({ errorMessage: "402 budget exhausted." }),
+              },
+            ])
+          : fakeEventStream([
+              { type: "start", partial: fakeAssistantMessage() },
+              { type: "done", reason: "stop", message: fakeAssistantMessage() },
+            ]);
+      });
+      const wrapped = createStreamApiKeyRotationWrapper("acme-cool", {
+        isKeyFailure: (message) => /budget exhausted/i.test(message),
+        cooldownMs: 60_000,
+      })(streamFn);
+      const run = async () =>
+        collectEventTypes((await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" }))!);
+
+      await run(); // key-1 fails, key-2 serves
+      await run(); // key-1 is cooling: key-2 serves at once
+      expect(seen).toEqual(["key-1", "key-2", "key-2"]);
+
+      vi.setSystemTime(new Date("2026-11-23T10:02:00Z"));
+      await run(); // the cooldown is over: key-1 is tried first again
+      expect(seen.slice(3)).toEqual(["key-1", "key-2"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still tries every key when all of them are cooling down", async () => {
+    vi.stubEnv("ACME_ALLCOOL_API_KEYS", "key-1,key-2");
+    const streamFn = vi.fn<StreamFn>(async () =>
+      fakeEventStream([
+        {
+          type: "error",
+          reason: "error",
+          error: fakeAssistantMessage({ errorMessage: "402 budget exhausted." }),
+        },
+      ]),
+    );
+    const wrapped = createStreamApiKeyRotationWrapper("acme-allcool", {
+      isKeyFailure: (message) => /budget exhausted/i.test(message),
+      cooldownMs: 60_000,
+    })(streamFn);
+    const run = async () =>
+      collectEventTypes((await wrapped?.({} as never, { messages: [] }, { apiKey: "key-1" }))!);
+    await expect(run()).resolves.toEqual(["error"]);
+    await expect(run()).resolves.toEqual(["error"]);
+    expect(streamFn).toHaveBeenCalledTimes(4); // two keys per call, both calls
+  });
+
   it("does not rotate a non-rate-limit error", async () => {
     vi.stubEnv("ACME_BADREQ_API_KEYS", "key-1,key-2");
     const streamFn = vi.fn<StreamFn>(async () =>
